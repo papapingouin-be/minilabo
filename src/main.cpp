@@ -53,21 +53,36 @@ static bool initOled() {
   // bus was not started.
   Wire.begin(4, 5);  // SDA = GPIO4 (D2), SCL = GPIO5 (D1)
 
-  // Probe the expected I2C address to give feedback when the display is
-  // missing or wired incorrectly.  This makes debugging hardware issues
-  // far easier when only the serial console is available.
-  Wire.beginTransmission(0x3C);
-  if (Wire.endTransmission() != 0) {
-    Serial.println("OLED not detected at 0x3C");
+  // Some modules use address 0x3C while others use 0x3D.  Probe both
+  // addresses and pick the first one that responds.  This avoids false
+  // "not detected" errors when a different address is used or the OLED
+  // is a little slow to power up.
+  uint8_t address = 0x3C;
+  bool found = false;
+  Wire.beginTransmission(address);
+  if (Wire.endTransmission() == 0) {
+    found = true;
+  } else {
+    Wire.beginTransmission(0x3D);
+    if (Wire.endTransmission() == 0) {
+      address = 0x3D;
+      found = true;
+    }
+  }
+
+  if (!found) {
+    Serial.println("OLED not detected on I2C bus");
     oledLogging = false;
     return false;
   }
 
+  // U8G2 expects the 8-bit I2C address (shifted left by one).
+  oled.setI2CAddress(address << 1);
   oled.begin();
   oled.clearBuffer();
   oled.setFont(u8g2_font_5x7_tf);
   oled.sendBuffer();
-  Serial.println("OLED initialised");
+  Serial.printf("OLED initialised at 0x%02X\n", address);
   return true;
 }
 
@@ -270,6 +285,7 @@ static Config config;            // Global configuration instance
 static AsyncWebServer server(80); // HTTP server instance
 static WiFiUDP udp;               // UDP object for broadcasting and listening
 static Adafruit_ADS1115 ads;      // ADS1115 ADC instance
+static String configSetBody;      // buffer for incoming /api/config/set JSON
 
 // Remote value cache.  When a broadcast packet is received from another
 // node, each measurement is stored in this table.  Inputs configured
@@ -589,18 +605,17 @@ void setupWiFi() {
     if (WiFi.status() == WL_CONNECTED) {
       logMessage("WiFi connected");
     } else {
+      // Connection failed.  Start our own AP so the user can reconfigure
+      // the device, but keep the configured STA credentials so that a
+      // reboot will retry connecting to the desired network.
       logMessage("Failed to connect, starting AP");
       WiFi.mode(WIFI_AP);
-      WiFi.softAP(config.nodeId.c_str(), config.wifi.pass.c_str());
-      config.wifi.mode = "AP";
-      config.wifi.ssid = config.nodeId;
-      config.wifi.pass = "";
-      saveConfig();
+      WiFi.softAP(config.nodeId.c_str());
     }
   } else {
     logMessage("Starting in Access Point mode");
     WiFi.mode(WIFI_AP);
-    WiFi.softAP(config.nodeId.c_str(), config.wifi.pass.c_str());
+    WiFi.softAP(config.nodeId.c_str());
   }
   IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
   logPrintf("IP address: %s", ip.toString().c_str());
@@ -919,40 +934,43 @@ void setupServer() {
 
   // API: set configuration.  Expects a JSON body.  After saving
   // configuration a reboot is performed to apply changes.
-  server.on("/api/config/set", HTTP_POST, [](AsyncWebServerRequest *req) {
-    // Some HTTP clients omit the internal "plain" parameter used by
-    // ESPAsyncWebServer, leading to false "missing body" errors.  Fall back to
-    // checking the raw content length and body string.
-    if (req->contentLength() == 0) {
-      logMessage("Config set request missing body");
-      req->send(400, "application/json", "{\"error\":\"No body\"}");
-      return;
-    }
-    String body = req->arg("plain");
-    if (body.length() == 0) {
-      logMessage("Config set request missing body");
-      req->send(400, "application/json", "{\"error\":\"No body\"}");
-      return;
-    }
-    DynamicJsonDocument doc(4096);
-    auto err = deserializeJson(doc, body);
-    if (err) {
-      logPrintf("Config set JSON parse error: %s", err.c_str());
-      req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-      return;
-    }
-    // Update global config from JSON
-    parseConfigFromJson(doc);
-    if (!saveConfig()) {
-      req->send(500, "application/json", "{\"error\":\"Save failed\"}");
-      return;
-    }
-    oledLogging = false;
-    req->send(200, "application/json", "{\"status\":\"ok\"}");
-    // Delay slightly to ensure response is sent before rebooting
-    delay(200);
-    ESP.restart();
-  });
+  server.on(
+      "/api/config/set", HTTP_POST,
+      [](AsyncWebServerRequest *req) {
+        if (configSetBody.length() == 0) {
+          logMessage("Config set request missing body");
+          req->send(400, "application/json", "{\"error\":\"No body\"}");
+          return;
+        }
+        DynamicJsonDocument doc(4096);
+        auto err = deserializeJson(doc, configSetBody);
+        configSetBody = "";
+        if (err) {
+          logPrintf("Config set JSON parse error: %s", err.c_str());
+          req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+          return;
+        }
+        // Update global config from JSON
+        parseConfigFromJson(doc);
+        if (!saveConfig()) {
+          req->send(500, "application/json", "{\"error\":\"Save failed\"}");
+          return;
+        }
+        oledLogging = false;
+        req->send(200, "application/json", "{\"status\":\"ok\"}");
+        // Delay slightly to ensure response is sent before rebooting
+        delay(200);
+        ESP.restart();
+      },
+      NULL,
+      [](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index,
+         size_t total) {
+        if (index == 0) {
+          configSetBody = "";
+          configSetBody.reserve(total);
+        }
+        configSetBody += String((const char *)data, len);
+      });
 
   // API: reboot device on demand
   server.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest *req) {
