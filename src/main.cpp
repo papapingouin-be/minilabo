@@ -24,6 +24,40 @@
 #include <Adafruit_ADS1015.h>
 #include <ESP8266mDNS.h>
 
+// ---------------------------------------------------------------------------
+// Simple logging facility.  Log messages are written to Serial and appended
+// to a file on LittleFS.  The log file is truncated on each boot.  Content
+// can be retrieved over HTTP for display in the UI.
+// ---------------------------------------------------------------------------
+static const char *LOG_PATH = "/log.txt";
+
+static void initLogging() {
+  if (!LittleFS.begin()) {
+    Serial.println("LittleFS mount failed, formatting...");
+    LittleFS.format();
+    LittleFS.begin();
+  }
+  LittleFS.remove(LOG_PATH);
+}
+
+static void logMessage(const String &msg) {
+  Serial.println(msg);
+  File f = LittleFS.open(LOG_PATH, "a");
+  if (f) {
+    f.println(msg);
+    f.close();
+  }
+}
+
+static void logPrintf(const char *fmt, ...) {
+  char buf[256];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+  logMessage(String(buf));
+}
+
 // Maximum number of inputs and outputs supported.  Adjust to suit your
 // application.  Keeping these small reduces memory usage on the ESP8266.
 static const uint8_t MAX_INPUTS  = 4;
@@ -301,19 +335,19 @@ void setDefaultConfig() {
 // LittleFS.  JSON fields missing from the file fall back to defaults.
 void loadConfig() {
   if (!LittleFS.begin()) {
-    Serial.println("LittleFS mount failed, formatting...");
+    logMessage("LittleFS mount failed, formatting...");
     LittleFS.format();
     LittleFS.begin();
   }
   if (!LittleFS.exists("/config.json")) {
-    Serial.println("No config file found, applying defaults");
+    logMessage("No config file found, applying defaults");
     setDefaultConfig();
     saveConfig();
     return;
   }
   File f = LittleFS.open("/config.json", "r");
   if (!f) {
-    Serial.println("Failed to open config file, applying defaults");
+    logMessage("Failed to open config file, applying defaults");
     setDefaultConfig();
     saveConfig();
     return;
@@ -325,13 +359,14 @@ void loadConfig() {
   DynamicJsonDocument doc(4096);
   auto err = deserializeJson(doc, buf.get());
   if (err) {
-    Serial.println("Failed to parse config JSON, applying defaults");
+    logMessage("Failed to parse config JSON, applying defaults");
     setDefaultConfig();
     saveConfig();
     return;
   }
   parseConfigFromJson(doc);
   f.close();
+  logMessage("Configuration loaded");
 }
 
 // Save the current configuration to LittleFS.  If writing fails the
@@ -383,11 +418,12 @@ void saveConfig() {
   // Write file
   File f = LittleFS.open("/config.json", "w");
   if (!f) {
-    Serial.println("Failed to open config for writing");
+    logMessage("Failed to open config for writing");
     return;
   }
   serializeJson(doc, f);
   f.close();
+  logMessage("Configuration saved");
 }
 
 // Parse a configuration from a JSON document.  This helper reads
@@ -473,18 +509,17 @@ void setupWiFi() {
   WiFi.mode(WIFI_OFF);
   delay(100);
   if (config.wifi.mode.equalsIgnoreCase("STA")) {
-    Serial.printf("Connecting to SSID '%s'...\n", config.wifi.ssid.c_str());
+    logPrintf("Connecting to SSID '%s'...", config.wifi.ssid.c_str());
     WiFi.mode(WIFI_STA);
     WiFi.begin(config.wifi.ssid.c_str(), config.wifi.pass.c_str());
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
       delay(200);
-      Serial.print(".");
     }
     if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\nWiFi connected");
+      logMessage("WiFi connected");
     } else {
-      Serial.println("\nFailed to connect, starting AP");
+      logMessage("Failed to connect, starting AP");
       WiFi.mode(WIFI_AP);
       WiFi.softAP(config.nodeId.c_str(), config.wifi.pass.c_str());
       config.wifi.mode = "AP";
@@ -493,15 +528,15 @@ void setupWiFi() {
       saveConfig();
     }
   } else {
-    Serial.println("Starting in Access Point mode");
+    logMessage("Starting in Access Point mode");
     WiFi.mode(WIFI_AP);
     WiFi.softAP(config.nodeId.c_str(), config.wifi.pass.c_str());
   }
   IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
-  Serial.printf("IP address: %s\n", ip.toString().c_str());
+  logPrintf("IP address: %s", ip.toString().c_str());
   // Start mDNS if possible
   if (MDNS.begin(config.nodeId.c_str())) {
-    Serial.println("mDNS responder started");
+    logMessage("mDNS responder started");
     MDNS.addService("http", "tcp", 80);
   }
 }
@@ -908,6 +943,22 @@ void setupServer() {
     req->send(200, "application/json", resp);
   });
 
+  // API: return system logs
+  server.on("/api/logs", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (!LittleFS.exists(LOG_PATH)) {
+      req->send(404, "text/plain", "No log");
+      return;
+    }
+    File f = LittleFS.open(LOG_PATH, "r");
+    if (!f) {
+      req->send(500, "text/plain", "Failed to open log");
+      return;
+    }
+    String content = f.readString();
+    f.close();
+    req->send(200, "text/plain", content);
+  });
+
   // Start the server
   server.begin();
 }
@@ -920,7 +971,8 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   Serial.println();
-  Serial.println("MiniLabBox v2 starting...");
+  initLogging();
+  logMessage("MiniLabBox v2 starting...");
   loadConfig();
   setupWiFi();
   // Start UDP listener
