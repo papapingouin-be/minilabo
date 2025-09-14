@@ -969,7 +969,9 @@ void setupServer() {
           configSetBody = "";
           configSetBody.reserve(total);
         }
-        configSetBody += String((const char *)data, len);
+        for (size_t i = 0; i < len; i++) {
+          configSetBody += static_cast<char>(data[i]);
+        }
       });
 
   // API: reboot device on demand
