@@ -30,8 +30,9 @@ static const char *FIRMWARE_VERSION = "1.0.0";
 
 // ---------------------------------------------------------------------------
 // Simple logging facility.  Log messages are written to Serial and appended
-// to a file on LittleFS.  The log file is truncated on each boot.  Content
-// can be retrieved over HTTP for display in the UI.
+// to a file on LittleFS.  The log file is kept between boots and truncated
+// only when it grows beyond a configured limit.  Content can be retrieved over
+// HTTP for display in the UI.
 // ---------------------------------------------------------------------------
 static const char *LOG_PATH = "/log.txt";
 
@@ -42,8 +43,6 @@ static const char *LOG_PATH = "/log.txt";
 // the screen for application use.
 // ---------------------------------------------------------------------------
 static U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
-static const uint8_t OLED_MAX_LINES = 8;
-static String oledLines[OLED_MAX_LINES];
 static bool oledLogging = true;
 
 static void initOled() {
@@ -59,16 +58,16 @@ static void initOled() {
 
 static void oledLog(const String &msg) {
   if (!oledLogging) return;
-  for (uint8_t i = 0; i < OLED_MAX_LINES - 1; i++) {
-    oledLines[i] = oledLines[i + 1];
-  }
-  oledLines[OLED_MAX_LINES - 1] = msg;
   oled.clearBuffer();
-  for (uint8_t i = 0; i < OLED_MAX_LINES; i++) {
-    oled.drawStr(0, (i + 1) * 8, oledLines[i].c_str());
+  String shortMsg = msg;
+  if (shortMsg.length() > 21) {
+    shortMsg.remove(21);
   }
+  oled.drawStr(0, 8, shortMsg.c_str());
   oled.sendBuffer();
 }
+
+static const size_t MAX_LOG_FILE_SIZE = 16 * 1024;  // 16 KB
 
 static void initLogging() {
   if (!LittleFS.begin()) {
@@ -76,13 +75,24 @@ static void initLogging() {
     LittleFS.format();
     LittleFS.begin();
   }
-  LittleFS.remove(LOG_PATH);
+  if (LittleFS.exists(LOG_PATH)) {
+    File f = LittleFS.open(LOG_PATH, "r");
+    if (f && f.size() > MAX_LOG_FILE_SIZE) {
+      f.close();
+      LittleFS.remove(LOG_PATH);
+    } else if (f) {
+      f.close();
+    }
+  }
 }
 
 static void logMessage(const String &msg) {
   Serial.println(msg);
   File f = LittleFS.open(LOG_PATH, "a");
   if (f) {
+    f.print('[');
+    f.print(millis());
+    f.print("] ");
     f.println(msg);
     f.close();
   }
