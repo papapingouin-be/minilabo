@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>MiniLabBox</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 1em; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 1em; }
+    th, td { border: 1px solid #ccc; padding: 0.3em 0.5em; text-align: left; }
+    tr:nth-child(even) { background-color: #f8f8f8; }
+    h1 { margin-top: 0; }
+    a { color: #0066cc; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+<h1>MiniLabBox Node</h1>
+<p>Identifiant du nœud : <strong><span id="nodeId"></span></strong></p>
+
+<h2>Entrées</h2>
+<table id="inputsTable">
+  <thead>
+    <tr><th>Nom</th><th>Valeur</th><th>Unité</th></tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<h2>Sorties</h2>
+<table id="outputsTable">
+  <thead>
+    <tr><th>Nom</th><th>Valeur</th><th>Définir</th></tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<p>
+  <a href="config.html">Configurer le système</a> |
+  <a href="example.html">Exemple de mesure de puissance</a>
+</p>
+
+<script>
+// Récupère la configuration pour afficher l'identifiant du nœud
+async function loadConfig() {
+  try {
+    const resp = await fetch('/api/config/get');
+    if (!resp.ok) return;
+    const cfg = await resp.json();
+    document.getElementById('nodeId').innerText = cfg.nodeId || '';
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+// Rafraîchit les valeurs des entrées et sorties
+async function loadValues() {
+  try {
+    const inResp = await fetch('/api/inputs');
+    const inputs = await inResp.json();
+    const inputsTBody = document.querySelector('#inputsTable tbody');
+    inputsTBody.innerHTML = '';
+    Object.keys(inputs).forEach(name => {
+      const tr = document.createElement('tr');
+      const tdName = document.createElement('td');
+      tdName.textContent = name;
+      const tdVal = document.createElement('td');
+      const val = inputs[name];
+      if (val === null || isNaN(val)) tdVal.textContent = '—';
+      else tdVal.textContent = Number(val).toFixed(3);
+      const tdUnit = document.createElement('td');
+      tdUnit.textContent = '';
+      tr.appendChild(tdName);
+      tr.appendChild(tdVal);
+      tr.appendChild(tdUnit);
+      inputsTBody.appendChild(tr);
+    });
+    const outResp = await fetch('/api/outputs');
+    const outputs = await outResp.json();
+    const outputsTBody = document.querySelector('#outputsTable tbody');
+    outputsTBody.innerHTML = '';
+    Object.keys(outputs).forEach(name => {
+      const tr = document.createElement('tr');
+      const tdName = document.createElement('td');
+      tdName.textContent = name;
+      const tdVal = document.createElement('td');
+      const val = outputs[name];
+      if (val === null || isNaN(val)) tdVal.textContent = '—';
+      else tdVal.textContent = Number(val).toFixed(3);
+      const tdSet = document.createElement('td');
+      const inp = document.createElement('input');
+      inp.type = 'number';
+      inp.step = '0.1';
+      inp.value = val;
+      inp.id = 'out_' + name;
+      inp.addEventListener('change', () => setOutput(name, parseFloat(inp.value)));
+      tdSet.appendChild(inp);
+      tr.appendChild(tdName);
+      tr.appendChild(tdVal);
+      tr.appendChild(tdSet);
+      outputsTBody.appendChild(tr);
+    });
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+// Envoie une nouvelle valeur pour une sortie
+function setOutput(name, value) {
+  fetch('/api/output/set', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name, value: value })
+  }).catch(err => console.error(err));
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  loadConfig();
+  loadValues();
+  setInterval(loadValues, 1000);
+});
+</script>
+</body>
+</html>
