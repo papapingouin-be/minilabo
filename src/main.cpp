@@ -262,7 +262,7 @@ static uint32_t lastBroadcastUpdate = 0;
 
 // Forward declarations
 void loadConfig();
-void saveConfig();
+bool saveConfig();
 void setDefaultConfig();
 void setupWiFi();
 void setupSensors();
@@ -407,8 +407,8 @@ void loadConfig() {
 
 // Save the current configuration to LittleFS.  If writing fails the
 // operation is silently ignored.  Always call saveConfig() after
-// modifying the global config.
-void saveConfig() {
+// modifying the global config.  Returns true on success.
+bool saveConfig() {
   DynamicJsonDocument doc(4096);
   // Populate JSON document
   doc["nodeId"] = config.nodeId;
@@ -455,11 +455,16 @@ void saveConfig() {
   File f = LittleFS.open("/config.json", "w");
   if (!f) {
     logMessage("Failed to open config for writing");
-    return;
+    return false;
   }
-  serializeJson(doc, f);
+  if (serializeJson(doc, f) == 0) {
+    logMessage("Failed to write config JSON");
+    f.close();
+    return false;
+  }
   f.close();
   logMessage("Configuration saved");
+  return true;
 }
 
 // Parse a configuration from a JSON document.  This helper reads
@@ -887,6 +892,7 @@ void setupServer() {
   // configuration a reboot is performed to apply changes.
   server.on("/api/config/set", HTTP_POST, [](AsyncWebServerRequest *req) {
     if (!req->hasParam("plain", true)) {
+      logMessage("Config set request missing body");
       req->send(400, "application/json", "{\"error\":\"No body\"}");
       return;
     }
@@ -894,12 +900,16 @@ void setupServer() {
     DynamicJsonDocument doc(4096);
     auto err = deserializeJson(doc, body);
     if (err) {
+      logPrintf("Config set JSON parse error: %s", err.c_str());
       req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
       return;
     }
     // Update global config from JSON
     parseConfigFromJson(doc);
-    saveConfig();
+    if (!saveConfig()) {
+      req->send(500, "application/json", "{\"error\":\"Save failed\"}");
+      return;
+    }
     oledLogging = false;
     req->send(200, "application/json", "{\"status\":\"ok\"}");
     // Delay slightly to ensure response is sent before rebooting
