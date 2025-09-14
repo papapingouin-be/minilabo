@@ -24,6 +24,9 @@
 #include <Adafruit_ADS1015.h>
 #include <ESP8266mDNS.h>
 #include <U8g2lib.h>
+#include <Update.h>
+
+static const char *FIRMWARE_VERSION = "1.0.0";
 
 // ---------------------------------------------------------------------------
 // Simple logging facility.  Log messages are written to Serial and appended
@@ -835,6 +838,7 @@ void setupServer() {
   server.on("/api/config/get", HTTP_GET, [](AsyncWebServerRequest *req) {
     DynamicJsonDocument doc(2048);
     doc["nodeId"] = config.nodeId;
+    doc["fwVersion"] = FIRMWARE_VERSION;
     JsonObject wifiObj = doc.createNestedObject("wifi");
     wifiObj["mode"] = config.wifi.mode;
     wifiObj["ssid"] = config.wifi.ssid;
@@ -902,6 +906,46 @@ void setupServer() {
     delay(200);
     ESP.restart();
   });
+
+  // API: reboot device on demand
+  server.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest *req) {
+    req->send(200, "application/json", "{\"status\":\"ok\"}");
+    delay(200);
+    ESP.restart();
+  });
+
+  // API: OTA firmware update
+  server.on(
+      "/api/ota", HTTP_POST,
+      [](AsyncWebServerRequest *req) {
+        bool success = !Update.hasError();
+        req->send(success ? 200 : 500, "application/json",
+                  success ? "{\"status\":\"ok\"}"
+                          : "{\"status\":\"fail\"}");
+        if (success) {
+          delay(200);
+          ESP.restart();
+        }
+      },
+      [](AsyncWebServerRequest *req, String filename, size_t index,
+         uint8_t *data, size_t len, bool final) {
+        if (!index) {
+          logPrintf("OTA update: %s", filename.c_str());
+          if (!Update.begin((ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000)) {
+            Update.printError(Serial);
+          }
+        }
+        if (Update.write(data, len) != len) {
+          Update.printError(Serial);
+        }
+        if (final) {
+          if (Update.end(true)) {
+            logMessage("Update successful");
+          } else {
+            Update.printError(Serial);
+          }
+        }
+      });
 
   // API: return current input values
   server.on("/api/inputs", HTTP_GET, [](AsyncWebServerRequest *req) {

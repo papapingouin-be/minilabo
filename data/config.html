@@ -75,6 +75,15 @@
     </table>
   </fieldset>
 
+  <fieldset>
+    <legend>Firmware</legend>
+    Version actuelle : <span id="fwVersion">?</span><br><br>
+    <input type="file" id="fwFile">
+    <button type="button" id="fwUploadBtn">Mettre à jour</button>
+    <button type="button" id="rebootBtn">Redémarrer</button>
+    <span id="fwStatus" style="margin-left:1em;"></span>
+  </fieldset>
+
   <button id="saveBtn">Enregistrer et redémarrer</button>
   <span id="status" style="margin-left:1em;"></span>
 </form>
@@ -242,6 +251,7 @@ async function loadConfig() {
   document.getElementById('wifiMode').value = cfg.wifi.mode || 'AP';
   document.getElementById('ssid').value = cfg.wifi.ssid || '';
   document.getElementById('pass').value = cfg.wifi.pass || '';
+  document.getElementById('fwVersion').textContent = cfg.fwVersion || 'inconnue';
   document.getElementById('modAds').checked = cfg.modules.ads1115;
   document.getElementById('modPwm').checked = cfg.modules.pwm010;
   document.getElementById('modZmpt').checked = cfg.modules.zmpt;
@@ -412,6 +422,26 @@ window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('saveBtn').addEventListener('click', () => {
     document.getElementById('status').textContent = 'Sauvegarde...';
     saveConfig();
+  });
+  document.getElementById('rebootBtn').addEventListener('click', () => {
+    document.getElementById('fwStatus').textContent = 'Redémarrage...';
+    fetch('/api/reboot', {method: 'POST'});
+  });
+  document.getElementById('fwUploadBtn').addEventListener('click', async () => {
+    const file = document.getElementById('fwFile').files[0];
+    const st = document.getElementById('fwStatus');
+    if (!file) { st.textContent = 'Choisir un fichier'; return; }
+    st.textContent = 'Téléversement...';
+    try {
+      const resp = await fetch('/api/ota', {method: 'POST', body: file});
+      if (resp.ok) {
+        st.textContent = 'Mise à jour envoyée, redémarrage...';
+      } else {
+        st.textContent = 'Échec de la mise à jour';
+      }
+    } catch (err) {
+      st.textContent = 'Erreur de mise à jour';
+    }
   });
 });
 </script>
