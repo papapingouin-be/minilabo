@@ -47,6 +47,10 @@ static String oledLines[OLED_MAX_LINES];
 static bool oledLogging = true;
 
 static void initOled() {
+  // Ensure the I2C bus is initialised before interacting with the OLED.
+  // Some libraries implicitly call Wire.begin(), but doing it explicitly
+  // here avoids a blank display on boards where it is not started yet.
+  Wire.begin();
   oled.begin();
   oled.clearBuffer();
   oled.setFont(u8g2_font_5x7_tf);
