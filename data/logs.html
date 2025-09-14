@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>Logs MiniLabBox</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 1em; }
+    pre { background: #f0f0f0; padding: 1em; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+<h1>Logs du système</h1>
+<pre id="log">Chargement...</pre>
+<script>
+async function loadLogs() {
+  try {
+    const resp = await fetch('/api/logs');
+    if (!resp.ok) {
+      document.getElementById('log').textContent = 'Impossible de charger les logs';
+      return;
+    }
+    const text = await resp.text();
+    document.getElementById('log').textContent = text;
+  } catch (err) {
+    document.getElementById('log').textContent = 'Erreur de chargement';
+  }
+}
+window.addEventListener('DOMContentLoaded', loadLogs);
+</script>
+</body>
+</html>
