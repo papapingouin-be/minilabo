@@ -920,12 +920,20 @@ void setupServer() {
   // API: set configuration.  Expects a JSON body.  After saving
   // configuration a reboot is performed to apply changes.
   server.on("/api/config/set", HTTP_POST, [](AsyncWebServerRequest *req) {
-    if (!req->hasParam("plain", true)) {
+    // Some HTTP clients omit the internal "plain" parameter used by
+    // ESPAsyncWebServer, leading to false "missing body" errors.  Fall back to
+    // checking the raw content length and body string.
+    if (req->contentLength() == 0) {
       logMessage("Config set request missing body");
       req->send(400, "application/json", "{\"error\":\"No body\"}");
       return;
     }
-    String body = req->getParam("plain", true)->value();
+    String body = req->arg("plain");
+    if (body.length() == 0) {
+      logMessage("Config set request missing body");
+      req->send(400, "application/json", "{\"error\":\"No body\"}");
+      return;
+    }
     DynamicJsonDocument doc(4096);
     auto err = deserializeJson(doc, body);
     if (err) {
@@ -1018,11 +1026,15 @@ void setupServer() {
 
   // API: set an output value.  Expects JSON {"name":"output1","value":x}
   server.on("/api/output/set", HTTP_POST, [](AsyncWebServerRequest *req) {
-    if (!req->hasParam("plain", true)) {
+    if (req->contentLength() == 0) {
       req->send(400, "application/json", "{\"error\":\"No body\"}");
       return;
     }
-    String body = req->getParam("plain", true)->value();
+    String body = req->arg("plain");
+    if (body.length() == 0) {
+      req->send(400, "application/json", "{\"error\":\"No body\"}");
+      return;
+    }
     DynamicJsonDocument doc(512);
     auto err = deserializeJson(doc, body);
     if (err) {
