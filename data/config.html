@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>Configuration MiniLabBox</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 1em; }
+    h1 { margin-top: 0; }
+    fieldset { border: 1px solid #ccc; padding: 1em; margin-bottom: 1em; }
+    legend { font-weight: bold; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.5em; }
+    th, td { border: 1px solid #ccc; padding: 0.3em 0.5em; }
+    tr:nth-child(even) { background-color: #f8f8f8; }
+    input[type="number"] { width: 80px; }
+    input[type="text"] { width: 120px; }
+    select { width: 120px; }
+    .small { width: 60px; }
+    .hidden { display: none; }
+    label.inline { display: inline-block; margin-right: 0.5em; }
+    button { padding: 0.5em 1em; font-size: 1em; }
+  </style>
+</head>
+<body>
+<h1>Configuration MiniLabBox</h1>
+
+<form id="configForm" onsubmit="return false;">
+  <fieldset>
+    <legend>Identifiant et Réseau</legend>
+    <label class="inline" for="nodeId">Identifiant du nœud :</label>
+    <input type="text" id="nodeId" name="nodeId">
+    <br><br>
+    <label class="inline" for="wifiMode">Mode Wi-Fi :</label>
+    <select id="wifiMode" name="wifiMode">
+      <option value="AP">Point d'accès (AP)</option>
+      <option value="STA">Client (STA)</option>
+    </select>
+    <br><br>
+    <div id="staConfig">
+      <label class="inline" for="ssid">SSID :</label>
+      <input type="text" id="ssid" name="ssid">
+      <label class="inline" for="pass">Mot de passe :</label>
+      <input type="text" id="pass" name="pass">
+    </div>
+    <div id="apInfo" class="hidden">
+      Ce nœud diffusera son propre réseau Wi-Fi avec l'ID ci-dessus comme SSID.
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Modules optionnels</legend>
+    <label><input type="checkbox" id="modAds"> ADC externe ADS1115</label><br>
+    <label><input type="checkbox" id="modPwm"> Convertisseur PWM → 0–10 V</label><br>
+    <label><input type="checkbox" id="modZmpt"> Capteur de tension AC (ZMPT101B)</label><br>
+    <label><input type="checkbox" id="modZmct"> Capteur de courant AC (ZMCT103C)</label><br>
+    <label><input type="checkbox" id="modDiv"> Pont diviseur DC</label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Entrées</legend>
+    <table id="inputsTable">
+      <thead>
+        <tr><th>Actif</th><th>Nom</th><th>Type</th><th>Paramètres</th><th>Échelle</th><th>Décalage</th><th>Unité</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </fieldset>
+
+  <fieldset>
+    <legend>Sorties</legend>
+    <table id="outputsTable">
+      <thead>
+        <tr><th>Actif</th><th>Nom</th><th>Type</th><th>Paramètres</th><th>Gain</th><th>Décalage</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </fieldset>
+
+  <button id="saveBtn">Enregistrer et redémarrer</button>
+  <span id="status" style="margin-left:1em;"></span>
+</form>
+
+<script>
+const MAX_INPUTS = 4;
+const MAX_OUTPUTS = 2;
+
+// Create rows for inputs and outputs based on constants
+function buildTables() {
+  const inTBody = document.querySelector('#inputsTable tbody');
+  const outTBody = document.querySelector('#outputsTable tbody');
+  for (let i = 0; i < MAX_INPUTS; i++) {
+    const tr = document.createElement('tr');
+    tr.dataset.idx = i;
+    // Active checkbox
+    const tdActive = document.createElement('td');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'in-active';
+    tdActive.appendChild(cb);
+    tr.appendChild(tdActive);
+    // Name
+    const tdName = document.createElement('td');
+    const inpName = document.createElement('input');
+    inpName.type = 'text';
+    inpName.className = 'in-name';
+    inpName.placeholder = 'IN' + (i+1);
+    tdName.appendChild(inpName);
+    tr.appendChild(tdName);
+    // Type
+    const tdType = document.createElement('td');
+    const sel = document.createElement('select');
+    sel.className = 'in-type';
+    ['disabled','adc','ads1115','remote','zmpt','zmct','div'].forEach(opt => {
+      const o = document.createElement('option');
+      o.value = opt;
+      o.textContent = opt;
+      sel.appendChild(o);
+    });
+    tdType.appendChild(sel);
+    tr.appendChild(tdType);
+    // Params
+    const tdParam = document.createElement('td');
+    tdParam.className = 'in-param';
+    tdParam.innerHTML = '';
+    tr.appendChild(tdParam);
+    // Scale
+    const tdScale = document.createElement('td');
+    const inpScale = document.createElement('input');
+    inpScale.type = 'number'; inpScale.step = 'any'; inpScale.className = 'in-scale'; inpScale.value = '1';
+    tdScale.appendChild(inpScale);
+    tr.appendChild(tdScale);
+    // Offset
+    const tdOff = document.createElement('td');
+    const inpOff = document.createElement('input');
+    inpOff.type = 'number'; inpOff.step = 'any'; inpOff.className = 'in-offset'; inpOff.value = '0';
+    tdOff.appendChild(inpOff);
+    tr.appendChild(tdOff);
+    // Unit
+    const tdUnit = document.createElement('td');
+    const inpUnit = document.createElement('input');
+    inpUnit.type = 'text'; inpUnit.className = 'in-unit';
+    tdUnit.appendChild(inpUnit);
+    tr.appendChild(tdUnit);
+    inTBody.appendChild(tr);
+  }
+  for (let i = 0; i < MAX_OUTPUTS; i++) {
+    const tr = document.createElement('tr');
+    tr.dataset.idx = i;
+    const tdActive = document.createElement('td');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.className = 'out-active';
+    tdActive.appendChild(cb);
+    tr.appendChild(tdActive);
+    const tdName = document.createElement('td');
+    const inpName = document.createElement('input');
+    inpName.type = 'text'; inpName.className = 'out-name'; inpName.placeholder = 'OUT' + (i+1);
+    tdName.appendChild(inpName);
+    tr.appendChild(tdName);
+    const tdType = document.createElement('td');
+    const sel = document.createElement('select'); sel.className = 'out-type';
+    ['disabled','pwm010','gpio'].forEach(opt => {
+      const o = document.createElement('option'); o.value = opt; o.textContent = opt;
+      sel.appendChild(o);
+    });
+    tdType.appendChild(sel);
+    tr.appendChild(tdType);
+    const tdParam = document.createElement('td'); tdParam.className = 'out-param'; tr.appendChild(tdParam);
+    const tdScale = document.createElement('td');
+    const inpScale = document.createElement('input'); inpScale.type='number'; inpScale.step='any'; inpScale.className='out-scale'; inpScale.value='1';
+    tdScale.appendChild(inpScale);
+    tr.appendChild(tdScale);
+    const tdOff = document.createElement('td');
+    const inpOff = document.createElement('input'); inpOff.type='number'; inpOff.step='any'; inpOff.className='out-offset'; inpOff.value='0';
+    tdOff.appendChild(inpOff);
+    tr.appendChild(tdOff);
+    outTBody.appendChild(tr);
+  }
+}
+
+// Update param cell based on selected type
+function updateInputParam(row) {
+  const type = row.querySelector('.in-type').value;
+  const paramCell = row.querySelector('.in-param');
+  paramCell.innerHTML = '';
+  if (type === 'adc') {
+    const selPin = document.createElement('select');
+    selPin.className = 'param-pin';
+    ['A0'].concat(['D0','D1','D2','D3','D4','D5','D6','D7','D8']).forEach(p => {
+      const o = document.createElement('option'); o.value = p; o.textContent = p; selPin.appendChild(o);
+    });
+    paramCell.appendChild(document.createTextNode('Pin :'));
+    paramCell.appendChild(selPin);
+  } else if (type === 'ads1115') {
+    const selCh = document.createElement('select'); selCh.className = 'param-ads';
+    [0,1,2,3].forEach(n => {
+      const o = document.createElement('option'); o.value = n; o.textContent = 'A'+n; selCh.appendChild(o);
+    });
+    paramCell.appendChild(document.createTextNode('Canal :'));
+    paramCell.appendChild(selCh);
+  } else if (type === 'remote') {
+    const inpNode = document.createElement('input'); inpNode.type = 'text'; inpNode.placeholder = 'nœud'; inpNode.className='param-remote-node';
+    const inpName = document.createElement('input'); inpName.type = 'text'; inpName.placeholder = 'entrée'; inpName.className='param-remote-name';
+    paramCell.appendChild(document.createTextNode('Nœud :'));
+    paramCell.appendChild(inpNode);
+    paramCell.appendChild(document.createElement('br'));
+    paramCell.appendChild(document.createTextNode('Nom :'));
+    paramCell.appendChild(inpName);
+  } else if (type === 'div' || type === 'zmpt' || type === 'zmct') {
+    const selPin = document.createElement('select'); selPin.className = 'param-pin';
+    ['A0'].concat(['D0','D1','D2','D3','D4','D5','D6','D7','D8']).forEach(p => {
+      const o = document.createElement('option'); o.value = p; o.textContent = p; selPin.appendChild(o);
+    });
+    paramCell.appendChild(document.createTextNode('Pin :'));
+    paramCell.appendChild(selPin);
+  }
+}
+
+function updateOutputParam(row) {
+  const type = row.querySelector('.out-type').value;
+  const paramCell = row.querySelector('.out-param');
+  paramCell.innerHTML = '';
+  if (type === 'pwm010' || type === 'gpio') {
+    const selPin = document.createElement('select'); selPin.className = 'param-pin';
+    ['D0','D1','D2','D3','D4','D5','D6','D7','D8'].forEach(p => {
+      const o = document.createElement('option'); o.value = p; o.textContent = p; selPin.appendChild(o);
+    });
+    paramCell.appendChild(document.createTextNode('Pin :'));
+    paramCell.appendChild(selPin);
+    if (type === 'pwm010') {
+      const freqInp = document.createElement('input'); freqInp.type='number'; freqInp.className='param-pwm-freq'; freqInp.value='2000'; freqInp.min='1'; freqInp.max='40000';
+      paramCell.appendChild(document.createElement('br'));
+      paramCell.appendChild(document.createTextNode('Fréq. Hz :'));
+      paramCell.appendChild(freqInp);
+    }
+  }
+}
+
+// Load config from server and populate form
+async function loadConfig() {
+  const resp = await fetch('/api/config/get');
+  const cfg = await resp.json();
+  document.getElementById('nodeId').value = cfg.nodeId || '';
+  document.getElementById('wifiMode').value = cfg.wifi.mode || 'AP';
+  document.getElementById('ssid').value = cfg.wifi.ssid || '';
+  document.getElementById('pass').value = cfg.wifi.pass || '';
+  document.getElementById('modAds').checked = cfg.modules.ads1115;
+  document.getElementById('modPwm').checked = cfg.modules.pwm010;
+  document.getElementById('modZmpt').checked = cfg.modules.zmpt;
+  document.getElementById('modZmct').checked = cfg.modules.zmct;
+  document.getElementById('modDiv').checked = cfg.modules.div;
+  // Populate inputs
+  const inRows = document.querySelectorAll('#inputsTable tbody tr');
+  for (let i = 0; i < MAX_INPUTS; i++) {
+    const row = inRows[i];
+    const ic = cfg.inputs[i] || {};
+    row.querySelector('.in-active').checked = ic.active || false;
+    row.querySelector('.in-name').value = ic.name || '';
+    row.querySelector('.in-type').value = ic.type || 'disabled';
+    row.querySelector('.in-scale').value = ic.scale != null ? ic.scale : 1;
+    row.querySelector('.in-offset').value = ic.offset != null ? ic.offset : 0;
+    row.querySelector('.in-unit').value = ic.unit || '';
+    updateInputParam(row);
+    // Set type-specific param values
+    if (ic.type === 'adc' || ic.type === 'div' || ic.type === 'zmpt' || ic.type === 'zmct') {
+      const selPin = row.querySelector('.param-pin');
+      if (selPin) selPin.value = ic.pin != null ? ic.pin : '';
+    } else if (ic.type === 'ads1115') {
+      const selCh = row.querySelector('.param-ads');
+      if (selCh) selCh.value = ic.adsChannel != null ? ic.adsChannel : 0;
+    } else if (ic.type === 'remote') {
+      const inpNode = row.querySelector('.param-remote-node');
+      const inpName = row.querySelector('.param-remote-name');
+      if (inpNode) inpNode.value = ic.remoteNode || '';
+      if (inpName) inpName.value = ic.remoteName || '';
+    }
+  }
+  // Populate outputs
+  const outRows = document.querySelectorAll('#outputsTable tbody tr');
+  for (let i = 0; i < MAX_OUTPUTS; i++) {
+    const row = outRows[i];
+    const oc = cfg.outputs[i] || {};
+    row.querySelector('.out-active').checked = oc.active || false;
+    row.querySelector('.out-name').value = oc.name || '';
+    row.querySelector('.out-type').value = oc.type || 'disabled';
+    row.querySelector('.out-scale').value = oc.scale != null ? oc.scale : 1;
+    row.querySelector('.out-offset').value = oc.offset != null ? oc.offset : 0;
+    updateOutputParam(row);
+    if ((oc.type === 'pwm010' || oc.type === 'gpio')) {
+      const selPin = row.querySelector('.param-pin');
+      if (selPin) selPin.value = oc.pin != null ? oc.pin : '';
+    }
+    if (oc.type === 'pwm010') {
+      const freqInp = row.querySelector('.param-pwm-freq');
+      if (freqInp) freqInp.value = oc.pwmFreq != null ? oc.pwmFreq : 2000;
+    }
+  }
+  showHideWifi();
+}
+
+// Serialize form to config JSON and post to server
+async function saveConfig() {
+  const cfg = {};
+  cfg.nodeId = document.getElementById('nodeId').value || '';
+  cfg.wifi = {
+    mode: document.getElementById('wifiMode').value,
+    ssid: document.getElementById('ssid').value || '',
+    pass: document.getElementById('pass').value || ''
+  };
+  cfg.modules = {
+    ads1115: document.getElementById('modAds').checked,
+    pwm010:  document.getElementById('modPwm').checked,
+    zmpt:    document.getElementById('modZmpt').checked,
+    zmct:    document.getElementById('modZmct').checked,
+    div:     document.getElementById('modDiv').checked
+  };
+  // Inputs
+  cfg.inputCount = MAX_INPUTS;
+  cfg.inputs = [];
+  const inRows = document.querySelectorAll('#inputsTable tbody tr');
+  inRows.forEach((row, idx) => {
+    const active = row.querySelector('.in-active').checked;
+    const name = row.querySelector('.in-name').value || ('IN'+(idx+1));
+    const type = row.querySelector('.in-type').value;
+    const scale = parseFloat(row.querySelector('.in-scale').value) || 1;
+    const offset = parseFloat(row.querySelector('.in-offset').value) || 0;
+    const unit = row.querySelector('.in-unit').value || '';
+    const obj = { name: name, type: type, scale: scale, offset: offset, unit: unit, active: active };
+    if (type === 'adc' || type === 'div' || type === 'zmpt' || type === 'zmct') {
+      const selPin = row.querySelector('.param-pin');
+      obj.pin = selPin ? selPin.value : '';
+    } else if (type === 'ads1115') {
+      const selCh = row.querySelector('.param-ads');
+      obj.adsChannel = selCh ? parseInt(selCh.value) : 0;
+    } else if (type === 'remote') {
+      const inpNode = row.querySelector('.param-remote-node');
+      const inpName = row.querySelector('.param-remote-name');
+      obj.remoteNode = inpNode ? inpNode.value : '';
+      obj.remoteName = inpName ? inpName.value : '';
+    }
+    cfg.inputs.push(obj);
+  });
+  // Outputs
+  cfg.outputCount = MAX_OUTPUTS;
+  cfg.outputs = [];
+  const outRows = document.querySelectorAll('#outputsTable tbody tr');
+  outRows.forEach((row, idx) => {
+    const active = row.querySelector('.out-active').checked;
+    const name = row.querySelector('.out-name').value || ('OUT'+(idx+1));
+    const type = row.querySelector('.out-type').value;
+    const scale = parseFloat(row.querySelector('.out-scale').value) || 1;
+    const offset = parseFloat(row.querySelector('.out-offset').value) || 0;
+    const obj = { name: name, type: type, scale: scale, offset: offset, active: active };
+    if (type === 'pwm010' || type === 'gpio') {
+      const selPin = row.querySelector('.param-pin');
+      obj.pin = selPin ? selPin.value : '';
+    }
+    if (type === 'pwm010') {
+      const freqInp = row.querySelector('.param-pwm-freq');
+      obj.pwmFreq = freqInp ? parseInt(freqInp.value) : 2000;
+    }
+    cfg.outputs.push(obj);
+  });
+  // Post config
+  try {
+    const resp = await fetch('/api/config/set', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg)
+    });
+    if (resp.ok) {
+      document.getElementById('status').textContent = 'Sauvegarde réussie, redémarrage...';
+    } else {
+      document.getElementById('status').textContent = 'Erreur lors de la sauvegarde';
+    }
+  } catch (err) {
+    console.error(err);
+    document.getElementById('status').textContent = 'Erreur lors de la sauvegarde';
+  }
+}
+
+// Show/hide STA config depending on mode
+function showHideWifi() {
+  const mode = document.getElementById('wifiMode').value;
+  const sta = document.getElementById('staConfig');
+  const ap = document.getElementById('apInfo');
+  if (mode === 'STA') {
+    sta.classList.remove('hidden');
+    ap.classList.add('hidden');
+  } else {
+    sta.classList.add('hidden');
+    ap.classList.remove('hidden');
+  }
+}
+
+// Event listeners
+window.addEventListener('DOMContentLoaded', () => {
+  buildTables();
+  loadConfig();
+  // Update input param cells when type changes
+  document.querySelector('#inputsTable').addEventListener('change', (e) => {
+    if (e.target.classList.contains('in-type')) {
+      const row = e.target.closest('tr');
+      updateInputParam(row);
+    }
+  });
+  document.querySelector('#outputsTable').addEventListener('change', (e) => {
+    if (e.target.classList.contains('out-type')) {
+      const row = e.target.closest('tr');
+      updateOutputParam(row);
+    }
+  });
+  document.getElementById('wifiMode').addEventListener('change', showHideWifi);
+  document.getElementById('saveBtn').addEventListener('click', () => {
+    document.getElementById('status').textContent = 'Sauvegarde...';
+    saveConfig();
+  });
+});
+</script>
+</body>
+</html>
