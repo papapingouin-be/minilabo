@@ -24,7 +24,7 @@
 #include <Adafruit_ADS1015.h>
 #include <ESP8266mDNS.h>
 #include <U8g2lib.h>
-#include <Update.h>
+#include <Updater.h>
 
 static const char *FIRMWARE_VERSION = "1.0.0";
 
