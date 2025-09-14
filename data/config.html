@@ -373,7 +373,10 @@ async function saveConfig() {
   try {
     const resp = await fetch('/api/config/set', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // The firmware expects a plain text body for configuration updates.
+      // Sending JSON with a text/plain content type allows the server to
+      // access the payload via the "plain" parameter.
+      headers: { 'Content-Type': 'text/plain' },
       body: JSON.stringify(cfg)
     });
     if (resp.ok) {
