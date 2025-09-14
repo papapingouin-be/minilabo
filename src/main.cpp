@@ -401,14 +401,14 @@ void parseConfigFromJson(const JsonDocument &doc) {
   }
   // wifi
   if (doc.containsKey("wifi")) {
-    JsonObject w = doc["wifi"].as<JsonObject>();
+    JsonObjectConst w = doc["wifi"].as<JsonObjectConst>();
     if (w.containsKey("mode")) config.wifi.mode = w["mode"].as<String>();
     if (w.containsKey("ssid")) config.wifi.ssid = w["ssid"].as<String>();
     if (w.containsKey("pass")) config.wifi.pass = w["pass"].as<String>();
   }
   // modules
   if (doc.containsKey("modules")) {
-    JsonObject m = doc["modules"].as<JsonObject>();
+    JsonObjectConst m = doc["modules"].as<JsonObjectConst>();
     config.modules.ads1115 = m["ads1115"].as<bool>();
     config.modules.pwm010  = m["pwm010"].as<bool>();
     config.modules.zmpt    = m["zmpt"].as<bool>();
@@ -418,9 +418,9 @@ void parseConfigFromJson(const JsonDocument &doc) {
   // inputs
   uint8_t idx = 0;
   if (doc.containsKey("inputs") && doc["inputs"].is<JsonArray>()) {
-    JsonArray arr = doc["inputs"].as<JsonArray>();
+    JsonArrayConst arr = doc["inputs"].as<JsonArrayConst>();
     config.inputCount = min((uint8_t)arr.size(), MAX_INPUTS);
-    for (JsonObject o : arr) {
+    for (JsonObjectConst o : arr) {
       if (idx >= MAX_INPUTS) break;
       InputConfig &ic = config.inputs[idx];
       if (o.containsKey("name")) ic.name = o["name"].as<String>();
@@ -444,9 +444,9 @@ void parseConfigFromJson(const JsonDocument &doc) {
   // outputs
   idx = 0;
   if (doc.containsKey("outputs") && doc["outputs"].is<JsonArray>()) {
-    JsonArray arr = doc["outputs"].as<JsonArray>();
+    JsonArrayConst arr = doc["outputs"].as<JsonArrayConst>();
     config.outputCount = min((uint8_t)arr.size(), MAX_OUTPUTS);
-    for (JsonObject o : arr) {
+    for (JsonObjectConst o : arr) {
       if (idx >= MAX_OUTPUTS) break;
       OutputConfig &oc = config.outputs[idx];
       if (o.containsKey("name")) oc.name = o["name"].as<String>();
