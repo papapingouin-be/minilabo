@@ -23,6 +23,7 @@
 #include <Wire.h>
 #include <Adafruit_ADS1015.h>
 #include <ESP8266mDNS.h>
+#include <U8g2lib.h>
 
 // ---------------------------------------------------------------------------
 // Simple logging facility.  Log messages are written to Serial and appended
@@ -30,6 +31,37 @@
 // can be retrieved over HTTP for display in the UI.
 // ---------------------------------------------------------------------------
 static const char *LOG_PATH = "/log.txt";
+
+// ---------------------------------------------------------------------------
+// OLED display support.  During boot we render log messages to the attached
+// OLED so that early errors are visible without a serial console.  Once the
+// configuration is modified via the web API, OLED logging is disabled to free
+// the screen for application use.
+// ---------------------------------------------------------------------------
+static U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+static const uint8_t OLED_MAX_LINES = 8;
+static String oledLines[OLED_MAX_LINES];
+static bool oledLogging = true;
+
+static void initOled() {
+  oled.begin();
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_5x7_tf);
+  oled.sendBuffer();
+}
+
+static void oledLog(const String &msg) {
+  if (!oledLogging) return;
+  for (uint8_t i = 0; i < OLED_MAX_LINES - 1; i++) {
+    oledLines[i] = oledLines[i + 1];
+  }
+  oledLines[OLED_MAX_LINES - 1] = msg;
+  oled.clearBuffer();
+  for (uint8_t i = 0; i < OLED_MAX_LINES; i++) {
+    oled.drawStr(0, (i + 1) * 8, oledLines[i].c_str());
+  }
+  oled.sendBuffer();
+}
 
 static void initLogging() {
   if (!LittleFS.begin()) {
@@ -47,6 +79,7 @@ static void logMessage(const String &msg) {
     f.println(msg);
     f.close();
   }
+  oledLog(msg);
 }
 
 static void logPrintf(const char *fmt, ...) {
@@ -863,6 +896,7 @@ void setupServer() {
     // Update global config from JSON
     parseConfigFromJson(doc);
     saveConfig();
+    oledLogging = false;
     req->send(200, "application/json", "{\"status\":\"ok\"}");
     // Delay slightly to ensure response is sent before rebooting
     delay(200);
@@ -971,6 +1005,7 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   Serial.println();
+  initOled();
   initLogging();
   logMessage("MiniLabBox v2 starting...");
   loadConfig();
