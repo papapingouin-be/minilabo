@@ -495,6 +495,7 @@ bool saveConfig() {
     o["scale"]  = oc.scale;
     o["offset"] = oc.offset;
     o["active"] = oc.active;
+    o["value"]  = oc.value;
   }
   // Write file
   File f = LittleFS.open("/config.json", "w");
@@ -578,7 +579,11 @@ void parseConfigFromJson(const JsonDocument &doc) {
       if (o.containsKey("scale")) oc.scale = o["scale"].as<float>();
       if (o.containsKey("offset")) oc.offset = o["offset"].as<float>();
       if (o.containsKey("active")) oc.active = o["active"].as<bool>();
-      oc.value = 0.0f;
+      if (o.containsKey("value")) {
+        oc.value = o["value"].as<float>();
+      } else {
+        oc.value = 0.0f;
+      }
       idx++;
     }
   }
@@ -1076,6 +1081,7 @@ void setupServer() {
       return;
     }
     updateOutputs();
+    saveConfig();
     req->send(200, "application/json", "{\"status\":\"ok\"}");
   });
 
