@@ -45,15 +45,30 @@ static const char *LOG_PATH = "/log.txt";
 static U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 static bool oledLogging = true;
 
-static void initOled() {
+static bool initOled() {
+  Serial.println("Initialising OLED...");
   // Ensure the I2C bus is initialised before interacting with the OLED.
-  // Some libraries implicitly call Wire.begin(), but doing it explicitly
-  // here avoids a blank display on boards where it is not started yet.
-  Wire.begin();
+  // Some boards require explicit pin numbers otherwise the display stays
+  // blank.  Using the typical SDA/SCL pins fixes boot issues where the
+  // bus was not started.
+  Wire.begin(4, 5);  // SDA = GPIO4 (D2), SCL = GPIO5 (D1)
+
+  // Probe the expected I2C address to give feedback when the display is
+  // missing or wired incorrectly.  This makes debugging hardware issues
+  // far easier when only the serial console is available.
+  Wire.beginTransmission(0x3C);
+  if (Wire.endTransmission() != 0) {
+    Serial.println("OLED not detected at 0x3C");
+    oledLogging = false;
+    return false;
+  }
+
   oled.begin();
   oled.clearBuffer();
   oled.setFont(u8g2_font_5x7_tf);
   oled.sendBuffer();
+  Serial.println("OLED initialised");
+  return true;
 }
 
 static void oledLog(const String &msg) {
@@ -1073,9 +1088,12 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   Serial.println();
-  initOled();
+  bool oledOk = initOled();
   initLogging();
   logMessage("MiniLabBox v2 starting...");
+  if (!oledOk) {
+    logMessage("OLED not detected at 0x3C");
+  }
   loadConfig();
   setupWiFi();
   // Start UDP listener
