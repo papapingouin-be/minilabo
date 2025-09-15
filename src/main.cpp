@@ -29,6 +29,67 @@
 static const char *FIRMWARE_VERSION = "1.0.0";
 
 // ---------------------------------------------------------------------------
+// TLS certificate and private key used for the HTTPS server.  The pair is a
+// long-lived self-signed certificate generated specifically for MiniLabBox.
+// The certificate is embedded directly in firmware so the device can expose
+// HTTPS endpoints without external provisioning.
+// ---------------------------------------------------------------------------
+static const char TLS_CERT[] PROGMEM = R"CERT(-----BEGIN CERTIFICATE-----
+MIIDvTCCAqWgAwIBAgIUSPqBltAiDymlJeyrbqMDBZOYx74wDQYJKoZIhvcNAQEL
+BQAwbjELMAkGA1UEBhMCRlIxDDAKBgNVBAgMA0lERjEOMAwGA1UEBwwFUGFyaXMx
+EzARBgNVBAoMCk1pbmlMYWJCb3gxETAPBgNVBAsMCEZpcm13YXJlMRkwFwYDVQQD
+DBBtaW5pbGFiYm94LmxvY2FsMB4XDTI1MDkxNTIxMzExNloXDTM1MDkxMzIxMzEx
+NlowbjELMAkGA1UEBhMCRlIxDDAKBgNVBAgMA0lERjEOMAwGA1UEBwwFUGFyaXMx
+EzARBgNVBAoMCk1pbmlMYWJCb3gxETAPBgNVBAsMCEZpcm13YXJlMRkwFwYDVQQD
+DBBtaW5pbGFiYm94LmxvY2FsMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKC
+AQEAuutBAPT65XT3nABJK42vnB7LV0ncpQxwP5hBiMRfvVCAW9XyeSPJdLs9avvh
+TjZ53L5BSoqro8DY5enu9jlB7LgruuPFJIML4evf6o2ngPNorj7eEwzBaW8tRpvn
+9ZFNgVD+F0tbg5Q2tYXjdFNxVnG7vy4r2bklkrhlYK+ze96OKXSwXNYVODBwBZp7
+fsr1EC7qyRJZ6AGhK8YkavcY1d6hAys2KYzW/eBrGqXw2w+Vs6GWrJGeoRPfF+vw
+BHjwbX1jIyrwW1/VklyydvREONqVZcya0BIIjJAPa85QZTSqgoyHr+zIMntLarx/
+Y2uhQbigzxRUwAYCRvuDTDRgrQIDAQABo1MwUTAdBgNVHQ4EFgQUjNnmXYq/hgNd
+x0pdlYkFN+qfw2MwHwYDVR0jBBgwFoAUjNnmXYq/hgNdx0pdlYkFN+qfw2MwDwYD
+VR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAczkSSc2x6pAqoc3uhy6/
+GwLQMJ9pY6qx1TSCMeZZie61P3YZkeqjGXhO+mtmlhUBZ7TeZjnANdPQ1Dy0Cq0o
+HCV2zQE7Eq3NSEHIo1b47RQPo/AQxWXSmhgOL9/518inT6JctIdpvUxJJTsa8OjK
+f75f/x/3fz3iR1PXZ0KwcGXsb9NDqcJ2qPhkC1Pd+vx7gph96ZDeQCvZvsQKtGcw
+cbdYZukPnYYEZc/6Nad3EI8r4YgeCRq20SgoLygwpK6aDgle7QgJv92heRvgK5Mt
+y4+lii26ry0WK0TtSOQqZYYsJIxJM/8ap6ehq8Oo1MhkhUKkZeWzCEKWcEpqdySh
+6w==
+-----END CERTIFICATE-----
+)CERT";
+
+static const char TLS_KEY[] PROGMEM = R"KEY(-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC660EA9PrldPec
+AEkrja+cHstXSdylDHA/mEGIxF+9UIBb1fJ5I8l0uz1q++FONnncvkFKiqujwNjl
+6e72OUHsuCu648Ukgwvh69/qjaeA82iuPt4TDMFpby1Gm+f1kU2BUP4XS1uDlDa1
+heN0U3FWcbu/LivZuSWSuGVgr7N73o4pdLBc1hU4MHAFmnt+yvUQLurJElnoAaEr
+xiRq9xjV3qEDKzYpjNb94GsapfDbD5WzoZaskZ6hE98X6/AEePBtfWMjKvBbX9WS
+XLJ29EQ42pVlzJrQEgiMkA9rzlBlNKqCjIev7Mgye0tqvH9ja6FBuKDPFFTABgJG
++4NMNGCtAgMBAAECggEAJvpKRJsRW7prrOgBWhfyZAWm5PWl0XQZzyUem1jJ1yY7
+kgr4BGtiRdmKue264q6o9E9nOZZXqu7au/zvhABWHzkbg14eXNoH5w1jFNwDrzfy
+3w0EjafmCCizIgt+UB7D8QC076Ia/AHy86DvGLGSy5ItcrU71yvM6j7SAxq4fI6F
+kULCNRIO7nXPimQUogzHloZJIinafNpjsVf7qyXx+OO/YYi3TkwDhCl99J6PR92A
+aGsuLj3A18uQIBpWACfgZXBdItaa3z9TZwVlCXCxRn/ViIkUZw5gwtgNl34jFJlo
+RtPZiP/nNEPwj0N/Z6vHVmtBzcl1VcDjrI4DcB7lwQKBgQDrNt/rJce0raJdoxKa
+d3fIrNk4O9tIF6EgPx/o4Gr649EZBQAmbaL23DzMkcuc9qsdrucjLWSXMc8sNApt
+exEFIKyJTiWqQWGv3rw6jRT//Z8GEZT6Xa+2S/objvwGwvtPO7qTkDmbJG1+HkTA
+HD5CI7DwhLdWqR89AwvUiH9ObQKBgQDLb9Gsnju2wGMSZSkPej/CbYlu3Q1llLK/
+L6bC9FJajpD4dfphF79M8HF+gnlmPxuLK0Xkcv8YjhbixEolf5QWwMceOq9+qpos
+y3GskYMqTWQ8hUxltsGdpnXFkJ0+7a69cYSbHZRiu9g4txOnHDh+YejLgML1m/BG
+HJmCeDDzQQKBgE/+9L7TtYz0dMEl4gDY2stMRgBDEzv8lVcTQPYBxUCY1JeOxNNM
+/Fy64I6ukzJKDj5lKsUi/hAR56Tf+h/r+AjnaOa1xkeWPvQCa7/6FYdOqZP1zNYt
+oMH+KwzOX1apX7E93iGrrnveMsLu5nDz6hSycM4MRRJbKH2mmJJq7ektAoGBAJWd
+KPDwdi4TE0mGCEqPt7B/6mEURTP9xe+BVf1uvdpHmyp/aaJaWqB0/KLzxeCCbPlO
+29oFEMK4TPB9N6KYTwrkwAvlUQew5C4pePJXGcXUoPE5f1QWshIFR/wCPQL4vlgo
+0kNZ37U1PPGJAvUVdh7MVu7DRZ5oDq8hfWxMhIOBAoGADQ7QRWfd2LI8E6fBV+KM
+C6P8iHSHOpunL92yX9LsI01eoIJuazM6I5NKaquGl5xRhywDPTbJ5cVrf2BTom1l
+oAETBCgzxCO/AYrebG18rXFBbR8uGVUiRHvxzhUiqyITY7/3/59dISVXkZZQ+kDf
+xfuP17fzRNjzewM8mDmktjA=
+-----END PRIVATE KEY-----
+)KEY";
+
+// ---------------------------------------------------------------------------
 // Simple logging facility.  Log messages are written to Serial and appended
 // to a file on LittleFS.  The log file is kept between boots and truncated
 // only when it grows beyond a configured limit.  Content can be retrieved over
@@ -372,6 +433,15 @@ struct OutputConfig {
   float      value;        // Last commanded value
 };
 
+// Peer security information.  Each remote MiniLabBox can have an associated
+// PIN so that authenticated API calls can be made from scripts if required.
+struct PeerAuth {
+  String nodeId;
+  String pin;
+};
+
+static const uint8_t MAX_PEERS = 16;
+
 // Wi-Fi configuration structure.  Contains the mode (AP or STA) and
 // credentials for station mode.  For AP mode the SSID is derived from
 // the node ID and the password may be blank (open network).
@@ -403,10 +473,13 @@ struct Config {
   InputConfig   inputs[MAX_INPUTS];
   uint8_t       outputCount; // Number of configured outputs
   OutputConfig  outputs[MAX_OUTPUTS];
+  uint8_t       peerCount;   // Number of stored peer PINs
+  PeerAuth      peers[MAX_PEERS];
 };
 
 static Config config;            // Global configuration instance
-static AsyncWebServer server(80); // HTTP server instance
+static AsyncWebServer server(443);       // HTTPS server instance
+static AsyncWebServer redirectServer(80); // HTTP redirector
 static WiFiUDP udp;               // UDP object for broadcasting and listening
 static Adafruit_ADS1115 ads;      // ADS1115 ADC instance
 static String configSetBody;      // buffer for incoming /api/config/set JSON
@@ -423,6 +496,26 @@ struct RemoteValue {
 static const int MAX_REMOTE_VALUES = 16;
 static RemoteValue remoteValues[MAX_REMOTE_VALUES];
 static int remoteCount = 0;
+
+struct DiscoveredNode {
+  String nodeId;
+  IPAddress ip;
+  uint32_t lastSeen;
+};
+
+static const int MAX_DISCOVERED_NODES = 24;
+static DiscoveredNode discoveredNodes[MAX_DISCOVERED_NODES];
+static uint8_t discoveredCount = 0;
+static const uint32_t DISCOVERY_TIMEOUT_MS = 60000UL;
+static uint32_t lastDiscoveryRequest = 0;
+static const uint32_t DISCOVERY_REQUEST_INTERVAL = 5000UL;
+
+static String sessionPin;
+static String sessionToken;
+static uint32_t sessionIssuedAt = 0;
+static uint32_t sessionLastActivity = 0;
+static const uint32_t SESSION_TIMEOUT_MS = 30UL * 60UL * 1000UL; // 30 minutes
+static const char *SESSION_COOKIE_NAME = "MLBSESSION";
 
 // Timing variables for input sampling and broadcast.  These are updated
 // in loop() to ensure that tasks run at their configured intervals.
@@ -445,6 +538,16 @@ float getRemoteValue(const String &nodeId, const String &inputName);
 int parsePin(const String &p);
 String pinToString(int pin);
 void parseConfigFromJson(const JsonDocument &doc);
+String formatPin(uint16_t value);
+void initialiseSecurity();
+String generateSessionToken();
+bool extractSessionToken(AsyncWebServerRequest *req, String &tokenOut);
+bool sessionTokenValid(const String &token, bool refreshActivity);
+bool requireAuth(AsyncWebServerRequest *req);
+void invalidateSession();
+void triggerDiscovery();
+void registerDiscoveredNode(const String &nodeId, const IPAddress &ip);
+void sendDiscoveryResponse(const IPAddress &ip, uint16_t port);
 
 // Utility to convert an ESP8266 pin string ("D2", "A0") to the
 // numeric constant.  Returns -1 if the string is not recognised.
@@ -494,6 +597,12 @@ String pinToString(int pin) {
   }
 }
 
+String formatPin(uint16_t value) {
+  char buf[5];
+  snprintf(buf, sizeof(buf), "%04u", static_cast<unsigned int>(value % 10000));
+  return String(buf);
+}
+
 // Default configuration used when no config file is present.  The
 // default Node ID is derived from the MAC address.  The system starts
 // in access point mode to allow initial configuration via the web UI.
@@ -533,6 +642,11 @@ void setDefaultConfig() {
   for (uint8_t i = 1; i < MAX_OUTPUTS; i++) {
     config.outputs[i] = {String("OUT") + String(i+1), OUTPUT_DISABLED, -1, 2000, 1.0f, 0.0f, false, 0.0f};
   }
+
+  config.peerCount = 0;
+  for (uint8_t i = 0; i < MAX_PEERS; i++) {
+    config.peers[i] = {"", ""};
+  }
 }
 
 // Load configuration from LittleFS.  If loading fails (no file or parse
@@ -561,7 +675,7 @@ void loadConfig() {
   std::unique_ptr<char[]> buf(new char[size + 1]);
   f.readBytes(buf.get(), size);
   buf[size] = '\0';
-  DynamicJsonDocument doc(4096);
+  DynamicJsonDocument doc(6144);
   auto err = deserializeJson(doc, buf.get());
   if (err) {
     logMessage("Failed to parse config JSON, applying defaults");
@@ -578,7 +692,7 @@ void loadConfig() {
 // operation is silently ignored.  Always call saveConfig() after
 // modifying the global config.  Returns true on success.
 bool saveConfig() {
-  DynamicJsonDocument doc(4096);
+  DynamicJsonDocument doc(6144);
   // Populate JSON document
   doc["nodeId"] = config.nodeId;
   JsonObject wifiObj = doc.createNestedObject("wifi");
@@ -620,6 +734,14 @@ bool saveConfig() {
     o["offset"] = oc.offset;
     o["active"] = oc.active;
     o["value"]  = oc.value;
+  }
+  doc["peerCount"] = config.peerCount;
+  JsonArray peerArr = doc.createNestedArray("peers");
+  for (uint8_t i = 0; i < config.peerCount && i < MAX_PEERS; i++) {
+    JsonObject o = peerArr.createNestedObject();
+    const PeerAuth &pa = config.peers[i];
+    o["nodeId"] = pa.nodeId;
+    o["pin"] = pa.pin;
   }
   // Write file
   File f = LittleFS.open("/config.json", "w");
@@ -714,6 +836,182 @@ void parseConfigFromJson(const JsonDocument &doc) {
   for (uint8_t i = idx; i < MAX_OUTPUTS; i++) {
     config.outputs[i] = {String("OUT") + String(i+1), OUTPUT_DISABLED, -1, 2000, 1.0f, 0.0f, false, 0.0f};
   }
+  if (doc.containsKey("peers") && doc["peers"].is<JsonArray>()) {
+    JsonArrayConst arr = doc["peers"].as<JsonArrayConst>();
+    config.peerCount = min((uint8_t)arr.size(), MAX_PEERS);
+    uint8_t pIdx = 0;
+    for (JsonObjectConst o : arr) {
+      if (pIdx >= MAX_PEERS) break;
+      PeerAuth &pa = config.peers[pIdx];
+      pa.nodeId = o.containsKey("nodeId") ? o["nodeId"].as<String>() : "";
+      pa.pin = o.containsKey("pin") ? o["pin"].as<String>() : "";
+      pIdx++;
+    }
+    for (uint8_t i = config.peerCount; i < MAX_PEERS; i++) {
+      config.peers[i].nodeId = "";
+      config.peers[i].pin = "";
+    }
+  } else {
+    config.peerCount = 0;
+    for (uint8_t i = 0; i < MAX_PEERS; i++) {
+      config.peers[i].nodeId = "";
+      config.peers[i].pin = "";
+    }
+  }
+}
+
+void invalidateSession() {
+  sessionToken = "";
+  sessionIssuedAt = 0;
+  sessionLastActivity = 0;
+}
+
+void initialiseSecurity() {
+  invalidateSession();
+  uint16_t rawPin = static_cast<uint16_t>(random(0, 10000));
+  sessionPin = formatPin(rawPin);
+  logPrintf("Session PIN generated: %s", sessionPin.c_str());
+}
+
+String generateSessionToken() {
+  char buf[33];
+  for (int i = 0; i < 16; i++) {
+    uint8_t val = static_cast<uint8_t>(random(0, 256));
+    snprintf(&buf[i * 2], 3, "%02x", val);
+  }
+  buf[32] = '\0';
+  return String(buf);
+}
+
+bool extractSessionToken(AsyncWebServerRequest *req, String &tokenOut) {
+  tokenOut = "";
+  if (req->hasHeader("Cookie")) {
+    String cookie = req->header("Cookie");
+    int start = 0;
+    while (start < cookie.length()) {
+      int end = cookie.indexOf(';', start);
+      if (end == -1) end = cookie.length();
+      String pair = cookie.substring(start, end);
+      pair.trim();
+      String prefix = String(SESSION_COOKIE_NAME) + "=";
+      if (pair.startsWith(prefix)) {
+        tokenOut = pair.substring(prefix.length());
+        tokenOut.trim();
+        break;
+      }
+      start = end + 1;
+    }
+  }
+  if (tokenOut.length() == 0 && req->hasHeader("X-Session-Token")) {
+    tokenOut = req->header("X-Session-Token");
+    tokenOut.trim();
+  }
+  if (tokenOut.length() == 0 && req->hasHeader("Authorization")) {
+    String auth = req->header("Authorization");
+    const String bearer = "Bearer ";
+    if (auth.startsWith(bearer)) {
+      tokenOut = auth.substring(bearer.length());
+      tokenOut.trim();
+    }
+  }
+  return tokenOut.length() > 0;
+}
+
+bool sessionTokenValid(const String &token, bool refreshActivity) {
+  if (sessionToken.length() == 0 || token.length() == 0) {
+    return false;
+  }
+  if (token != sessionToken) {
+    return false;
+  }
+  if (sessionIssuedAt == 0) {
+    return false;
+  }
+  uint32_t reference = sessionLastActivity ? sessionLastActivity : sessionIssuedAt;
+  uint32_t now = millis();
+  if (SESSION_TIMEOUT_MS > 0 && (now - reference) > SESSION_TIMEOUT_MS) {
+    invalidateSession();
+    return false;
+  }
+  if (refreshActivity) {
+    sessionLastActivity = now;
+  }
+  return true;
+}
+
+bool requireAuth(AsyncWebServerRequest *req) {
+  String token;
+  if (!extractSessionToken(req, token)) {
+    req->send(401, "application/json", "{\"error\":\"unauthorized\"}");
+    return false;
+  }
+  if (!sessionTokenValid(token, true)) {
+    req->send(401, "application/json", "{\"error\":\"unauthorized\"}");
+    return false;
+  }
+  return true;
+}
+
+void registerDiscoveredNode(const String &nodeId, const IPAddress &ip) {
+  if (nodeId.length() == 0 || nodeId == config.nodeId) {
+    return;
+  }
+  uint32_t now = millis();
+  for (uint8_t i = 0; i < discoveredCount; i++) {
+    if (discoveredNodes[i].nodeId == nodeId) {
+      discoveredNodes[i].ip = ip;
+      discoveredNodes[i].lastSeen = now;
+      return;
+    }
+  }
+  if (discoveredCount < MAX_DISCOVERED_NODES) {
+    discoveredNodes[discoveredCount].nodeId = nodeId;
+    discoveredNodes[discoveredCount].ip = ip;
+    discoveredNodes[discoveredCount].lastSeen = now;
+    discoveredCount++;
+    return;
+  }
+  uint8_t oldest = 0;
+  uint32_t oldestTs = discoveredNodes[0].lastSeen;
+  for (uint8_t i = 1; i < MAX_DISCOVERED_NODES; i++) {
+    if (discoveredNodes[i].lastSeen < oldestTs) {
+      oldest = i;
+      oldestTs = discoveredNodes[i].lastSeen;
+    }
+  }
+  discoveredNodes[oldest].nodeId = nodeId;
+  discoveredNodes[oldest].ip = ip;
+  discoveredNodes[oldest].lastSeen = now;
+}
+
+void sendDiscoveryResponse(const IPAddress &ip, uint16_t port) {
+  DynamicJsonDocument doc(256);
+  doc["cmd"] = "discover_reply";
+  doc["node"] = config.nodeId;
+  IPAddress localIp = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
+  doc["ip"] = localIp.toString();
+  doc["fw"] = FIRMWARE_VERSION;
+  String payload;
+  serializeJson(doc, payload);
+  udp.beginPacket(ip, port);
+  udp.write(reinterpret_cast<const uint8_t *>(payload.c_str()), payload.length());
+  udp.endPacket();
+}
+
+void triggerDiscovery() {
+  uint32_t now = millis();
+  if (now - lastDiscoveryRequest < DISCOVERY_REQUEST_INTERVAL) {
+    return;
+  }
+  lastDiscoveryRequest = now;
+  DynamicJsonDocument doc(192);
+  doc["cmd"] = "discover";
+  doc["from"] = config.nodeId;
+  String payload;
+  serializeJson(doc, payload);
+  udp.beginPacket(IPAddress(255, 255, 255, 255), BROADCAST_PORT);
+  udp.write(reinterpret_cast<const uint8_t *>(payload.c_str()), payload.length());
+  udp.endPacket();
 }
 
 // Initialise Wi-Fi according to the configuration.  If STA mode is
@@ -752,6 +1050,7 @@ void setupWiFi() {
   if (MDNS.begin(config.nodeId.c_str())) {
     logMessage("mDNS responder started");
     MDNS.addService("http", "tcp", 80);
+    MDNS.addService("https", "tcp", 443);
   }
 }
 
@@ -956,9 +1255,30 @@ void processUdp() {
         DynamicJsonDocument doc(1024);
         auto err = deserializeJson(doc, buf.get());
         if (!err) {
+          IPAddress senderIp = udp.remoteIP();
+          uint16_t senderPort = udp.remotePort();
+          if (doc.containsKey("cmd")) {
+            String cmd = doc["cmd"].as<String>();
+            if (cmd == "discover") {
+              String fromId = doc["from"].as<String>();
+              if (fromId.length() > 0) {
+                registerDiscoveredNode(fromId, senderIp);
+              }
+              if (fromId != config.nodeId) {
+                sendDiscoveryResponse(senderIp, senderPort);
+              }
+            } else if (cmd == "discover_reply") {
+              String nodeId = doc["node"].as<String>();
+              if (nodeId.length() > 0) {
+                registerDiscoveredNode(nodeId, senderIp);
+              }
+            }
+          }
+
           String remoteId = doc["node"].as<String>();
           // Ignore our own broadcasts
           if (remoteId.length() > 0 && remoteId != config.nodeId) {
+            registerDiscoveredNode(remoteId, senderIp);
             if (doc.containsKey("inputs") && doc["inputs"].is<JsonObject>()) {
               JsonObject inObj = doc["inputs"].as<JsonObject>();
               for (JsonPair kv : inObj) {
@@ -1005,6 +1325,78 @@ void sendBroadcast() {
 // directly from LittleFS.  Configuration and value endpoints return
 // JSON.  POST requests allow modifying configuration and outputs.
 void setupServer() {
+  // Session endpoints (login, logout, status)
+  server.on("/api/session/login", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (req->contentLength() == 0) {
+      req->send(400, "application/json", "{\"error\":\"No body\"}");
+      return;
+    }
+    String body = req->arg("plain");
+    if (body.length() == 0) {
+      req->send(400, "application/json", "{\"error\":\"No body\"}");
+      return;
+    }
+    DynamicJsonDocument doc(256);
+    if (deserializeJson(doc, body)) {
+      req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+      return;
+    }
+    String pin = doc["pin"].as<String>();
+    pin.trim();
+    if (pin != sessionPin) {
+      AsyncWebServerResponse *res =
+          req->beginResponse(401, "application/json", "{\"error\":\"invalid_pin\"}");
+      String cookie = String(SESSION_COOKIE_NAME) +
+                      "=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict";
+      res->addHeader("Set-Cookie", cookie);
+      req->send(res);
+      return;
+    }
+    sessionToken = generateSessionToken();
+    sessionIssuedAt = millis();
+    sessionLastActivity = sessionIssuedAt;
+    DynamicJsonDocument respDoc(256);
+    respDoc["status"] = "ok";
+    respDoc["token"] = sessionToken;
+    String payload;
+    serializeJson(respDoc, payload);
+    AsyncWebServerResponse *res =
+        req->beginResponse(200, "application/json", payload);
+    String cookie = String(SESSION_COOKIE_NAME) + "=" + sessionToken +
+                    "; Path=/; HttpOnly; Secure; SameSite=Strict";
+    res->addHeader("Set-Cookie", cookie);
+    req->send(res);
+  });
+
+  server.on("/api/session/logout", HTTP_POST, [](AsyncWebServerRequest *req) {
+    invalidateSession();
+    AsyncWebServerResponse *res =
+        req->beginResponse(200, "application/json", "{\"status\":\"ok\"}");
+    String cookie = String(SESSION_COOKIE_NAME) +
+                    "=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict";
+    res->addHeader("Set-Cookie", cookie);
+    req->send(res);
+  });
+
+  server.on("/api/session/status", HTTP_GET, [](AsyncWebServerRequest *req) {
+    String token;
+    if (!extractSessionToken(req, token) || !sessionTokenValid(token, true)) {
+      req->send(401, "application/json", "{\"status\":\"invalid\"}");
+      return;
+    }
+    uint32_t now = millis();
+    uint32_t reference = sessionLastActivity ? sessionLastActivity : sessionIssuedAt;
+    uint32_t remaining = (SESSION_TIMEOUT_MS > 0)
+                             ? (SESSION_TIMEOUT_MS - (now - reference))
+                             : 0;
+    DynamicJsonDocument doc(256);
+    doc["status"] = "ok";
+    doc["expiresIn"] = static_cast<uint32_t>(remaining);
+    String payload;
+    serializeJson(doc, payload);
+    req->send(200, "application/json", payload);
+  });
+
   // Serve the root page
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *req) {
     req->send(LittleFS, "/index.html", "text/html");
@@ -1014,6 +1406,7 @@ void setupServer() {
 
   // API: return current configuration
   server.on("/api/config/get", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (!requireAuth(req)) return;
     DynamicJsonDocument doc(2048);
     doc["nodeId"] = config.nodeId;
     doc["fwVersion"] = FIRMWARE_VERSION;
@@ -1056,6 +1449,13 @@ void setupServer() {
       o["offset"] = oc.offset;
       o["active"] = oc.active;
     }
+    doc["peerCount"] = config.peerCount;
+    JsonArray peerArr = doc.createNestedArray("peers");
+    for (uint8_t i = 0; i < config.peerCount && i < MAX_PEERS; i++) {
+      JsonObject o = peerArr.createNestedObject();
+      o["nodeId"] = config.peers[i].nodeId;
+      o["pin"] = config.peers[i].pin;
+    }
     String resp;
     serializeJson(doc, resp);
     req->send(200, "application/json", resp);
@@ -1066,6 +1466,10 @@ void setupServer() {
   server.on(
       "/api/config/set", HTTP_POST,
       [](AsyncWebServerRequest *req) {
+        if (!requireAuth(req)) {
+          configSetBody = "";
+          return;
+        }
         if (configSetBody.length() == 0) {
           logMessage("Config set request missing body");
           req->send(400, "application/json", "{\"error\":\"No body\"}");
@@ -1094,6 +1498,10 @@ void setupServer() {
       NULL,
       [](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index,
          size_t total) {
+        String token;
+        if (!extractSessionToken(req, token) || !sessionTokenValid(token, false)) {
+          return;
+        }
         if (index == 0) {
           configSetBody = "";
           configSetBody.reserve(total);
@@ -1105,6 +1513,7 @@ void setupServer() {
 
   // API: reboot device on demand
   server.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (!requireAuth(req)) return;
     req->send(200, "application/json", "{\"status\":\"ok\"}");
     delay(200);
     ESP.restart();
@@ -1114,6 +1523,7 @@ void setupServer() {
   server.on(
       "/api/ota", HTTP_POST,
       [](AsyncWebServerRequest *req) {
+        if (!requireAuth(req)) return;
         bool success = !Update.hasError();
         req->send(success ? 200 : 500, "application/json",
                   success ? "{\"status\":\"ok\"}"
@@ -1125,6 +1535,10 @@ void setupServer() {
       },
       [](AsyncWebServerRequest *req, String filename, size_t index,
          uint8_t *data, size_t len, bool final) {
+        String token;
+        if (!extractSessionToken(req, token) || !sessionTokenValid(token, false)) {
+          return;
+        }
         if (!index) {
           logPrintf("OTA update: %s", filename.c_str());
           if (!Update.begin((ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000)) {
@@ -1145,6 +1559,7 @@ void setupServer() {
 
   // API: return current input values
   server.on("/api/inputs", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (!requireAuth(req)) return;
     DynamicJsonDocument doc(1024);
     JsonObject obj = doc.to<JsonObject>();
     for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
@@ -1160,6 +1575,7 @@ void setupServer() {
 
   // API: return current output values
   server.on("/api/outputs", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (!requireAuth(req)) return;
     DynamicJsonDocument doc(1024);
     JsonObject obj = doc.to<JsonObject>();
     for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
@@ -1173,8 +1589,38 @@ void setupServer() {
     req->send(200, "application/json", resp);
   });
 
+  server.on("/api/discovery", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (!requireAuth(req)) return;
+    triggerDiscovery();
+    DynamicJsonDocument doc(2048);
+    JsonArray arr = doc.to<JsonArray>();
+    uint32_t now = millis();
+    for (uint8_t i = 0; i < discoveredCount; i++) {
+      if (now - discoveredNodes[i].lastSeen > DISCOVERY_TIMEOUT_MS) {
+        continue;
+      }
+      JsonObject o = arr.createNestedObject();
+      o["nodeId"] = discoveredNodes[i].nodeId;
+      o["ip"] = discoveredNodes[i].ip.toString();
+      o["ageMs"] = static_cast<uint32_t>(now - discoveredNodes[i].lastSeen);
+      bool hasPin = false;
+      for (uint8_t p = 0; p < config.peerCount && p < MAX_PEERS; p++) {
+        if (config.peers[p].nodeId == discoveredNodes[i].nodeId &&
+            config.peers[p].pin.length() > 0) {
+          hasPin = true;
+          break;
+        }
+      }
+      o["hasPin"] = hasPin;
+    }
+    String resp;
+    serializeJson(doc, resp);
+    req->send(200, "application/json", resp);
+  });
+
   // API: set an output value.  Expects JSON {"name":"output1","value":x}
   server.on("/api/output/set", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (!requireAuth(req)) return;
     if (req->contentLength() == 0) {
       req->send(400, "application/json", "{\"error\":\"No body\"}");
       return;
@@ -1211,6 +1657,7 @@ void setupServer() {
 
   // API: return remote values
   server.on("/api/remote", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (!requireAuth(req)) return;
     DynamicJsonDocument doc(1024);
     JsonObject obj = doc.to<JsonObject>();
     for (int i = 0; i < remoteCount; i++) {
@@ -1224,6 +1671,7 @@ void setupServer() {
 
   // API: return system logs
   server.on("/api/logs", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (!requireAuth(req)) return;
     if (!LittleFS.exists(LOG_PATH)) {
       req->send(404, "text/plain", "No log");
       return;
@@ -1240,6 +1688,7 @@ void setupServer() {
 
   // API: simple file browser (LittleFS)
   server.on("/api/files/list", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (!requireAuth(req)) return;
     if (!enforceSampleFilePolicy()) {
       req->send(500, "application/json", "{\"error\":\"private directory\"}");
       return;
@@ -1255,6 +1704,7 @@ void setupServer() {
   });
 
   server.on("/api/files/get", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (!requireAuth(req)) return;
     if (!req->hasParam("path")) {
       req->send(400, "text/plain", "missing path");
       return;
@@ -1284,6 +1734,7 @@ void setupServer() {
   });
 
   server.on("/api/files/save", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (!requireAuth(req)) return;
     if (req->contentLength() == 0) {
       req->send(400, "application/json", "{\"error\":\"No body\"}");
       return;
@@ -1315,6 +1766,7 @@ void setupServer() {
   });
 
   server.on("/api/files/create", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (!requireAuth(req)) return;
     if (!enforceSampleFilePolicy()) {
       req->send(500, "application/json", "{\"error\":\"storage unavailable\"}");
       return;
@@ -1323,6 +1775,7 @@ void setupServer() {
   });
 
   server.on("/api/files/rename", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (!requireAuth(req)) return;
     if (!enforceSampleFilePolicy()) {
       req->send(500, "application/json", "{\"error\":\"storage unavailable\"}");
       return;
@@ -1331,6 +1784,7 @@ void setupServer() {
   });
 
   server.on("/api/files/delete", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (!requireAuth(req)) return;
     if (!enforceSampleFilePolicy()) {
       req->send(500, "application/json", "{\"error\":\"storage unavailable\"}");
       return;
@@ -1338,8 +1792,31 @@ void setupServer() {
     req->send(403, "application/json", "{\"error\":\"forbidden\"}");
   });
 
-  // Start the server
-  server.begin();
+  // Start HTTPS server and HTTP redirector
+  if (!server.beginSecure(TLS_CERT, TLS_KEY, nullptr)) {
+    logMessage("Failed to start HTTPS server");
+  } else {
+    logMessage("HTTPS server started on port 443");
+  }
+
+  redirectServer.on("/", HTTP_ANY, [](AsyncWebServerRequest *req) {
+    String host = req->host();
+    if (!host.length()) {
+      IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
+      host = ip.toString();
+    }
+    req->redirect(String("https://") + host + "/");
+  });
+  redirectServer.onNotFound([](AsyncWebServerRequest *req) {
+    String host = req->host();
+    if (!host.length()) {
+      IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
+      host = ip.toString();
+    }
+    String target = String("https://") + host + req->url();
+    req->redirect(target);
+  });
+  redirectServer.begin();
 }
 
 // Arduino setup entry point.  Serial is initialised for debug output.
@@ -1352,6 +1829,8 @@ void setup() {
   Serial.println();
   bool oledOk = initOled();
   initLogging();
+  randomSeed(analogRead(A0) ^ micros() ^ ESP.getCycleCount());
+  initialiseSecurity();
   if (!ensureUserDirectory()) {
     logMessage("Failed to ensure private directory /private");
   } else if (!enforceSampleFilePolicy()) {
@@ -1367,6 +1846,7 @@ void setup() {
   udp.begin(BROADCAST_PORT);
   setupSensors();
   setupServer();
+  triggerDiscovery();
   // After network and services are up, show basic status on the OLED
   // so users immediately know the node ID and how to reach it.  This
   // reuses the boot logging screen and will remain until another log
@@ -1377,6 +1857,8 @@ void setup() {
     oled.drawStr(0, 16, config.nodeId.c_str());
     IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
     oled.drawStr(0, 32, ip.toString().c_str());
+    String pinLine = String("PIN: ") + sessionPin;
+    oled.drawStr(0, 48, pinLine.c_str());
     oled.sendBuffer();
     oled.setFont(u8g2_font_5x7_tf);
   }
