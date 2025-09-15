@@ -88,7 +88,7 @@
 
   <fieldset>
     <legend>Cache de l'éditeur de fichiers</legend>
-    <p>Le script Ace utilisé par l'éditeur de fichiers est chargé depuis le CDN. Vous pouvez le précharger dans le cache du navigateur pour améliorer l'ouverture hors connexion.</p>
+    <p>Le script Ace utilisé par l'éditeur de fichiers est chargé depuis le CDN. Vous pouvez le précharger dans le cache du navigateur pour améliorer l'ouverture hors connexion. Cette opération nécessite un navigateur autorisant l'API Cache (connexion HTTPS ou contexte sécurisé).</p>
     <button type="button" id="cacheAceBtn">Mettre en cache la librairie</button>
     <button type="button" id="cacheAceClearBtn">Vider le cache</button>
     <div id="cacheAceStatus"></div>
@@ -434,9 +434,16 @@ async function updateAceCacheStatus() {
   if (!('caches' in window)) {
     aceCacheBtn.disabled = true;
     aceCacheClearBtn.disabled = true;
-    setAceStatus('API Cache indisponible dans ce navigateur.', true);
+    aceCacheBtn.classList.add('hidden');
+    aceCacheClearBtn.classList.add('hidden');
+    const reason = window.isSecureContext
+      ? 'fonction non prise en charge par ce navigateur.'
+      : 'fonction disponible uniquement via une connexion HTTPS.';
+    setAceStatus(`Mise en cache indisponible (${reason})`);
     return;
   }
+  aceCacheBtn.classList.remove('hidden');
+  aceCacheClearBtn.classList.remove('hidden');
   try {
     const keys = await caches.keys();
     const hasCache = keys.includes(ACE_CACHE_NAME);

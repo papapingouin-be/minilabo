@@ -36,6 +36,22 @@ static const char *FIRMWARE_VERSION = "1.0.0";
 // ---------------------------------------------------------------------------
 static const char *LOG_PATH = "/log.txt";
 static const char *USER_FILES_DIR = "/private";
+static const char *SAMPLE_FILE_NAME = "sample.html";
+static const char *SAMPLE_FILE_PATH = "/private/sample.html";
+static const char SAMPLE_FILE_CONTENT[] = R"rawliteral(
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>MiniLabBox – sample</title>
+</head>
+<body>
+  <h1>MiniLabBox</h1>
+  <p>Ce fichier <code>sample.html</code> est stocké dans le répertoire <code>/private</code>.</p>
+  <p>Modifiez son contenu depuis l'éditeur de fichiers pour tester l'interface.</p>
+</body>
+</html>
+)rawliteral";
 
 static bool ensureUserDirectory() {
   if (LittleFS.exists(USER_FILES_DIR)) {
@@ -48,7 +64,8 @@ static bool ensureUserDirectory() {
   return true;
 }
 
-static bool resolveUserPath(const String &clientPath, String &fsPath) {
+static bool sanitizeClientRelativePath(const String &clientPath,
+                                      String &relativePath) {
   if (clientPath.length() == 0) return false;
   String cleaned = clientPath;
   cleaned.replace('\\', '/');
@@ -68,10 +85,23 @@ static bool resolveUserPath(const String &clientPath, String &fsPath) {
     }
     start = (sep == -1) ? cleaned.length() : sep + 1;
   }
-  fsPath = String(USER_FILES_DIR) + "/" + cleaned;
-  if (!fsPath.startsWith(String(USER_FILES_DIR) + "/")) {
+  if (!cleaned.equals(SAMPLE_FILE_NAME)) {
     return false;
   }
+  relativePath = cleaned;
+  return true;
+}
+
+static bool resolveUserPath(const String &clientPath, String &fsPath,
+                            String *relativeOut = nullptr) {
+  String relative;
+  if (!sanitizeClientRelativePath(clientPath, relative)) {
+    return false;
+  }
+  if (relativeOut) {
+    *relativeOut = relative;
+  }
+  fsPath = String(USER_FILES_DIR) + "/" + relative;
   return true;
 }
 
@@ -95,6 +125,35 @@ static String toRelativeUserPath(const String &fsPath) {
     return "";
   }
   return fsPath;
+}
+
+static bool enforceSampleFilePolicy() {
+  if (!ensureUserDirectory()) {
+    return false;
+  }
+  Dir dir = LittleFS.openDir(USER_FILES_DIR);
+  while (dir.next()) {
+    if (dir.isDirectory()) {
+      continue;
+    }
+    String relative = toRelativeUserPath(dir.fileName());
+    if (!relative.equals(SAMPLE_FILE_NAME)) {
+      if (!LittleFS.remove(dir.fileName())) {
+        Serial.printf("Failed to remove unexpected file %s from /private\n",
+                      dir.fileName().c_str());
+      }
+    }
+  }
+  if (!LittleFS.exists(SAMPLE_FILE_PATH)) {
+    File f = LittleFS.open(SAMPLE_FILE_PATH, "w");
+    if (!f) {
+      Serial.println("Failed to create sample.html in /private");
+      return false;
+    }
+    f.print(SAMPLE_FILE_CONTENT);
+    f.close();
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1181,25 +1240,14 @@ void setupServer() {
 
   // API: simple file browser (LittleFS)
   server.on("/api/files/list", HTTP_GET, [](AsyncWebServerRequest *req) {
-    if (!ensureUserDirectory()) {
+    if (!enforceSampleFilePolicy()) {
       req->send(500, "application/json", "{\"error\":\"private directory\"}");
       return;
     }
-    DynamicJsonDocument doc(1024);
+    DynamicJsonDocument doc(256);
     JsonArray arr = doc.to<JsonArray>();
-    Dir d = LittleFS.openDir(USER_FILES_DIR);
-    while (d.next()) {
-      if (d.isDirectory()) {
-        continue;
-      }
-      String relative = toRelativeUserPath(d.fileName());
-      if (relative.length() == 0) {
-        continue;
-      }
-      if (relative.indexOf('/') != -1) {
-        continue;
-      }
-      arr.add(relative);
+    if (LittleFS.exists(SAMPLE_FILE_PATH)) {
+      arr.add(SAMPLE_FILE_NAME);
     }
     String resp;
     serializeJson(arr, resp);
@@ -1211,7 +1259,7 @@ void setupServer() {
       req->send(400, "text/plain", "missing path");
       return;
     }
-    if (!ensureUserDirectory()) {
+    if (!enforceSampleFilePolicy()) {
       req->send(500, "text/plain", "storage unavailable");
       return;
     }
@@ -1240,7 +1288,7 @@ void setupServer() {
       req->send(400, "application/json", "{\"error\":\"No body\"}");
       return;
     }
-    if (!ensureUserDirectory()) {
+    if (!enforceSampleFilePolicy()) {
       req->send(500, "application/json", "{\"error\":\"storage unavailable\"}");
       return;
     }
@@ -1267,111 +1315,27 @@ void setupServer() {
   });
 
   server.on("/api/files/create", HTTP_POST, [](AsyncWebServerRequest *req) {
-    if (req->contentLength() == 0) {
-      req->send(400, "application/json", "{\"error\":\"No body\"}");
-      return;
-    }
-    if (!ensureUserDirectory()) {
+    if (!enforceSampleFilePolicy()) {
       req->send(500, "application/json", "{\"error\":\"storage unavailable\"}");
       return;
     }
-    DynamicJsonDocument doc(2048);
-    if (deserializeJson(doc, req->arg("plain"))) {
-      req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-      return;
-    }
-    String clientPath = doc["path"].as<String>();
-    String fsPath;
-    if (!resolveUserPath(clientPath, fsPath)) {
-      req->send(400, "application/json", "{\"error\":\"invalid path\"}");
-      return;
-    }
-    if (LittleFS.exists(fsPath)) {
-      req->send(409, "application/json", "{\"error\":\"exists\"}");
-      return;
-    }
-    String content = "";
-    if (doc.containsKey("content")) {
-      content = doc["content"].as<String>();
-    }
-    File f = LittleFS.open(fsPath, "w");
-    if (!f) {
-      req->send(500, "application/json", "{\"error\":\"open failed\"}");
-      return;
-    }
-    if (content.length() > 0) {
-      f.print(content);
-    }
-    f.close();
-    req->send(200, "application/json", "{\"status\":\"ok\"}");
+    req->send(403, "application/json", "{\"error\":\"forbidden\"}");
   });
 
   server.on("/api/files/rename", HTTP_POST, [](AsyncWebServerRequest *req) {
-    if (req->contentLength() == 0) {
-      req->send(400, "application/json", "{\"error\":\"No body\"}");
-      return;
-    }
-    if (!ensureUserDirectory()) {
+    if (!enforceSampleFilePolicy()) {
       req->send(500, "application/json", "{\"error\":\"storage unavailable\"}");
       return;
     }
-    DynamicJsonDocument doc(2048);
-    if (deserializeJson(doc, req->arg("plain"))) {
-      req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-      return;
-    }
-    String fromClient = doc["from"].as<String>();
-    String toClient = doc["to"].as<String>();
-    String fromPath;
-    String toPath;
-    if (!resolveUserPath(fromClient, fromPath) || !resolveUserPath(toClient, toPath)) {
-      req->send(400, "application/json", "{\"error\":\"invalid path\"}");
-      return;
-    }
-    if (!LittleFS.exists(fromPath)) {
-      req->send(404, "application/json", "{\"error\":\"not found\"}");
-      return;
-    }
-    if (LittleFS.exists(toPath)) {
-      req->send(409, "application/json", "{\"error\":\"exists\"}");
-      return;
-    }
-    if (!LittleFS.rename(fromPath, toPath)) {
-      req->send(500, "application/json", "{\"error\":\"rename failed\"}");
-      return;
-    }
-    req->send(200, "application/json", "{\"status\":\"ok\"}");
+    req->send(403, "application/json", "{\"error\":\"forbidden\"}");
   });
 
   server.on("/api/files/delete", HTTP_POST, [](AsyncWebServerRequest *req) {
-    if (req->contentLength() == 0) {
-      req->send(400, "application/json", "{\"error\":\"No body\"}");
-      return;
-    }
-    if (!ensureUserDirectory()) {
+    if (!enforceSampleFilePolicy()) {
       req->send(500, "application/json", "{\"error\":\"storage unavailable\"}");
       return;
     }
-    DynamicJsonDocument doc(1024);
-    if (deserializeJson(doc, req->arg("plain"))) {
-      req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-      return;
-    }
-    String clientPath = doc["path"].as<String>();
-    String fsPath;
-    if (!resolveUserPath(clientPath, fsPath)) {
-      req->send(400, "application/json", "{\"error\":\"invalid path\"}");
-      return;
-    }
-    if (!LittleFS.exists(fsPath)) {
-      req->send(404, "application/json", "{\"error\":\"not found\"}");
-      return;
-    }
-    if (!LittleFS.remove(fsPath)) {
-      req->send(500, "application/json", "{\"error\":\"delete failed\"}");
-      return;
-    }
-    req->send(200, "application/json", "{\"status\":\"ok\"}");
+    req->send(403, "application/json", "{\"error\":\"forbidden\"}");
   });
 
   // Start the server
@@ -1390,6 +1354,8 @@ void setup() {
   initLogging();
   if (!ensureUserDirectory()) {
     logMessage("Failed to ensure private directory /private");
+  } else if (!enforceSampleFilePolicy()) {
+    logMessage("Failed to initialise /private/sample.html");
   }
   logMessage("MiniLabBox v2 starting...");
   if (!oledOk) {

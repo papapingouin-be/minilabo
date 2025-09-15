@@ -26,13 +26,11 @@
   <div id="fileList">
     <h2>Fichiers privés</h2>
     <p class="hint">Répertoire : <code>/private</code></p>
+    <p class="hint">Seul le fichier <code>sample.html</code> est disponible pour modification.</p>
     <div id="fileListContent"></div>
   </div>
   <div id="main">
     <div id="toolbar">
-      <button id="newBtn">Nouveau fichier</button>
-      <button id="renameBtn" disabled>Renommer</button>
-      <button id="deleteBtn" disabled>Supprimer</button>
       <button id="saveBtn" disabled>Enregistrer</button>
       <span id="message"></span>
       <span id="currentFile">Aucun fichier ouvert</span>
@@ -50,9 +48,7 @@
     const currentFileLabel = document.getElementById('currentFile');
     const messageLabel = document.getElementById('message');
     const saveBtn = document.getElementById('saveBtn');
-    const renameBtn = document.getElementById('renameBtn');
-    const deleteBtn = document.getElementById('deleteBtn');
-    const newBtn = document.getElementById('newBtn');
+    const DEFAULT_FILE = 'sample.html';
     const ERROR_MESSAGES = {
       exists: 'Un fichier portant ce nom existe déjà.',
       'not found': 'Fichier introuvable.',
@@ -63,7 +59,8 @@
       'delete failed': 'Suppression impossible.',
       'rename failed': 'Impossible de renommer le fichier.',
       'No body': 'Requête invalide.',
-      'Invalid JSON': 'JSON invalide.'
+      'Invalid JSON': 'JSON invalide.',
+      forbidden: 'Opération non autorisée.'
     };
 
     let currentPath = '';
@@ -89,8 +86,6 @@
 
     function updateToolbar() {
       saveBtn.disabled = !currentPath || !isDirty;
-      renameBtn.disabled = !currentPath;
-      deleteBtn.disabled = !currentPath;
       currentFileLabel.textContent = currentPath
         ? `Fichier : ${currentPath}${isDirty ? ' *' : ''}`
         : 'Aucun fichier ouvert';
@@ -116,15 +111,6 @@
       if (selectedLink) {
         selectedLink.classList.add('active');
       }
-    }
-
-    function validateFileName(name) {
-      if (name === null || name === undefined) return null;
-      const trimmed = name.trim();
-      if (!trimmed) return null;
-      if (trimmed.includes('..')) return null;
-      if (!/^[^\\\/]+$/.test(trimmed)) return null;
-      return trimmed;
     }
 
     function extractErrorMessage(payload, fallback) {
@@ -171,16 +157,19 @@
           throw new Error(extractErrorMessage(text, 'Erreur lors du chargement.'));
         }
         const data = await resp.json();
+        const files = Array.isArray(data)
+          ? data.filter(name => name === DEFAULT_FILE)
+          : [];
         fileListContainer.innerHTML = '';
-        if (!Array.isArray(data) || data.length === 0) {
+        if (files.length === 0) {
           const empty = document.createElement('p');
           empty.className = 'empty';
-          empty.textContent = 'Aucun fichier disponible.';
+          empty.textContent = 'Fichier sample.html introuvable.';
           fileListContainer.appendChild(empty);
           selectFileLink('');
-          return;
+          return [];
         }
-        data.forEach(name => {
+        files.forEach(name => {
           const link = document.createElement('a');
           link.href = '#';
           link.dataset.path = name;
@@ -192,10 +181,12 @@
           fileListContainer.appendChild(link);
         });
         selectFileLink(currentPath);
+        return files;
       } catch (err) {
         fileListContainer.innerHTML = '<p class="empty">Impossible de charger la liste.</p>';
         setMessage(err.message || 'Erreur de lecture du répertoire privé.', 'error');
         console.error(err);
+        return [];
       }
     }
 
@@ -247,103 +238,6 @@
       }
     }
 
-    async function createFile() {
-      const input = prompt('Nom du nouveau fichier (répertoire /private) :');
-      if (input === null) return;
-      const name = validateFileName(input);
-      if (!name) {
-        setMessage('Nom de fichier invalide.', 'error');
-        return;
-      }
-      try {
-        const resp = await fetch('/api/files/create', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: name, content: '' })
-        });
-        const payload = await resp.text();
-        if (!resp.ok) {
-          throw new Error(extractErrorMessage(payload, 'Impossible de créer le fichier.'));
-        }
-        await loadFileList();
-        await openFile(name);
-        setMessage(`Fichier "${name}" créé.`, 'success');
-      } catch (err) {
-        setMessage(err.message, 'error');
-        console.error(err);
-      }
-    }
-
-    async function renameFile() {
-      if (!currentPath) return;
-      if (isDirty) {
-        setMessage('Enregistrez le fichier avant de le renommer.', 'error');
-        return;
-      }
-      const input = prompt('Nouveau nom pour le fichier :', currentPath);
-      if (input === null) return;
-      const name = validateFileName(input);
-      if (!name) {
-        setMessage('Nom de fichier invalide.', 'error');
-        return;
-      }
-      if (name === currentPath) {
-        return;
-      }
-      try {
-        const resp = await fetch('/api/files/rename', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ from: currentPath, to: name })
-        });
-        const payload = await resp.text();
-        if (!resp.ok) {
-          throw new Error(extractErrorMessage(payload, 'Impossible de renommer le fichier.'));
-        }
-        currentPath = name;
-        editor.session.setMode(guessEditorMode(name));
-        await loadFileList();
-        updateToolbar();
-        selectFileLink(name);
-        setMessage('Fichier renommé.', 'success');
-      } catch (err) {
-        setMessage(err.message, 'error');
-        console.error(err);
-      }
-    }
-
-    async function deleteFile() {
-      if (!currentPath) return;
-      const confirmDelete = confirm(`Supprimer définitivement "${currentPath}" ?`);
-      if (!confirmDelete) return;
-      try {
-        const resp = await fetch('/api/files/delete', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: currentPath })
-        });
-        const payload = await resp.text();
-        if (!resp.ok) {
-          throw new Error(extractErrorMessage(payload, 'Impossible de supprimer le fichier.'));
-        }
-        suppressDirtyEvents = true;
-        editor.setValue('', -1);
-        editor.session.getUndoManager().reset();
-        suppressDirtyEvents = false;
-        currentPath = '';
-        setDirty(false);
-        await loadFileList();
-        selectFileLink('');
-        setMessage('Fichier supprimé.', 'success');
-      } catch (err) {
-        setMessage(err.message, 'error');
-        console.error(err);
-      }
-    }
-
-    newBtn.addEventListener('click', createFile);
-    renameBtn.addEventListener('click', renameFile);
-    deleteBtn.addEventListener('click', deleteFile);
     saveBtn.addEventListener('click', saveCurrentFile);
 
     editor.session.on('change', () => {
@@ -353,7 +247,12 @@
       }
     });
 
-    loadFileList();
+    (async () => {
+      const files = await loadFileList();
+      if (Array.isArray(files) && files.includes(DEFAULT_FILE)) {
+        await openFile(DEFAULT_FILE);
+      }
+    })();
     updateToolbar();
   </script>
 </body>
