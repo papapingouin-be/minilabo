@@ -1114,6 +1114,61 @@ void setupServer() {
     req->send(200, "text/plain", content);
   });
 
+  // API: simple file browser (LittleFS)
+  server.on("/api/files/list", HTTP_GET, [](AsyncWebServerRequest *req) {
+    String dir = "/";
+    if (req->hasParam("dir")) {
+      dir = req->getParam("dir")->value();
+    }
+    DynamicJsonDocument doc(1024);
+    JsonArray arr = doc.to<JsonArray>();
+    Dir d = LittleFS.openDir(dir);
+    while (d.next()) {
+      arr.add(d.fileName());
+    }
+    String resp;
+    serializeJson(arr, resp);
+    req->send(200, "application/json", resp);
+  });
+
+  server.on("/api/files/get", HTTP_GET, [](AsyncWebServerRequest *req) {
+    if (!req->hasParam("path")) {
+      req->send(400, "text/plain", "missing path");
+      return;
+    }
+    String path = req->getParam("path")->value();
+    if (!LittleFS.exists(path)) {
+      req->send(404, "text/plain", "not found");
+      return;
+    }
+    File f = LittleFS.open(path, "r");
+    String content = f.readString();
+    f.close();
+    req->send(200, "text/plain", content);
+  });
+
+  server.on("/api/files/save", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (req->contentLength() == 0) {
+      req->send(400, "application/json", "{\"error\":\"No body\"}");
+      return;
+    }
+    DynamicJsonDocument doc(8192);
+    if (deserializeJson(doc, req->arg("plain"))) {
+      req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+      return;
+    }
+    String path = doc["path"].as<String>();
+    String content = doc["content"].as<String>();
+    File f = LittleFS.open(path, "w");
+    if (!f) {
+      req->send(500, "application/json", "{\"error\":\"open failed\"}");
+      return;
+    }
+    f.print(content);
+    f.close();
+    req->send(200, "application/json", "{\"status\":\"ok\"}");
+  });
+
   // Start the server
   server.begin();
 }
