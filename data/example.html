@@ -11,6 +11,7 @@
     select, input { margin-right: 1em; }
     canvas { max-width: 100%; height: 300px; }
   </style>
+  <script src="auth.js"></script>
   <!-- Chart.js from CDN -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
 </head>
@@ -39,7 +40,9 @@ const maxPoints = 60;
 
 // Load inputs and remote info for dropdowns
 async function initInputs() {
-  const cfg = await (await fetch('/api/config/get')).json();
+  const resp = await authFetch('/api/config/get');
+  if (!resp.ok) return;
+  const cfg = await resp.json();
   const currentSel = document.getElementById('currentInput');
   const voltageSel = document.getElementById('voltageInput');
   currentSel.innerHTML = '';
@@ -91,7 +94,7 @@ function initChart() {
 
 async function fetchValues(curName, voltName) {
   try {
-    const inResp = await fetch('/api/inputs');
+    const inResp = await authFetch('/api/inputs');
     const inputs = await inResp.json();
     const i = inputs[curName];
     const u = inputs[voltName];
@@ -151,10 +154,16 @@ function stop() {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  initInputs();
-  initChart();
-  document.getElementById('startBtn').addEventListener('click', start);
-  document.getElementById('stopBtn').addEventListener('click', stop);
+  ensureSession()
+    .then(() => {
+      initInputs();
+      initChart();
+      document.getElementById('startBtn').addEventListener('click', start);
+      document.getElementById('stopBtn').addEventListener('click', stop);
+    })
+    .catch(err => {
+      console.error(err);
+    });
 });
 </script>
 

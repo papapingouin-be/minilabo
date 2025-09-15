@@ -20,7 +20,10 @@
     button { padding: 0.5em 1em; font-size: 1em; }
     #cacheAceStatus { margin-top: 0.5em; color: #555; font-size: 0.9em; }
     #cacheAceStatus.error { color: #c0392b; }
+    .hint { font-size: 0.9em; color: #555; margin-top: 0.3em; }
+    input.peer-pin { width: 70px; text-align: center; }
   </style>
+  <script src="auth.js"></script>
 </head>
 <body>
 <h1>Configuration MiniLabBox</h1>
@@ -78,6 +81,19 @@
   </fieldset>
 
   <fieldset>
+    <legend>MiniLabBox sur le réseau</legend>
+    <p>Liste des MiniLabBox détectées sur le réseau local. Indiquez le code PIN pour autoriser les requêtes sécurisées.</p>
+    <button type="button" id="scanBtn">Scanner le réseau local</button>
+    <table id="discoveryTable">
+      <thead>
+        <tr><th>Identifiant</th><th>Adresse IP</th><th>Dernière vue</th><th>Code PIN</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div id="discoveryStatus" class="hint"></div>
+  </fieldset>
+
+  <fieldset>
     <legend>Firmware</legend>
     Version actuelle : <span id="fwVersion">?</span><br><br>
     <input type="file" id="fwFile">
@@ -106,6 +122,11 @@ const ACE_CDN_URL = 'https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.14/ace.js';
 let aceCacheStatusEl;
 let aceCacheBtn;
 let aceCacheClearBtn;
+let discoveryTableBody;
+let discoveryStatusEl;
+let discoveryTimer = null;
+const knownPeers = new Map();
+let discoveryData = [];
 
 // Create rows for inputs and outputs based on constants
 function buildTables() {
@@ -260,65 +281,79 @@ function updateOutputParam(row) {
 
 // Load config from server and populate form
 async function loadConfig() {
-  const resp = await fetch('/api/config/get');
-  const cfg = await resp.json();
-  document.getElementById('nodeId').value = cfg.nodeId || '';
-  document.getElementById('wifiMode').value = cfg.wifi.mode || 'AP';
-  document.getElementById('ssid').value = cfg.wifi.ssid || '';
-  document.getElementById('pass').value = cfg.wifi.pass || '';
-  document.getElementById('fwVersion').textContent = cfg.fwVersion || 'inconnue';
-  document.getElementById('modAds').checked = cfg.modules.ads1115;
-  document.getElementById('modPwm').checked = cfg.modules.pwm010;
-  document.getElementById('modZmpt').checked = cfg.modules.zmpt;
-  document.getElementById('modZmct').checked = cfg.modules.zmct;
-  document.getElementById('modDiv').checked = cfg.modules.div;
-  // Populate inputs
-  const inRows = document.querySelectorAll('#inputsTable tbody tr');
-  for (let i = 0; i < MAX_INPUTS; i++) {
-    const row = inRows[i];
-    const ic = cfg.inputs[i] || {};
-    row.querySelector('.in-active').checked = ic.active || false;
-    row.querySelector('.in-name').value = ic.name || '';
-    row.querySelector('.in-type').value = ic.type || 'disabled';
-    row.querySelector('.in-scale').value = ic.scale != null ? ic.scale : 1;
-    row.querySelector('.in-offset').value = ic.offset != null ? ic.offset : 0;
-    row.querySelector('.in-unit').value = ic.unit || '';
-    updateInputParam(row);
-    // Set type-specific param values
-    if (ic.type === 'adc' || ic.type === 'div' || ic.type === 'zmpt' || ic.type === 'zmct') {
-      const selPin = row.querySelector('.param-pin');
-      if (selPin) selPin.value = ic.pin != null ? ic.pin : '';
-    } else if (ic.type === 'ads1115') {
-      const selCh = row.querySelector('.param-ads');
-      if (selCh) selCh.value = ic.adsChannel != null ? ic.adsChannel : 0;
-    } else if (ic.type === 'remote') {
-      const inpNode = row.querySelector('.param-remote-node');
-      const inpName = row.querySelector('.param-remote-name');
-      if (inpNode) inpNode.value = ic.remoteNode || '';
-      if (inpName) inpName.value = ic.remoteName || '';
+  try {
+    const resp = await authFetch('/api/config/get');
+    if (!resp.ok) throw new Error('Chargement impossible');
+    const cfg = await resp.json();
+    document.getElementById('nodeId').value = cfg.nodeId || '';
+    document.getElementById('wifiMode').value = cfg.wifi.mode || 'AP';
+    document.getElementById('ssid').value = cfg.wifi.ssid || '';
+    document.getElementById('pass').value = cfg.wifi.pass || '';
+    document.getElementById('fwVersion').textContent = cfg.fwVersion || 'inconnue';
+    document.getElementById('modAds').checked = cfg.modules.ads1115;
+    document.getElementById('modPwm').checked = cfg.modules.pwm010;
+    document.getElementById('modZmpt').checked = cfg.modules.zmpt;
+    document.getElementById('modZmct').checked = cfg.modules.zmct;
+    document.getElementById('modDiv').checked = cfg.modules.div;
+    // Populate inputs
+    const inRows = document.querySelectorAll('#inputsTable tbody tr');
+    for (let i = 0; i < MAX_INPUTS; i++) {
+      const row = inRows[i];
+      const ic = cfg.inputs[i] || {};
+      row.querySelector('.in-active').checked = ic.active || false;
+      row.querySelector('.in-name').value = ic.name || '';
+      row.querySelector('.in-type').value = ic.type || 'disabled';
+      row.querySelector('.in-scale').value = ic.scale != null ? ic.scale : 1;
+      row.querySelector('.in-offset').value = ic.offset != null ? ic.offset : 0;
+      row.querySelector('.in-unit').value = ic.unit || '';
+      updateInputParam(row);
+      if (ic.type === 'adc' || ic.type === 'div' || ic.type === 'zmpt' || ic.type === 'zmct') {
+        const selPin = row.querySelector('.param-pin');
+        if (selPin) selPin.value = ic.pin != null ? ic.pin : '';
+      } else if (ic.type === 'ads1115') {
+        const selCh = row.querySelector('.param-ads');
+        if (selCh) selCh.value = ic.adsChannel != null ? ic.adsChannel : 0;
+      } else if (ic.type === 'remote') {
+        const inpNode = row.querySelector('.param-remote-node');
+        const inpName = row.querySelector('.param-remote-name');
+        if (inpNode) inpNode.value = ic.remoteNode || '';
+        if (inpName) inpName.value = ic.remoteName || '';
+      }
     }
+    // Populate outputs
+    const outRows = document.querySelectorAll('#outputsTable tbody tr');
+    for (let i = 0; i < MAX_OUTPUTS; i++) {
+      const row = outRows[i];
+      const oc = cfg.outputs[i] || {};
+      row.querySelector('.out-active').checked = oc.active || false;
+      row.querySelector('.out-name').value = oc.name || '';
+      row.querySelector('.out-type').value = oc.type || 'disabled';
+      row.querySelector('.out-scale').value = oc.scale != null ? oc.scale : 1;
+      row.querySelector('.out-offset').value = oc.offset != null ? oc.offset : 0;
+      updateOutputParam(row);
+      if ((oc.type === 'pwm010' || oc.type === 'gpio')) {
+        const selPin = row.querySelector('.param-pin');
+        if (selPin) selPin.value = oc.pin != null ? oc.pin : '';
+      }
+      if (oc.type === 'pwm010') {
+        const freqInp = row.querySelector('.param-pwm-freq');
+        if (freqInp) freqInp.value = oc.pwmFreq != null ? oc.pwmFreq : 2000;
+      }
+    }
+    knownPeers.clear();
+    if (Array.isArray(cfg.peers)) {
+      cfg.peers.forEach(peer => {
+        if (peer && peer.nodeId) {
+          knownPeers.set(peer.nodeId, peer.pin || '');
+        }
+      });
+    }
+    renderDiscoveryRows();
+    showHideWifi();
+  } catch (err) {
+    console.error(err);
+    document.getElementById('status').textContent = 'Erreur lors du chargement de la configuration.';
   }
-  // Populate outputs
-  const outRows = document.querySelectorAll('#outputsTable tbody tr');
-  for (let i = 0; i < MAX_OUTPUTS; i++) {
-    const row = outRows[i];
-    const oc = cfg.outputs[i] || {};
-    row.querySelector('.out-active').checked = oc.active || false;
-    row.querySelector('.out-name').value = oc.name || '';
-    row.querySelector('.out-type').value = oc.type || 'disabled';
-    row.querySelector('.out-scale').value = oc.scale != null ? oc.scale : 1;
-    row.querySelector('.out-offset').value = oc.offset != null ? oc.offset : 0;
-    updateOutputParam(row);
-    if ((oc.type === 'pwm010' || oc.type === 'gpio')) {
-      const selPin = row.querySelector('.param-pin');
-      if (selPin) selPin.value = oc.pin != null ? oc.pin : '';
-    }
-    if (oc.type === 'pwm010') {
-      const freqInp = row.querySelector('.param-pwm-freq');
-      if (freqInp) freqInp.value = oc.pwmFreq != null ? oc.pwmFreq : 2000;
-    }
-  }
-  showHideWifi();
 }
 
 // Serialize form to config JSON and post to server
@@ -384,9 +419,16 @@ async function saveConfig() {
     }
     cfg.outputs.push(obj);
   });
+  cfg.peers = [];
+  knownPeers.forEach((pin, nodeId) => {
+    if (!nodeId) return;
+    cfg.peers.push({ nodeId, pin: pin || '' });
+  });
+  cfg.peerCount = cfg.peers.length;
+
   // Post config
   try {
-    const resp = await fetch('/api/config/set', {
+    const resp = await authFetch('/api/config/set', {
       method: 'POST',
       // The firmware expects a plain text body for configuration updates.
       // Sending JSON with a text/plain content type allows the server to
@@ -416,6 +458,104 @@ function showHideWifi() {
   } else {
     sta.classList.add('hidden');
     ap.classList.remove('hidden');
+  }
+}
+
+function formatAge(ageMs) {
+  if (ageMs == null) return '—';
+  const seconds = ageMs / 1000;
+  if (seconds < 1) return 'juste maintenant';
+  if (seconds < 60) return `${seconds.toFixed(1)} s`;
+  const minutes = seconds / 60;
+  if (minutes < 60) return `${minutes.toFixed(1)} min`;
+  const hours = minutes / 60;
+  return `${hours.toFixed(1)} h`;
+}
+
+function renderDiscoveryRows() {
+  if (!discoveryTableBody) return;
+  discoveryTableBody.innerHTML = '';
+  const combined = [];
+  const seen = new Set();
+  discoveryData.forEach(node => {
+    if (!node || !node.nodeId) return;
+    combined.push(node);
+    seen.add(node.nodeId);
+    if (!knownPeers.has(node.nodeId)) {
+      knownPeers.set(node.nodeId, '');
+    }
+  });
+  knownPeers.forEach((pin, nodeId) => {
+    if (!nodeId || seen.has(nodeId)) return;
+    combined.push({ nodeId, ip: '', ageMs: null });
+  });
+
+  if (combined.length === 0) {
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = 4;
+    cell.textContent = 'Aucune MiniLabBox détectée pour le moment.';
+    row.appendChild(cell);
+    discoveryTableBody.appendChild(row);
+    return;
+  }
+
+  combined.sort((a, b) => a.nodeId.localeCompare(b.nodeId));
+  combined.forEach(node => {
+    const row = document.createElement('tr');
+    row.dataset.nodeId = node.nodeId;
+    const tdId = document.createElement('td');
+    tdId.textContent = node.nodeId;
+    const tdIp = document.createElement('td');
+    tdIp.textContent = node.ip && node.ip.length ? node.ip : '—';
+    const tdAge = document.createElement('td');
+    tdAge.textContent = formatAge(node.ageMs);
+    const tdPin = document.createElement('td');
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.maxLength = 4;
+    input.className = 'peer-pin';
+    input.placeholder = '0000';
+    input.value = knownPeers.get(node.nodeId) || '';
+    input.addEventListener('input', () => {
+      knownPeers.set(node.nodeId, input.value.trim());
+    });
+    tdPin.appendChild(input);
+    row.appendChild(tdId);
+    row.appendChild(tdIp);
+    row.appendChild(tdAge);
+    row.appendChild(tdPin);
+    discoveryTableBody.appendChild(row);
+  });
+}
+
+async function refreshDiscovery() {
+  if (!discoveryStatusEl) return;
+  discoveryStatusEl.textContent = 'Scan en cours...';
+  try {
+    const resp = await authFetch('/api/discovery');
+    if (!resp.ok) throw new Error('Scan impossible');
+    const data = await resp.json();
+    let list = [];
+    if (Array.isArray(data)) {
+      list = data;
+    } else if (data && Array.isArray(data.nodes)) {
+      list = data.nodes;
+    }
+    discoveryData = list.map(item => ({
+      nodeId: item && item.nodeId ? item.nodeId : '',
+      ip: item && item.ip ? item.ip : '',
+      ageMs: typeof item.ageMs === 'number' ? item.ageMs : null
+    }));
+    renderDiscoveryRows();
+    if (discoveryData.length) {
+      discoveryStatusEl.textContent = `Dernière mise à jour : ${new Date().toLocaleTimeString()}`;
+    } else {
+      discoveryStatusEl.textContent = 'Aucune MiniLabBox détectée pour le moment.';
+    }
+  } catch (err) {
+    console.error(err);
+    discoveryStatusEl.textContent = 'Échec du scan du réseau.';
   }
 }
 
@@ -513,7 +653,28 @@ async function clearAceCache() {
 // Event listeners
 window.addEventListener('DOMContentLoaded', () => {
   buildTables();
-  loadConfig();
+  discoveryTableBody = document.querySelector('#discoveryTable tbody');
+  discoveryStatusEl = document.getElementById('discoveryStatus');
+  const scanBtn = document.getElementById('scanBtn');
+  if (scanBtn) {
+    scanBtn.addEventListener('click', () => {
+      refreshDiscovery();
+    });
+  }
+  renderDiscoveryRows();
+  ensureSession()
+    .then(() => {
+      loadConfig();
+      refreshDiscovery();
+      if (discoveryTimer) clearInterval(discoveryTimer);
+      discoveryTimer = setInterval(refreshDiscovery, 8000);
+    })
+    .catch(err => {
+      console.error(err);
+      if (discoveryStatusEl) {
+        discoveryStatusEl.textContent = 'Session requise pour scanner le réseau.';
+      }
+    });
   // Update input param cells when type changes
   document.querySelector('#inputsTable').addEventListener('change', (e) => {
     if (e.target.classList.contains('in-type')) {
@@ -534,7 +695,7 @@ window.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('rebootBtn').addEventListener('click', () => {
     document.getElementById('fwStatus').textContent = 'Redémarrage...';
-    fetch('/api/reboot', {method: 'POST'});
+    authFetch('/api/reboot', {method: 'POST'});
   });
   document.getElementById('fwUploadBtn').addEventListener('click', async () => {
     const file = document.getElementById('fwFile').files[0];
@@ -542,7 +703,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (!file) { st.textContent = 'Choisir un fichier'; return; }
     st.textContent = 'Téléversement...';
     try {
-      const resp = await fetch('/api/ota', {method: 'POST', body: file});
+      const resp = await authFetch('/api/ota', {method: 'POST', body: file});
       if (resp.ok) {
         st.textContent = 'Mise à jour envoyée, redémarrage...';
       } else {

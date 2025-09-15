@@ -37,6 +37,7 @@
     </div>
     <div id="editor"></div>
   </div>
+  <script src="auth.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.14/ace.js"></script>
   <script>
     const editor = ace.edit('editor');
@@ -151,7 +152,7 @@
 
     async function loadFileList() {
       try {
-        const resp = await fetch('/api/files/list');
+        const resp = await authFetch('/api/files/list');
         if (!resp.ok) {
           const text = await resp.text();
           throw new Error(extractErrorMessage(text, 'Erreur lors du chargement.'));
@@ -197,7 +198,7 @@
         if (!proceed) return;
       }
       try {
-        const resp = await fetch('/api/files/get?path=' + encodeURIComponent(path));
+        const resp = await authFetch('/api/files/get?path=' + encodeURIComponent(path));
         const text = await resp.text();
         if (!resp.ok) {
           throw new Error(extractErrorMessage(text, 'Impossible de charger le fichier.'));
@@ -221,7 +222,7 @@
     async function saveCurrentFile() {
       if (!currentPath) return;
       try {
-        const resp = await fetch('/api/files/save', {
+        const resp = await authFetch('/api/files/save', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ path: currentPath, content: editor.getValue() })
@@ -247,12 +248,17 @@
       }
     });
 
-    (async () => {
-      const files = await loadFileList();
-      if (Array.isArray(files) && files.includes(DEFAULT_FILE)) {
-        await openFile(DEFAULT_FILE);
-      }
-    })();
+    ensureSession()
+      .then(async () => {
+        const files = await loadFileList();
+        if (Array.isArray(files) && files.includes(DEFAULT_FILE)) {
+          await openFile(DEFAULT_FILE);
+        }
+      })
+      .catch(err => {
+        console.error(err);
+        setMessage('Authentification requise pour accéder aux fichiers.', 'error');
+      });
     updateToolbar();
   </script>
 </body>

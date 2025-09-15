@@ -7,6 +7,7 @@
     body { font-family: Arial, sans-serif; margin: 1em; }
     pre { background: #f0f0f0; padding: 1em; white-space: pre-wrap; }
   </style>
+  <script src="auth.js"></script>
 </head>
 <body>
 <h1>Logs du système</h1>
@@ -14,7 +15,7 @@
 <script>
 async function loadLogs() {
   try {
-    const resp = await fetch('/api/logs');
+    const resp = await authFetch('/api/logs');
     if (!resp.ok) {
       document.getElementById('log').textContent = 'Impossible de charger les logs';
       return;
@@ -25,7 +26,14 @@ async function loadLogs() {
     document.getElementById('log').textContent = 'Erreur de chargement';
   }
 }
-window.addEventListener('DOMContentLoaded', loadLogs);
+window.addEventListener('DOMContentLoaded', () => {
+  ensureSession()
+    .then(loadLogs)
+    .catch(err => {
+      console.error(err);
+      document.getElementById('log').textContent = 'Session requise pour afficher les logs.';
+    });
+});
 </script>
 </body>
 </html>

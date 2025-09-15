@@ -12,6 +12,7 @@
     a { color: #0066cc; text-decoration: none; }
     a:hover { text-decoration: underline; }
   </style>
+  <script src="auth.js"></script>
 </head>
 <body>
 <h1>MiniLabBox Node</h1>
@@ -44,7 +45,7 @@
 // Récupère la configuration pour afficher l'identifiant du nœud
 async function loadConfig() {
   try {
-    const resp = await fetch('/api/config/get');
+    const resp = await authFetch('/api/config/get');
     if (!resp.ok) return;
     const cfg = await resp.json();
     document.getElementById('nodeId').innerText = cfg.nodeId || '';
@@ -56,7 +57,7 @@ async function loadConfig() {
 // Rafraîchit les valeurs des entrées et sorties
 async function loadValues() {
   try {
-    const inResp = await fetch('/api/inputs');
+    const inResp = await authFetch('/api/inputs');
     const inputs = await inResp.json();
     const inputsTBody = document.querySelector('#inputsTable tbody');
     inputsTBody.innerHTML = '';
@@ -75,7 +76,7 @@ async function loadValues() {
       tr.appendChild(tdUnit);
       inputsTBody.appendChild(tr);
     });
-    const outResp = await fetch('/api/outputs');
+    const outResp = await authFetch('/api/outputs');
     const outputs = await outResp.json();
     const outputsTBody = document.querySelector('#outputsTable tbody');
     outputsTBody.innerHTML = '';
@@ -107,7 +108,7 @@ async function loadValues() {
 
 // Envoie une nouvelle valeur pour une sortie
 function setOutput(name, value) {
-  fetch('/api/output/set', {
+  authFetch('/api/output/set', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: name, value: value })
@@ -115,9 +116,15 @@ function setOutput(name, value) {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  loadConfig();
-  loadValues();
-  setInterval(loadValues, 1000);
+  ensureSession()
+    .then(() => {
+      loadConfig();
+      loadValues();
+      setInterval(loadValues, 1000);
+    })
+    .catch(err => {
+      console.error(err);
+    });
 });
 </script>
 </body>
