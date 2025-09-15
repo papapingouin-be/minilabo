@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>Éditeur de fichiers</title>
+  <style>
+    body { margin:0; display:flex; height:100vh; font-family: Arial, sans-serif; }
+    #fileList { width:220px; border-right:1px solid #ccc; padding:0.5em; overflow-y:auto; }
+    #main { flex:1; display:flex; flex-direction:column; }
+    #toolbar { padding:0.5em; border-bottom:1px solid #ccc; }
+    #editor { flex:1; }
+    #fileList a { display:block; padding:2px 0; color:#0066cc; text-decoration:none; }
+    #fileList a:hover { text-decoration:underline; }
+  </style>
+</head>
+<body>
+  <div id="fileList"></div>
+  <div id="main">
+    <div id="toolbar">
+      <button id="saveBtn">Enregistrer</button>
+      <span id="currentFile"></span>
+    </div>
+    <div id="editor"></div>
+  </div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.14/ace.js"></script>
+  <script>
+    const editor = ace.edit('editor');
+    editor.setTheme('ace/theme/monokai');
+    editor.session.setMode('ace/mode/html');
+    let currentPath = '';
+
+    async function loadFileList() {
+      const resp = await fetch('/api/files/list');
+      if (!resp.ok) return;
+      const files = await resp.json();
+      const list = document.getElementById('fileList');
+      list.innerHTML = '';
+      files.forEach(name => {
+        const a = document.createElement('a');
+        a.href = '#';
+        a.textContent = name;
+        a.addEventListener('click', () => openFile(name));
+        list.appendChild(a);
+      });
+    }
+
+    async function openFile(path) {
+      const resp = await fetch('/api/files/get?path=' + encodeURIComponent(path));
+      if (!resp.ok) return;
+      const text = await resp.text();
+      editor.setValue(text, -1);
+      currentPath = path;
+      document.getElementById('currentFile').textContent = path;
+      const mode = path.endsWith('.js') ? 'ace/mode/javascript' : 'ace/mode/html';
+      editor.session.setMode(mode);
+    }
+
+    document.getElementById('saveBtn').addEventListener('click', async () => {
+      if (!currentPath) return;
+      await fetch('/api/files/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: currentPath, content: editor.getValue() })
+      });
+    });
+
+    loadFileList();
+  </script>
+</body>
+</html>
