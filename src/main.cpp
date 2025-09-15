@@ -1193,6 +1193,18 @@ void setup() {
   udp.begin(BROADCAST_PORT);
   setupSensors();
   setupServer();
+  // After network and services are up, show basic status on the OLED
+  // so users immediately know the node ID and how to reach it.  This
+  // reuses the boot logging screen and will remain until another log
+  // message is printed or configuration changes disable OLED logging.
+  if (oledLogging) {
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_5x7_tf);
+    oled.drawStr(0, 8, config.nodeId.c_str());
+    IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
+    oled.drawStr(0, 16, ip.toString().c_str());
+    oled.sendBuffer();
+  }
   // Initialise output pins to their default state
   updateOutputs();
   lastInputUpdate = millis();
