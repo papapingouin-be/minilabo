@@ -489,6 +489,9 @@ static AsyncWebServer redirectServer(80);             // HTTP redirector
 static WiFiUDP udp;               // UDP object for broadcasting and listening
 static Adafruit_ADS1115 ads;      // ADS1115 ADC instance
 static String configSetBody;      // buffer for incoming /api/config/set JSON
+static String loginRequestBody;   // buffer for incoming /api/session/login JSON
+static String outputSetBody;      // buffer for incoming /api/output/set JSON
+static String fileSaveBody;       // buffer for incoming /api/files/save JSON
 
 // Remote value cache.  When a broadcast packet is received from another
 // node, each measurement is stored in this table.  Inputs configured
@@ -1330,52 +1333,77 @@ void sendBroadcast() {
   udp.endPacket();
 }
 
+// Helper used by HTTP POST handlers to accumulate request body data.  The
+// buffer is reset on the first chunk and each byte is appended so JSON payloads
+// are available once AsyncWebServer invokes the main handler.
+static void appendRequestBodyChunk(String &buffer, const uint8_t *data,
+                                   size_t len, size_t index, size_t total) {
+  if (index == 0) {
+    buffer = "";
+    if (total > 0 && total < 65536) {
+      buffer.reserve(total);
+    }
+  }
+  for (size_t i = 0; i < len; i++) {
+    buffer += static_cast<char>(data[i]);
+  }
+}
+
 // Set up the HTTP server and API routes.  Static content is served
 // directly from LittleFS.  Configuration and value endpoints return
 // JSON.  POST requests allow modifying configuration and outputs.
 void setupServer() {
   // Session endpoints (login, logout, status)
-  server.on("/api/session/login", HTTP_POST, [](AsyncWebServerRequest *req) {
-    if (req->contentLength() == 0) {
-      req->send(400, "application/json", "{\"error\":\"No body\"}");
-      return;
-    }
-    String body = req->arg("plain");
-    if (body.length() == 0) {
-      req->send(400, "application/json", "{\"error\":\"No body\"}");
-      return;
-    }
-    DynamicJsonDocument doc(256);
-    if (deserializeJson(doc, body)) {
-      req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-      return;
-    }
-    String pin = doc["pin"].as<String>();
-    pin.trim();
-    if (pin != sessionPin) {
-      AsyncWebServerResponse *res =
-          req->beginResponse(401, "application/json", "{\"error\":\"invalid_pin\"}");
-      String cookie = String(SESSION_COOKIE_NAME) +
-                      "=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict";
-      res->addHeader("Set-Cookie", cookie);
-      req->send(res);
-      return;
-    }
-    sessionToken = generateSessionToken();
-    sessionIssuedAt = millis();
-    sessionLastActivity = sessionIssuedAt;
-    DynamicJsonDocument respDoc(256);
-    respDoc["status"] = "ok";
-    respDoc["token"] = sessionToken;
-    String payload;
-    serializeJson(respDoc, payload);
-    AsyncWebServerResponse *res =
-        req->beginResponse(200, "application/json", payload);
-    String cookie = String(SESSION_COOKIE_NAME) + "=" + sessionToken +
-                    "; Path=/; HttpOnly; Secure; SameSite=Strict";
-    res->addHeader("Set-Cookie", cookie);
-    req->send(res);
-  });
+  server.on(
+      "/api/session/login", HTTP_POST,
+      [](AsyncWebServerRequest *req) {
+        if (req->contentLength() == 0) {
+          loginRequestBody = "";
+          req->send(400, "application/json", "{\"error\":\"No body\"}");
+          return;
+        }
+        String body = loginRequestBody;
+        loginRequestBody = "";
+        if (body.length() == 0) {
+          req->send(400, "application/json", "{\"error\":\"No body\"}");
+          return;
+        }
+        DynamicJsonDocument doc(256);
+        if (deserializeJson(doc, body)) {
+          req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+          return;
+        }
+        String pin = doc["pin"].as<String>();
+        pin.trim();
+        if (pin != sessionPin) {
+          AsyncWebServerResponse *res = req->beginResponse(
+              401, "application/json", "{\"error\":\"invalid_pin\"}");
+          String cookie = String(SESSION_COOKIE_NAME) +
+                          "=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict";
+          res->addHeader("Set-Cookie", cookie);
+          req->send(res);
+          return;
+        }
+        sessionToken = generateSessionToken();
+        sessionIssuedAt = millis();
+        sessionLastActivity = sessionIssuedAt;
+        DynamicJsonDocument respDoc(256);
+        respDoc["status"] = "ok";
+        respDoc["token"] = sessionToken;
+        String payload;
+        serializeJson(respDoc, payload);
+        AsyncWebServerResponse *res =
+            req->beginResponse(200, "application/json", payload);
+        String cookie = String(SESSION_COOKIE_NAME) + "=" + sessionToken +
+                        "; Path=/; HttpOnly; Secure; SameSite=Strict";
+        res->addHeader("Set-Cookie", cookie);
+        req->send(res);
+      },
+      NULL,
+      [](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index,
+         size_t total) {
+        appendRequestBodyChunk(loginRequestBody, data, len, index, total);
+      });
 
   server.on("/api/session/logout", HTTP_POST, [](AsyncWebServerRequest *req) {
     invalidateSession();
@@ -1511,13 +1539,7 @@ void setupServer() {
         if (!extractSessionToken(req, token) || !sessionTokenValid(token, false)) {
           return;
         }
-        if (index == 0) {
-          configSetBody = "";
-          configSetBody.reserve(total);
-        }
-        for (size_t i = 0; i < len; i++) {
-          configSetBody += static_cast<char>(data[i]);
-        }
+        appendRequestBodyChunk(configSetBody, data, len, index, total);
       });
 
   // API: reboot device on demand
@@ -1628,41 +1650,54 @@ void setupServer() {
   });
 
   // API: set an output value.  Expects JSON {"name":"output1","value":x}
-  server.on("/api/output/set", HTTP_POST, [](AsyncWebServerRequest *req) {
-    if (!requireAuth(req)) return;
-    if (req->contentLength() == 0) {
-      req->send(400, "application/json", "{\"error\":\"No body\"}");
-      return;
-    }
-    String body = req->arg("plain");
-    if (body.length() == 0) {
-      req->send(400, "application/json", "{\"error\":\"No body\"}");
-      return;
-    }
-    DynamicJsonDocument doc(512);
-    auto err = deserializeJson(doc, body);
-    if (err) {
-      req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-      return;
-    }
-    String name = doc["name"].as<String>();
-    float val = doc["value"].as<float>();
-    bool found = false;
-    for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
-      if (config.outputs[i].name == name) {
-        config.outputs[i].value = val;
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      req->send(404, "application/json", "{\"error\":\"Unknown output\"}");
-      return;
-    }
-    updateOutputs();
-    saveConfig();
-    req->send(200, "application/json", "{\"status\":\"ok\"}");
-  });
+  server.on(
+      "/api/output/set", HTTP_POST,
+      [](AsyncWebServerRequest *req) {
+        if (!requireAuth(req)) {
+          outputSetBody = "";
+          return;
+        }
+        if (req->contentLength() == 0) {
+          outputSetBody = "";
+          req->send(400, "application/json", "{\"error\":\"No body\"}");
+          return;
+        }
+        String body = outputSetBody;
+        outputSetBody = "";
+        if (body.length() == 0) {
+          req->send(400, "application/json", "{\"error\":\"No body\"}");
+          return;
+        }
+        DynamicJsonDocument doc(512);
+        auto err = deserializeJson(doc, body);
+        if (err) {
+          req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+          return;
+        }
+        String name = doc["name"].as<String>();
+        float val = doc["value"].as<float>();
+        bool found = false;
+        for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
+          if (config.outputs[i].name == name) {
+            config.outputs[i].value = val;
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          req->send(404, "application/json",
+                    "{\"error\":\"Unknown output\"}");
+          return;
+        }
+        updateOutputs();
+        saveConfig();
+        req->send(200, "application/json", "{\"status\":\"ok\"}");
+      },
+      NULL,
+      [](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index,
+         size_t total) {
+        appendRequestBodyChunk(outputSetBody, data, len, index, total);
+      });
 
   // API: return remote values
   server.on("/api/remote", HTTP_GET, [](AsyncWebServerRequest *req) {
@@ -1742,37 +1777,56 @@ void setupServer() {
     req->send(200, "text/plain", content);
   });
 
-  server.on("/api/files/save", HTTP_POST, [](AsyncWebServerRequest *req) {
-    if (!requireAuth(req)) return;
-    if (req->contentLength() == 0) {
-      req->send(400, "application/json", "{\"error\":\"No body\"}");
-      return;
-    }
-    if (!enforceSampleFilePolicy()) {
-      req->send(500, "application/json", "{\"error\":\"storage unavailable\"}");
-      return;
-    }
-    DynamicJsonDocument doc(8192);
-    if (deserializeJson(doc, req->arg("plain"))) {
-      req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-      return;
-    }
-    String clientPath = doc["path"].as<String>();
-    String fsPath;
-    if (!resolveUserPath(clientPath, fsPath)) {
-      req->send(400, "application/json", "{\"error\":\"invalid path\"}");
-      return;
-    }
-    String content = doc["content"].as<String>();
-    File f = LittleFS.open(fsPath, "w");
-    if (!f) {
-      req->send(500, "application/json", "{\"error\":\"open failed\"}");
-      return;
-    }
-    f.print(content);
-    f.close();
-    req->send(200, "application/json", "{\"status\":\"ok\"}");
-  });
+  server.on(
+      "/api/files/save", HTTP_POST,
+      [](AsyncWebServerRequest *req) {
+        if (!requireAuth(req)) {
+          fileSaveBody = "";
+          return;
+        }
+        if (req->contentLength() == 0) {
+          fileSaveBody = "";
+          req->send(400, "application/json", "{\"error\":\"No body\"}");
+          return;
+        }
+        if (!enforceSampleFilePolicy()) {
+          fileSaveBody = "";
+          req->send(500, "application/json",
+                    "{\"error\":\"storage unavailable\"}");
+          return;
+        }
+        String body = fileSaveBody;
+        fileSaveBody = "";
+        if (body.length() == 0) {
+          req->send(400, "application/json", "{\"error\":\"No body\"}");
+          return;
+        }
+        DynamicJsonDocument doc(8192);
+        if (deserializeJson(doc, body)) {
+          req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+          return;
+        }
+        String clientPath = doc["path"].as<String>();
+        String fsPath;
+        if (!resolveUserPath(clientPath, fsPath)) {
+          req->send(400, "application/json", "{\"error\":\"invalid path\"}");
+          return;
+        }
+        String content = doc["content"].as<String>();
+        File f = LittleFS.open(fsPath, "w");
+        if (!f) {
+          req->send(500, "application/json", "{\"error\":\"open failed\"}");
+          return;
+        }
+        f.print(content);
+        f.close();
+        req->send(200, "application/json", "{\"status\":\"ok\"}");
+      },
+      NULL,
+      [](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index,
+         size_t total) {
+        appendRequestBodyChunk(fileSaveBody, data, len, index, total);
+      });
 
   server.on("/api/files/create", HTTP_POST, [](AsyncWebServerRequest *req) {
     if (!requireAuth(req)) return;
