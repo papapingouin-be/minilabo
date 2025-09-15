@@ -478,8 +478,14 @@ struct Config {
 };
 
 static Config config;            // Global configuration instance
-static AsyncWebServer server(443);       // HTTPS server instance
-static AsyncWebServer redirectServer(80); // HTTP redirector
+#if defined(ESP8266)
+static const uint16_t PRIMARY_WEB_PORT = 80;
+static AsyncWebServer server(PRIMARY_WEB_PORT);       // HTTP server (TLS unsupported)
+#else
+static const uint16_t PRIMARY_WEB_PORT = 443;
+static AsyncWebServer server(PRIMARY_WEB_PORT);       // HTTPS server instance
+static AsyncWebServer redirectServer(80);             // HTTP redirector
+#endif
 static WiFiUDP udp;               // UDP object for broadcasting and listening
 static Adafruit_ADS1115 ads;      // ADS1115 ADC instance
 static String configSetBody;      // buffer for incoming /api/config/set JSON
@@ -888,9 +894,10 @@ bool extractSessionToken(AsyncWebServerRequest *req, String &tokenOut) {
   if (req->hasHeader("Cookie")) {
     String cookie = req->header("Cookie");
     int start = 0;
-    while (start < cookie.length()) {
+    int cookieLen = static_cast<int>(cookie.length());
+    while (start < cookieLen) {
       int end = cookie.indexOf(';', start);
-      if (end == -1) end = cookie.length();
+      if (end == -1) end = cookieLen;
       String pair = cookie.substring(start, end);
       pair.trim();
       String prefix = String(SESSION_COOKIE_NAME) + "=";
@@ -1050,7 +1057,9 @@ void setupWiFi() {
   if (MDNS.begin(config.nodeId.c_str())) {
     logMessage("mDNS responder started");
     MDNS.addService("http", "tcp", 80);
+#if !defined(ESP8266)
     MDNS.addService("https", "tcp", 443);
+#endif
   }
 }
 
@@ -1792,11 +1801,17 @@ void setupServer() {
     req->send(403, "application/json", "{\"error\":\"forbidden\"}");
   });
 
+#if defined(ESP8266)
+  // ESP8266 AsyncWebServer does not support TLS. Fall back to plain HTTP.
+  server.begin();
+  logPrintf("HTTP server started on port %u (TLS unavailable on ESP8266)",
+            PRIMARY_WEB_PORT);
+#else
   // Start HTTPS server and HTTP redirector
   if (!server.beginSecure(TLS_CERT, TLS_KEY, nullptr)) {
     logMessage("Failed to start HTTPS server");
   } else {
-    logMessage("HTTPS server started on port 443");
+    logPrintf("HTTPS server started on port %u", PRIMARY_WEB_PORT);
   }
 
   redirectServer.on("/", HTTP_ANY, [](AsyncWebServerRequest *req) {
@@ -1817,6 +1832,7 @@ void setupServer() {
     req->redirect(target);
   });
   redirectServer.begin();
+#endif
 }
 
 // Arduino setup entry point.  Serial is initialised for debug output.
