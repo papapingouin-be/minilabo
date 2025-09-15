@@ -5,20 +5,37 @@
   <title>Éditeur de fichiers</title>
   <style>
     body { margin:0; display:flex; height:100vh; font-family: Arial, sans-serif; }
-    #fileList { width:220px; border-right:1px solid #ccc; padding:0.5em; overflow-y:auto; }
+    #fileList { width:240px; border-right:1px solid #ccc; padding:0.75em; overflow-y:auto; background:#fafafa; }
+    #fileList h2 { margin:0 0 0.2em 0; font-size:1.1em; }
+    #fileList .hint { font-size:0.85em; color:#666; margin:0 0 0.8em 0; }
+    #fileList a { display:block; padding:4px 2px; color:#0066cc; text-decoration:none; border-radius:4px; }
+    #fileList a:hover { background:#e6f0ff; }
+    #fileList a.active { font-weight:bold; color:#202020; background:#dbe8ff; }
+    #fileList .empty { font-size:0.9em; color:#888; }
     #main { flex:1; display:flex; flex-direction:column; }
-    #toolbar { padding:0.5em; border-bottom:1px solid #ccc; }
+    #toolbar { padding:0.6em; border-bottom:1px solid #ccc; display:flex; align-items:center; flex-wrap:wrap; gap:0.5em; }
+    #toolbar button { padding:0.4em 0.9em; }
+    #currentFile { margin-left:auto; font-weight:bold; }
+    #message { font-size:0.9em; }
+    #message.error { color:#c0392b; }
+    #message.success { color:#1e8449; }
     #editor { flex:1; }
-    #fileList a { display:block; padding:2px 0; color:#0066cc; text-decoration:none; }
-    #fileList a:hover { text-decoration:underline; }
   </style>
 </head>
 <body>
-  <div id="fileList"></div>
+  <div id="fileList">
+    <h2>Fichiers privés</h2>
+    <p class="hint">Répertoire : <code>/private</code></p>
+    <div id="fileListContent"></div>
+  </div>
   <div id="main">
     <div id="toolbar">
-      <button id="saveBtn">Enregistrer</button>
-      <span id="currentFile"></span>
+      <button id="newBtn">Nouveau fichier</button>
+      <button id="renameBtn" disabled>Renommer</button>
+      <button id="deleteBtn" disabled>Supprimer</button>
+      <button id="saveBtn" disabled>Enregistrer</button>
+      <span id="message"></span>
+      <span id="currentFile">Aucun fichier ouvert</span>
     </div>
     <div id="editor"></div>
   </div>
@@ -27,44 +44,317 @@
     const editor = ace.edit('editor');
     editor.setTheme('ace/theme/monokai');
     editor.session.setMode('ace/mode/html');
+    editor.setShowPrintMargin(false);
+
+    const fileListContainer = document.getElementById('fileListContent');
+    const currentFileLabel = document.getElementById('currentFile');
+    const messageLabel = document.getElementById('message');
+    const saveBtn = document.getElementById('saveBtn');
+    const renameBtn = document.getElementById('renameBtn');
+    const deleteBtn = document.getElementById('deleteBtn');
+    const newBtn = document.getElementById('newBtn');
+    const ERROR_MESSAGES = {
+      exists: 'Un fichier portant ce nom existe déjà.',
+      'not found': 'Fichier introuvable.',
+      'invalid path': 'Chemin de fichier invalide.',
+      'storage unavailable': 'Stockage indisponible.',
+      'private directory': 'Répertoire privé inaccessible.',
+      'open failed': 'Impossible d\'ouvrir le fichier sur le module.',
+      'delete failed': 'Suppression impossible.',
+      'rename failed': 'Impossible de renommer le fichier.',
+      'No body': 'Requête invalide.',
+      'Invalid JSON': 'JSON invalide.'
+    };
+
     let currentPath = '';
+    let isDirty = false;
+    let suppressDirtyEvents = false;
+    let selectedLink = null;
+    let messageTimer = null;
+
+    function setMessage(text, type = '') {
+      clearTimeout(messageTimer);
+      messageLabel.textContent = text || '';
+      messageLabel.classList.remove('error', 'success');
+      if (type) {
+        messageLabel.classList.add(type);
+      }
+      if (text) {
+        messageTimer = setTimeout(() => {
+          messageLabel.textContent = '';
+          messageLabel.classList.remove('error', 'success');
+        }, 4000);
+      }
+    }
+
+    function updateToolbar() {
+      saveBtn.disabled = !currentPath || !isDirty;
+      renameBtn.disabled = !currentPath;
+      deleteBtn.disabled = !currentPath;
+      currentFileLabel.textContent = currentPath
+        ? `Fichier : ${currentPath}${isDirty ? ' *' : ''}`
+        : 'Aucun fichier ouvert';
+    }
+
+    function setDirty(value) {
+      isDirty = value;
+      updateToolbar();
+    }
+
+    function selectFileLink(path) {
+      if (selectedLink) {
+        selectedLink.classList.remove('active');
+        selectedLink = null;
+      }
+      if (!path) return;
+      const links = fileListContainer.querySelectorAll('a[data-path]');
+      links.forEach(link => {
+        if (link.dataset.path === path) {
+          selectedLink = link;
+        }
+      });
+      if (selectedLink) {
+        selectedLink.classList.add('active');
+      }
+    }
+
+    function validateFileName(name) {
+      if (name === null || name === undefined) return null;
+      const trimmed = name.trim();
+      if (!trimmed) return null;
+      if (trimmed.includes('..')) return null;
+      if (!/^[^\\\/]+$/.test(trimmed)) return null;
+      return trimmed;
+    }
+
+    function extractErrorMessage(payload, fallback) {
+      if (!payload) return fallback;
+      try {
+        const parsed = JSON.parse(payload);
+        if (parsed) {
+          const key = parsed.error || parsed.message;
+          if (key && Object.prototype.hasOwnProperty.call(ERROR_MESSAGES, key)) {
+            return ERROR_MESSAGES[key];
+          }
+          if (key) {
+            return key;
+          }
+        }
+      } catch (err) {
+        // Ignore parsing errors and fall back to raw payload.
+      }
+      if (Object.prototype.hasOwnProperty.call(ERROR_MESSAGES, payload)) {
+        return ERROR_MESSAGES[payload];
+      }
+      return payload;
+    }
+
+    function guessEditorMode(path) {
+      const lower = path.toLowerCase();
+      if (lower.endsWith('.js')) return 'ace/mode/javascript';
+      if (lower.endsWith('.css')) return 'ace/mode/css';
+      if (lower.endsWith('.json')) return 'ace/mode/json';
+      if (lower.endsWith('.md')) return 'ace/mode/markdown';
+      if (lower.endsWith('.txt') || lower.endsWith('.log')) return 'ace/mode/text';
+      if (lower.endsWith('.c') || lower.endsWith('.h') || lower.endsWith('.cpp') || lower.endsWith('.hpp') || lower.endsWith('.ino')) {
+        return 'ace/mode/c_cpp';
+      }
+      if (lower.endsWith('.xml')) return 'ace/mode/xml';
+      return 'ace/mode/html';
+    }
 
     async function loadFileList() {
-      const resp = await fetch('/api/files/list');
-      if (!resp.ok) return;
-      const files = await resp.json();
-      const list = document.getElementById('fileList');
-      list.innerHTML = '';
-      files.forEach(name => {
-        const a = document.createElement('a');
-        a.href = '#';
-        a.textContent = name;
-        a.addEventListener('click', () => openFile(name));
-        list.appendChild(a);
-      });
+      try {
+        const resp = await fetch('/api/files/list');
+        if (!resp.ok) {
+          const text = await resp.text();
+          throw new Error(extractErrorMessage(text, 'Erreur lors du chargement.'));
+        }
+        const data = await resp.json();
+        fileListContainer.innerHTML = '';
+        if (!Array.isArray(data) || data.length === 0) {
+          const empty = document.createElement('p');
+          empty.className = 'empty';
+          empty.textContent = 'Aucun fichier disponible.';
+          fileListContainer.appendChild(empty);
+          selectFileLink('');
+          return;
+        }
+        data.forEach(name => {
+          const link = document.createElement('a');
+          link.href = '#';
+          link.dataset.path = name;
+          link.textContent = name;
+          link.addEventListener('click', evt => {
+            evt.preventDefault();
+            openFile(name);
+          });
+          fileListContainer.appendChild(link);
+        });
+        selectFileLink(currentPath);
+      } catch (err) {
+        fileListContainer.innerHTML = '<p class="empty">Impossible de charger la liste.</p>';
+        setMessage(err.message || 'Erreur de lecture du répertoire privé.', 'error');
+        console.error(err);
+      }
     }
 
     async function openFile(path) {
-      const resp = await fetch('/api/files/get?path=' + encodeURIComponent(path));
-      if (!resp.ok) return;
-      const text = await resp.text();
-      editor.setValue(text, -1);
-      currentPath = path;
-      document.getElementById('currentFile').textContent = path;
-      const mode = path.endsWith('.js') ? 'ace/mode/javascript' : 'ace/mode/html';
-      editor.session.setMode(mode);
+      if (!path) return;
+      if (isDirty && currentPath && currentPath !== path) {
+        const proceed = confirm('Les modifications non enregistrées seront perdues. Continuer ?');
+        if (!proceed) return;
+      }
+      try {
+        const resp = await fetch('/api/files/get?path=' + encodeURIComponent(path));
+        const text = await resp.text();
+        if (!resp.ok) {
+          throw new Error(extractErrorMessage(text, 'Impossible de charger le fichier.'));
+        }
+        suppressDirtyEvents = true;
+        editor.setValue(text, -1);
+        editor.session.getUndoManager().reset();
+        suppressDirtyEvents = false;
+        currentPath = path;
+        editor.session.setMode(guessEditorMode(path));
+        editor.focus();
+        setDirty(false);
+        selectFileLink(path);
+        setMessage(`Fichier "${path}" chargé.`, 'success');
+      } catch (err) {
+        setMessage(err.message, 'error');
+        console.error(err);
+      }
     }
 
-    document.getElementById('saveBtn').addEventListener('click', async () => {
+    async function saveCurrentFile() {
       if (!currentPath) return;
-      await fetch('/api/files/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: currentPath, content: editor.getValue() })
-      });
+      try {
+        const resp = await fetch('/api/files/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: currentPath, content: editor.getValue() })
+        });
+        const payload = await resp.text();
+        if (!resp.ok) {
+          throw new Error(extractErrorMessage(payload, 'Échec de l\'enregistrement.'));
+        }
+        setDirty(false);
+        setMessage(`Fichier "${currentPath}" enregistré.`, 'success');
+      } catch (err) {
+        setMessage(err.message, 'error');
+        console.error(err);
+      }
+    }
+
+    async function createFile() {
+      const input = prompt('Nom du nouveau fichier (répertoire /private) :');
+      if (input === null) return;
+      const name = validateFileName(input);
+      if (!name) {
+        setMessage('Nom de fichier invalide.', 'error');
+        return;
+      }
+      try {
+        const resp = await fetch('/api/files/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: name, content: '' })
+        });
+        const payload = await resp.text();
+        if (!resp.ok) {
+          throw new Error(extractErrorMessage(payload, 'Impossible de créer le fichier.'));
+        }
+        await loadFileList();
+        await openFile(name);
+        setMessage(`Fichier "${name}" créé.`, 'success');
+      } catch (err) {
+        setMessage(err.message, 'error');
+        console.error(err);
+      }
+    }
+
+    async function renameFile() {
+      if (!currentPath) return;
+      if (isDirty) {
+        setMessage('Enregistrez le fichier avant de le renommer.', 'error');
+        return;
+      }
+      const input = prompt('Nouveau nom pour le fichier :', currentPath);
+      if (input === null) return;
+      const name = validateFileName(input);
+      if (!name) {
+        setMessage('Nom de fichier invalide.', 'error');
+        return;
+      }
+      if (name === currentPath) {
+        return;
+      }
+      try {
+        const resp = await fetch('/api/files/rename', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from: currentPath, to: name })
+        });
+        const payload = await resp.text();
+        if (!resp.ok) {
+          throw new Error(extractErrorMessage(payload, 'Impossible de renommer le fichier.'));
+        }
+        currentPath = name;
+        editor.session.setMode(guessEditorMode(name));
+        await loadFileList();
+        updateToolbar();
+        selectFileLink(name);
+        setMessage('Fichier renommé.', 'success');
+      } catch (err) {
+        setMessage(err.message, 'error');
+        console.error(err);
+      }
+    }
+
+    async function deleteFile() {
+      if (!currentPath) return;
+      const confirmDelete = confirm(`Supprimer définitivement "${currentPath}" ?`);
+      if (!confirmDelete) return;
+      try {
+        const resp = await fetch('/api/files/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: currentPath })
+        });
+        const payload = await resp.text();
+        if (!resp.ok) {
+          throw new Error(extractErrorMessage(payload, 'Impossible de supprimer le fichier.'));
+        }
+        suppressDirtyEvents = true;
+        editor.setValue('', -1);
+        editor.session.getUndoManager().reset();
+        suppressDirtyEvents = false;
+        currentPath = '';
+        setDirty(false);
+        await loadFileList();
+        selectFileLink('');
+        setMessage('Fichier supprimé.', 'success');
+      } catch (err) {
+        setMessage(err.message, 'error');
+        console.error(err);
+      }
+    }
+
+    newBtn.addEventListener('click', createFile);
+    renameBtn.addEventListener('click', renameFile);
+    deleteBtn.addEventListener('click', deleteFile);
+    saveBtn.addEventListener('click', saveCurrentFile);
+
+    editor.session.on('change', () => {
+      if (suppressDirtyEvents) return;
+      if (currentPath) {
+        setDirty(true);
+      }
     });
 
     loadFileList();
+    updateToolbar();
   </script>
 </body>
 </html>

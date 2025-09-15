@@ -18,6 +18,8 @@
     .hidden { display: none; }
     label.inline { display: inline-block; margin-right: 0.5em; }
     button { padding: 0.5em 1em; font-size: 1em; }
+    #cacheAceStatus { margin-top: 0.5em; color: #555; font-size: 0.9em; }
+    #cacheAceStatus.error { color: #c0392b; }
   </style>
 </head>
 <body>
@@ -84,6 +86,14 @@
     <span id="fwStatus" style="margin-left:1em;"></span>
   </fieldset>
 
+  <fieldset>
+    <legend>Cache de l'éditeur de fichiers</legend>
+    <p>Le script Ace utilisé par l'éditeur de fichiers est chargé depuis le CDN. Vous pouvez le précharger dans le cache du navigateur pour améliorer l'ouverture hors connexion.</p>
+    <button type="button" id="cacheAceBtn">Mettre en cache la librairie</button>
+    <button type="button" id="cacheAceClearBtn">Vider le cache</button>
+    <div id="cacheAceStatus"></div>
+  </fieldset>
+
   <button id="saveBtn">Enregistrer et redémarrer</button>
   <span id="status" style="margin-left:1em;"></span>
 </form>
@@ -91,6 +101,11 @@
 <script>
 const MAX_INPUTS = 4;
 const MAX_OUTPUTS = 2;
+const ACE_CACHE_NAME = 'minilabbox-ace-cache';
+const ACE_CDN_URL = 'https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.14/ace.js';
+let aceCacheStatusEl;
+let aceCacheBtn;
+let aceCacheClearBtn;
 
 // Create rows for inputs and outputs based on constants
 function buildTables() {
@@ -404,6 +419,90 @@ function showHideWifi() {
   }
 }
 
+function setAceStatus(text, isError = false) {
+  if (!aceCacheStatusEl) return;
+  aceCacheStatusEl.textContent = text;
+  if (isError) {
+    aceCacheStatusEl.classList.add('error');
+  } else {
+    aceCacheStatusEl.classList.remove('error');
+  }
+}
+
+async function updateAceCacheStatus() {
+  if (!aceCacheStatusEl || !aceCacheBtn || !aceCacheClearBtn) return;
+  if (!('caches' in window)) {
+    aceCacheBtn.disabled = true;
+    aceCacheClearBtn.disabled = true;
+    setAceStatus('API Cache indisponible dans ce navigateur.', true);
+    return;
+  }
+  try {
+    const keys = await caches.keys();
+    const hasCache = keys.includes(ACE_CACHE_NAME);
+    let cached = false;
+    if (hasCache) {
+      const cache = await caches.open(ACE_CACHE_NAME);
+      const match = await cache.match(ACE_CDN_URL);
+      cached = !!match;
+    }
+    const timestamp = localStorage.getItem('aceCacheTimestamp');
+    if (cached) {
+      const readable = timestamp ? new Date(timestamp).toLocaleString() : 'inconnue';
+      setAceStatus(`Librairie en cache (mise à jour : ${readable}).`);
+      aceCacheBtn.textContent = 'Actualiser le cache';
+      aceCacheClearBtn.disabled = false;
+    } else {
+      setAceStatus('Librairie non mise en cache.');
+      aceCacheBtn.textContent = 'Mettre en cache la librairie';
+      aceCacheClearBtn.disabled = !hasCache;
+    }
+    aceCacheBtn.disabled = false;
+  } catch (err) {
+    console.error(err);
+    setAceStatus('Erreur lors de l’accès au cache.', true);
+    aceCacheBtn.disabled = false;
+    aceCacheClearBtn.disabled = false;
+  }
+}
+
+async function cacheAceLibrary() {
+  if (!('caches' in window) || !aceCacheBtn) return;
+  aceCacheBtn.disabled = true;
+  setAceStatus('Mise en cache en cours...');
+  let errorMessage = '';
+  try {
+    const cache = await caches.open(ACE_CACHE_NAME);
+    await cache.add(new Request(ACE_CDN_URL, { mode: 'cors' }));
+    localStorage.setItem('aceCacheTimestamp', new Date().toISOString());
+  } catch (err) {
+    console.error(err);
+    errorMessage = `Échec de la mise en cache : ${err.message}`;
+  }
+  await updateAceCacheStatus();
+  if (errorMessage) {
+    setAceStatus(errorMessage, true);
+  }
+}
+
+async function clearAceCache() {
+  if (!('caches' in window) || !aceCacheClearBtn) return;
+  aceCacheClearBtn.disabled = true;
+  setAceStatus('Suppression du cache...');
+  let errorMessage = '';
+  try {
+    await caches.delete(ACE_CACHE_NAME);
+    localStorage.removeItem('aceCacheTimestamp');
+  } catch (err) {
+    console.error(err);
+    errorMessage = `Erreur lors de la suppression du cache : ${err.message}`;
+  }
+  await updateAceCacheStatus();
+  if (errorMessage) {
+    setAceStatus(errorMessage, true);
+  }
+}
+
 // Event listeners
 window.addEventListener('DOMContentLoaded', () => {
   buildTables();
@@ -446,6 +545,14 @@ window.addEventListener('DOMContentLoaded', () => {
       st.textContent = 'Erreur de mise à jour';
     }
   });
+  aceCacheStatusEl = document.getElementById('cacheAceStatus');
+  aceCacheBtn = document.getElementById('cacheAceBtn');
+  aceCacheClearBtn = document.getElementById('cacheAceClearBtn');
+  if (aceCacheBtn && aceCacheClearBtn && aceCacheStatusEl) {
+    aceCacheBtn.addEventListener('click', cacheAceLibrary);
+    aceCacheClearBtn.addEventListener('click', clearAceCache);
+    updateAceCacheStatus();
+  }
 });
 </script>
 </body>
