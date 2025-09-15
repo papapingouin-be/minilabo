@@ -42,16 +42,18 @@ static const char *LOG_PATH = "/log.txt";
 // configuration is modified via the web API, OLED logging is disabled to free
 // the screen for application use.
 // ---------------------------------------------------------------------------
-static U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+static U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(
+    U8G2_R0, /* reset=*/ U8X8_PIN_NONE, /* clock=*/ 14, /* data=*/ 12);
 static bool oledLogging = true;
 
 static bool initOled() {
   Serial.println("Initialising OLED...");
   // Ensure the I2C bus is initialised before interacting with the OLED.
-  // Some boards require explicit pin numbers otherwise the display stays
-  // blank.  Using the typical SDA/SCL pins fixes boot issues where the
-  // bus was not started.
-  Wire.begin(4, 5);  // SDA = GPIO4 (D2), SCL = GPIO5 (D1)
+  // The manufacturer wiring uses SDA on GPIO12 (D6) and SCL on GPIO14 (D5),
+  // so the firmware must configure the same pins instead of the default D2/D1
+  // pair.  Using the documented wiring matches the standalone example
+  // provided with the display.
+  Wire.begin(12, 14);  // SDA = GPIO12 (D6), SCL = GPIO14 (D5)
 
   // Some modules use address 0x3C while others use 0x3D.  Probe both
   // addresses and pick the first one that responds.  This avoids false
@@ -82,13 +84,15 @@ static bool initOled() {
   oled.clearBuffer();
   oled.setFont(u8g2_font_5x7_tf);
   oled.sendBuffer();
-  Serial.printf("OLED initialised at 0x%02X\n", address);
+  Serial.printf("OLED initialised at 0x%02X using SDA=GPIO12 SCL=GPIO14\n",
+                address);
   return true;
 }
 
 static void oledLog(const String &msg) {
   if (!oledLogging) return;
   oled.clearBuffer();
+  oled.setFont(u8g2_font_5x7_tf);
   String shortMsg = msg;
   if (shortMsg.length() > 21) {
     shortMsg.remove(21);
@@ -1185,7 +1189,7 @@ void setup() {
   initLogging();
   logMessage("MiniLabBox v2 starting...");
   if (!oledOk) {
-    logMessage("OLED not detected at 0x3C");
+    logMessage("OLED not detected (check wiring on GPIO12/GPIO14)");
   }
   loadConfig();
   setupWiFi();
@@ -1199,11 +1203,12 @@ void setup() {
   // message is printed or configuration changes disable OLED logging.
   if (oledLogging) {
     oled.clearBuffer();
-    oled.setFont(u8g2_font_5x7_tf);
-    oled.drawStr(0, 8, config.nodeId.c_str());
+    oled.setFont(u8g2_font_7x14B_tr);
+    oled.drawStr(0, 16, config.nodeId.c_str());
     IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
-    oled.drawStr(0, 16, ip.toString().c_str());
+    oled.drawStr(0, 32, ip.toString().c_str());
     oled.sendBuffer();
+    oled.setFont(u8g2_font_5x7_tf);
   }
   // Initialise output pins to their default state
   updateOutputs();
