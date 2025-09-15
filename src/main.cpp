@@ -52,14 +52,14 @@ static bool resolveUserPath(const String &clientPath, String &fsPath) {
   if (clientPath.length() == 0) return false;
   String cleaned = clientPath;
   cleaned.replace('\\', '/');
-  while (cleaned.startsWith('/')) {
+  while (cleaned.startsWith("/")) {
     cleaned.remove(0, 1);
   }
   cleaned.trim();
   if (cleaned.length() == 0) return false;
   if (cleaned.indexOf("//") != -1) return false;
   int start = 0;
-  while (start < cleaned.length()) {
+  while (start < static_cast<int>(cleaned.length())) {
     int sep = cleaned.indexOf('/', start);
     int end = (sep == -1) ? cleaned.length() : sep;
     String segment = cleaned.substring(start, end);
