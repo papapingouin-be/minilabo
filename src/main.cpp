@@ -25,6 +25,9 @@
 #include <ESP8266mDNS.h>
 #include <U8g2lib.h>
 #include <Updater.h>
+#if defined(ASYNC_TCP_SSL_ENABLED)
+#include <type_traits>
+#endif
 
 static const char *FIRMWARE_VERSION = "1.0.0";
 
@@ -34,6 +37,7 @@ static const char *FIRMWARE_VERSION = "1.0.0";
 // The certificate is embedded directly in firmware so the device can expose
 // HTTPS endpoints without external provisioning.
 // ---------------------------------------------------------------------------
+#if defined(ASYNC_TCP_SSL_ENABLED)
 static const char TLS_CERT[] PROGMEM = R"CERT(-----BEGIN CERTIFICATE-----
 MIIDvTCCAqWgAwIBAgIUSPqBltAiDymlJeyrbqMDBZOYx74wDQYJKoZIhvcNAQEL
 BQAwbjELMAkGA1UEBhMCRlIxDDAKBgNVBAgMA0lERjEOMAwGA1UEBwwFUGFyaXMx
@@ -88,6 +92,33 @@ oAETBCgzxCO/AYrebG18rXFBbR8uGVUiRHvxzhUiqyITY7/3/59dISVXkZZQ+kDf
 xfuP17fzRNjzewM8mDmktjA=
 -----END PRIVATE KEY-----
 )KEY";
+#endif
+
+#if defined(ASYNC_TCP_SSL_ENABLED)
+template <typename ServerType>
+static bool beginSecureServerImpl(ServerType &server, const char *cert,
+                                  const char *key, const char *password,
+                                  std::true_type) {
+  server.beginSecure(cert, key, password);
+  return true;
+}
+
+template <typename ServerType>
+static bool beginSecureServerImpl(ServerType &server, const char *cert,
+                                  const char *key, const char *password,
+                                  std::false_type) {
+  return server.beginSecure(cert, key, password);
+}
+
+template <typename ServerType>
+static bool beginSecureServer(ServerType &server, const char *cert,
+                              const char *key, const char *password) {
+  using BeginSecureReturn =
+      decltype(server.beginSecure(cert, key, password));
+  return beginSecureServerImpl(server, cert, key, password,
+                               typename std::is_void<BeginSecureReturn>::type{});
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Simple logging facility.  Log messages are written to Serial and appended
@@ -478,9 +509,14 @@ struct Config {
 };
 
 static Config config;            // Global configuration instance
+#if defined(ASYNC_TCP_SSL_ENABLED)
 static const uint16_t PRIMARY_WEB_PORT = 443;
 static AsyncWebServer server(PRIMARY_WEB_PORT);       // HTTPS server instance
 static AsyncWebServer redirectServer(80);             // HTTP redirector
+#else
+static const uint16_t PRIMARY_WEB_PORT = 80;
+static AsyncWebServer server(PRIMARY_WEB_PORT);       // Primary server instance
+#endif
 static WiFiUDP udp;               // UDP object for broadcasting and listening
 static Adafruit_ADS1115 ads;      // ADS1115 ADC instance
 static String configSetBody;      // buffer for incoming /api/config/set JSON
@@ -1034,8 +1070,8 @@ void triggerDiscovery() {
 // Initialise Wi-Fi according to the configuration.  If STA mode is
 // requested but connection fails within a timeout, the ESP8266 falls
 // back to AP mode.  Once connected, an mDNS hostname is published
-// allowing access via https://nodeId.local/ (with HTTP redirect support)
-// on the same network.
+// allowing access via nodeId.local on the same network.  When TLS is
+// enabled the HTTPS endpoint is announced alongside an HTTP redirector.
 void setupWiFi() {
   WiFi.mode(WIFI_OFF);
   delay(100);
@@ -1067,8 +1103,12 @@ void setupWiFi() {
   // Start mDNS if possible
   if (MDNS.begin(config.nodeId.c_str())) {
     logMessage("mDNS responder started");
+#if defined(ASYNC_TCP_SSL_ENABLED)
     MDNS.addService("http", "tcp", 80);
     MDNS.addService("https", "tcp", PRIMARY_WEB_PORT);
+#else
+    MDNS.addService("http", "tcp", PRIMARY_WEB_PORT);
+#endif
   }
 }
 
@@ -1858,8 +1898,9 @@ void setupServer() {
     req->send(403, "application/json", "{\"error\":\"forbidden\"}");
   });
 
+#if defined(ASYNC_TCP_SSL_ENABLED)
   // Start HTTPS server and HTTP redirector
-  bool httpsStarted = server.beginSecure(TLS_CERT, TLS_KEY, nullptr);
+  bool httpsStarted = beginSecureServer(server, TLS_CERT, TLS_KEY, nullptr);
   if (!httpsStarted) {
     logMessage("Failed to start HTTPS server");
     return;
@@ -1884,6 +1925,10 @@ void setupServer() {
     req->redirect(target);
   });
   redirectServer.begin();
+#else
+  server.begin();
+  logPrintf("HTTP server started on port %u (TLS disabled)", PRIMARY_WEB_PORT);
+#endif
 }
 
 // Arduino setup entry point.  Serial is initialised for debug output.
