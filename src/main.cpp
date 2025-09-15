@@ -35,6 +35,67 @@ static const char *FIRMWARE_VERSION = "1.0.0";
 // HTTP for display in the UI.
 // ---------------------------------------------------------------------------
 static const char *LOG_PATH = "/log.txt";
+static const char *USER_FILES_DIR = "/private";
+
+static bool ensureUserDirectory() {
+  if (LittleFS.exists(USER_FILES_DIR)) {
+    return true;
+  }
+  if (!LittleFS.mkdir(USER_FILES_DIR)) {
+    Serial.println("Failed to create private user directory");
+    return false;
+  }
+  return true;
+}
+
+static bool resolveUserPath(const String &clientPath, String &fsPath) {
+  if (clientPath.length() == 0) return false;
+  String cleaned = clientPath;
+  cleaned.replace('\\', '/');
+  while (cleaned.startsWith('/')) {
+    cleaned.remove(0, 1);
+  }
+  cleaned.trim();
+  if (cleaned.length() == 0) return false;
+  if (cleaned.indexOf("//") != -1) return false;
+  int start = 0;
+  while (start < cleaned.length()) {
+    int sep = cleaned.indexOf('/', start);
+    int end = (sep == -1) ? cleaned.length() : sep;
+    String segment = cleaned.substring(start, end);
+    if (segment.length() == 0 || segment == "." || segment == "..") {
+      return false;
+    }
+    start = (sep == -1) ? cleaned.length() : sep + 1;
+  }
+  fsPath = String(USER_FILES_DIR) + "/" + cleaned;
+  if (!fsPath.startsWith(String(USER_FILES_DIR) + "/")) {
+    return false;
+  }
+  return true;
+}
+
+static String toRelativeUserPath(const String &fsPath) {
+  String prefix = String(USER_FILES_DIR) + "/";
+  if (fsPath.startsWith(prefix)) {
+    return fsPath.substring(prefix.length());
+  }
+  String prefixNoSlash = prefix;
+  if (prefixNoSlash.startsWith("/")) {
+    prefixNoSlash.remove(0, 1);
+  }
+  if (fsPath.startsWith(prefixNoSlash)) {
+    return fsPath.substring(prefixNoSlash.length());
+  }
+  String dirNoSlash = String(USER_FILES_DIR);
+  if (dirNoSlash.startsWith("/")) {
+    dirNoSlash.remove(0, 1);
+  }
+  if (fsPath == dirNoSlash || fsPath == String(USER_FILES_DIR)) {
+    return "";
+  }
+  return fsPath;
+}
 
 // ---------------------------------------------------------------------------
 // OLED display support.  During boot we render log messages to the attached
@@ -1120,15 +1181,25 @@ void setupServer() {
 
   // API: simple file browser (LittleFS)
   server.on("/api/files/list", HTTP_GET, [](AsyncWebServerRequest *req) {
-    String dir = "/";
-    if (req->hasParam("dir")) {
-      dir = req->getParam("dir")->value();
+    if (!ensureUserDirectory()) {
+      req->send(500, "application/json", "{\"error\":\"private directory\"}");
+      return;
     }
     DynamicJsonDocument doc(1024);
     JsonArray arr = doc.to<JsonArray>();
-    Dir d = LittleFS.openDir(dir);
+    Dir d = LittleFS.openDir(USER_FILES_DIR);
     while (d.next()) {
-      arr.add(d.fileName());
+      if (d.isDirectory()) {
+        continue;
+      }
+      String relative = toRelativeUserPath(d.fileName());
+      if (relative.length() == 0) {
+        continue;
+      }
+      if (relative.indexOf('/') != -1) {
+        continue;
+      }
+      arr.add(relative);
     }
     String resp;
     serializeJson(arr, resp);
@@ -1140,12 +1211,25 @@ void setupServer() {
       req->send(400, "text/plain", "missing path");
       return;
     }
-    String path = req->getParam("path")->value();
-    if (!LittleFS.exists(path)) {
+    if (!ensureUserDirectory()) {
+      req->send(500, "text/plain", "storage unavailable");
+      return;
+    }
+    String clientPath = req->getParam("path")->value();
+    String fsPath;
+    if (!resolveUserPath(clientPath, fsPath)) {
+      req->send(400, "text/plain", "invalid path");
+      return;
+    }
+    if (!LittleFS.exists(fsPath)) {
       req->send(404, "text/plain", "not found");
       return;
     }
-    File f = LittleFS.open(path, "r");
+    File f = LittleFS.open(fsPath, "r");
+    if (!f) {
+      req->send(500, "text/plain", "open failed");
+      return;
+    }
     String content = f.readString();
     f.close();
     req->send(200, "text/plain", content);
@@ -1156,20 +1240,137 @@ void setupServer() {
       req->send(400, "application/json", "{\"error\":\"No body\"}");
       return;
     }
+    if (!ensureUserDirectory()) {
+      req->send(500, "application/json", "{\"error\":\"storage unavailable\"}");
+      return;
+    }
     DynamicJsonDocument doc(8192);
     if (deserializeJson(doc, req->arg("plain"))) {
       req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
       return;
     }
-    String path = doc["path"].as<String>();
+    String clientPath = doc["path"].as<String>();
+    String fsPath;
+    if (!resolveUserPath(clientPath, fsPath)) {
+      req->send(400, "application/json", "{\"error\":\"invalid path\"}");
+      return;
+    }
     String content = doc["content"].as<String>();
-    File f = LittleFS.open(path, "w");
+    File f = LittleFS.open(fsPath, "w");
     if (!f) {
       req->send(500, "application/json", "{\"error\":\"open failed\"}");
       return;
     }
     f.print(content);
     f.close();
+    req->send(200, "application/json", "{\"status\":\"ok\"}");
+  });
+
+  server.on("/api/files/create", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (req->contentLength() == 0) {
+      req->send(400, "application/json", "{\"error\":\"No body\"}");
+      return;
+    }
+    if (!ensureUserDirectory()) {
+      req->send(500, "application/json", "{\"error\":\"storage unavailable\"}");
+      return;
+    }
+    DynamicJsonDocument doc(2048);
+    if (deserializeJson(doc, req->arg("plain"))) {
+      req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+      return;
+    }
+    String clientPath = doc["path"].as<String>();
+    String fsPath;
+    if (!resolveUserPath(clientPath, fsPath)) {
+      req->send(400, "application/json", "{\"error\":\"invalid path\"}");
+      return;
+    }
+    if (LittleFS.exists(fsPath)) {
+      req->send(409, "application/json", "{\"error\":\"exists\"}");
+      return;
+    }
+    String content = "";
+    if (doc.containsKey("content")) {
+      content = doc["content"].as<String>();
+    }
+    File f = LittleFS.open(fsPath, "w");
+    if (!f) {
+      req->send(500, "application/json", "{\"error\":\"open failed\"}");
+      return;
+    }
+    if (content.length() > 0) {
+      f.print(content);
+    }
+    f.close();
+    req->send(200, "application/json", "{\"status\":\"ok\"}");
+  });
+
+  server.on("/api/files/rename", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (req->contentLength() == 0) {
+      req->send(400, "application/json", "{\"error\":\"No body\"}");
+      return;
+    }
+    if (!ensureUserDirectory()) {
+      req->send(500, "application/json", "{\"error\":\"storage unavailable\"}");
+      return;
+    }
+    DynamicJsonDocument doc(2048);
+    if (deserializeJson(doc, req->arg("plain"))) {
+      req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+      return;
+    }
+    String fromClient = doc["from"].as<String>();
+    String toClient = doc["to"].as<String>();
+    String fromPath;
+    String toPath;
+    if (!resolveUserPath(fromClient, fromPath) || !resolveUserPath(toClient, toPath)) {
+      req->send(400, "application/json", "{\"error\":\"invalid path\"}");
+      return;
+    }
+    if (!LittleFS.exists(fromPath)) {
+      req->send(404, "application/json", "{\"error\":\"not found\"}");
+      return;
+    }
+    if (LittleFS.exists(toPath)) {
+      req->send(409, "application/json", "{\"error\":\"exists\"}");
+      return;
+    }
+    if (!LittleFS.rename(fromPath, toPath)) {
+      req->send(500, "application/json", "{\"error\":\"rename failed\"}");
+      return;
+    }
+    req->send(200, "application/json", "{\"status\":\"ok\"}");
+  });
+
+  server.on("/api/files/delete", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (req->contentLength() == 0) {
+      req->send(400, "application/json", "{\"error\":\"No body\"}");
+      return;
+    }
+    if (!ensureUserDirectory()) {
+      req->send(500, "application/json", "{\"error\":\"storage unavailable\"}");
+      return;
+    }
+    DynamicJsonDocument doc(1024);
+    if (deserializeJson(doc, req->arg("plain"))) {
+      req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+      return;
+    }
+    String clientPath = doc["path"].as<String>();
+    String fsPath;
+    if (!resolveUserPath(clientPath, fsPath)) {
+      req->send(400, "application/json", "{\"error\":\"invalid path\"}");
+      return;
+    }
+    if (!LittleFS.exists(fsPath)) {
+      req->send(404, "application/json", "{\"error\":\"not found\"}");
+      return;
+    }
+    if (!LittleFS.remove(fsPath)) {
+      req->send(500, "application/json", "{\"error\":\"delete failed\"}");
+      return;
+    }
     req->send(200, "application/json", "{\"status\":\"ok\"}");
   });
 
@@ -1187,6 +1388,9 @@ void setup() {
   Serial.println();
   bool oledOk = initOled();
   initLogging();
+  if (!ensureUserDirectory()) {
+    logMessage("Failed to ensure private directory /private");
+  }
   logMessage("MiniLabBox v2 starting...");
   if (!oledOk) {
     logMessage("OLED not detected (check wiring on GPIO12/GPIO14)");
