@@ -550,6 +550,7 @@ void parseConfigFromJson(const JsonDocument &doc);
 String formatPin(uint16_t value);
 void initialiseSecurity();
 String generateSessionToken();
+String buildSessionCookie(const String &value, bool expire);
 bool extractSessionToken(AsyncWebServerRequest *req, String &tokenOut);
 bool sessionTokenValid(const String &token, bool refreshActivity);
 bool requireAuth(AsyncWebServerRequest *req);
@@ -890,6 +891,19 @@ String generateSessionToken() {
   }
   buf[32] = '\0';
   return String(buf);
+}
+
+String buildSessionCookie(const String &value, bool expire) {
+  String cookie = String(SESSION_COOKIE_NAME) + "=" + value + "; Path=/";
+  if (expire) {
+    cookie += "; Max-Age=0";
+  }
+  cookie += "; HttpOnly";
+#if !defined(ESP8266)
+  cookie += "; Secure";
+#endif
+  cookie += "; SameSite=Strict";
+  return cookie;
 }
 
 bool extractSessionToken(AsyncWebServerRequest *req, String &tokenOut) {
@@ -1378,8 +1392,7 @@ void setupServer() {
         if (pin != sessionPin) {
           AsyncWebServerResponse *res = req->beginResponse(
               401, "application/json", "{\"error\":\"invalid_pin\"}");
-          String cookie = String(SESSION_COOKIE_NAME) +
-                          "=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict";
+          String cookie = buildSessionCookie("", true);
           res->addHeader("Set-Cookie", cookie);
           req->send(res);
           return;
@@ -1394,8 +1407,7 @@ void setupServer() {
         serializeJson(respDoc, payload);
         AsyncWebServerResponse *res =
             req->beginResponse(200, "application/json", payload);
-        String cookie = String(SESSION_COOKIE_NAME) + "=" + sessionToken +
-                        "; Path=/; HttpOnly; Secure; SameSite=Strict";
+        String cookie = buildSessionCookie(sessionToken, false);
         res->addHeader("Set-Cookie", cookie);
         req->send(res);
       },
@@ -1409,8 +1421,7 @@ void setupServer() {
     invalidateSession();
     AsyncWebServerResponse *res =
         req->beginResponse(200, "application/json", "{\"status\":\"ok\"}");
-    String cookie = String(SESSION_COOKIE_NAME) +
-                    "=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict";
+    String cookie = buildSessionCookie("", true);
     res->addHeader("Set-Cookie", cookie);
     req->send(res);
   });
