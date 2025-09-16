@@ -1783,7 +1783,7 @@ void setupServer() {
   do {
     static BearSSL::X509List cert(TLS_CERT);
     static BearSSL::PrivateKey key(TLS_KEY);
-    secureServer.getServer().setServerKeyAndCert(&key, &cert);
+    secureServer.getServer().setRSACert(&cert, &key);
     registerRoutes(secureServer);
     secureServer.begin();
     secureServerActive = true;
