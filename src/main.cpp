@@ -26,6 +26,8 @@
 #include <ESP8266mDNS.h>
 #include <U8g2lib.h>
 #include <Updater.h>
+#include <type_traits>
+#include <utility>
 static const char *FIRMWARE_VERSION = "1.0.0";
 
 // ---------------------------------------------------------------------------
@@ -522,6 +524,39 @@ static const uint16_t HTTPS_PORT = 443;
 static const uint16_t HTTP_PORT = 80;
 static BearSSL::ESP8266WebServerSecure secureServer(HTTPS_PORT);  // HTTPS server
 static BearSSL::ServerSessions secureSessionCache(4);              // TLS session cache
+
+// Some versions of the ESP8266 Arduino core expose BearSSL session caching via
+// WiFiServerSecure::setSessionCache while older releases lack this API.  Use a
+// small traits helper to detect the capability at compile time and only call
+// the method when it is available so the firmware builds against multiple
+// framework revisions.
+template <typename T>
+struct HasSetSessionCache {
+ private:
+  template <typename U>
+  static auto test(int)
+      -> decltype(std::declval<U &>().setSessionCache(
+                       static_cast<BearSSL::ServerSessions *>(nullptr)),
+                   std::true_type());
+
+  template <typename>
+  static std::false_type test(...);
+
+ public:
+  static constexpr bool value = decltype(test<T>(0))::value;
+};
+
+template <typename T>
+typename std::enable_if<HasSetSessionCache<T>::value, void>::type
+configureSessionCache(T &server, BearSSL::ServerSessions *cache) {
+  server.setSessionCache(cache);
+}
+
+template <typename T>
+typename std::enable_if<!HasSetSessionCache<T>::value, void>::type
+configureSessionCache(T &, BearSSL::ServerSessions *cache) {
+  (void)cache;
+}
 static ESP8266WebServer primaryHttpServer(HTTP_PORT);              // HTTP server or redirector
 static bool secureServerActive = false;
 static WiFiUDP udp;               // UDP object for broadcasting and listening
@@ -1841,15 +1876,15 @@ static bool isUrlSafeChar(char c) {
 static String urlEncode(const String &value) {
   String encoded;
   encoded.reserve(value.length());
-  static const char HEX[] = "0123456789ABCDEF";
+  static const char kHexDigits[] = "0123456789ABCDEF";
   for (size_t i = 0; i < value.length(); ++i) {
     uint8_t c = static_cast<uint8_t>(value.charAt(i));
     if (isUrlSafeChar(static_cast<char>(c))) {
       encoded += static_cast<char>(c);
     } else {
       encoded += '%';
-      encoded += HEX[(c >> 4) & 0x0F];
-      encoded += HEX[c & 0x0F];
+      encoded += kHexDigits[(c >> 4) & 0x0F];
+      encoded += kHexDigits[c & 0x0F];
     }
   }
   return encoded;
@@ -1922,7 +1957,7 @@ void setupServer() {
     // enough headroom to avoid brown-outs and reboots.
     bear.setRSACert(&cert, &key);
     bear.setBufferSizes(2048, 2048);
-    bear.setSessionCache(&secureSessionCache);
+    configureSessionCache(bear, &secureSessionCache);
     registerRoutes(secureServer);
     secureServer.begin();
     secureServerActive = true;
