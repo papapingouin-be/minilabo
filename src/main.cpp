@@ -229,6 +229,17 @@ static bool enforceSampleFilePolicy() {
 static U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(
     U8G2_R0, /* reset=*/ U8X8_PIN_NONE, /* clock=*/ 14, /* data=*/ 12);
 static bool oledLogging = true;
+static const size_t OLED_LOG_LINE_COUNT = 4;
+static const size_t OLED_MAX_LINE_CHARS = 21;
+static const uint8_t OLED_LOG_LINE_HEIGHT = 12;
+static const uint8_t OLED_LOG_TOP_MARGIN = 10;
+static String oledLogBuffer[OLED_LOG_LINE_COUNT];
+
+static void clearOledLogBuffer() {
+  for (size_t i = 0; i < OLED_LOG_LINE_COUNT; ++i) {
+    oledLogBuffer[i] = "";
+  }
+}
 
 static bool initOled() {
   Serial.println("Initialising OLED...");
@@ -268,6 +279,7 @@ static bool initOled() {
   oled.clearBuffer();
   oled.setFont(u8g2_font_5x7_tf);
   oled.sendBuffer();
+  clearOledLogBuffer();
   Serial.printf("OLED initialised at 0x%02X using SDA=GPIO12 SCL=GPIO14\n",
                 address);
   return true;
@@ -278,10 +290,22 @@ static void oledLog(const String &msg) {
   oled.clearBuffer();
   oled.setFont(u8g2_font_5x7_tf);
   String shortMsg = msg;
-  if (shortMsg.length() > 21) {
-    shortMsg.remove(21);
+  shortMsg.replace('\r', ' ');
+  shortMsg.replace('\n', ' ');
+  if (shortMsg.length() > OLED_MAX_LINE_CHARS) {
+    shortMsg.remove(OLED_MAX_LINE_CHARS);
   }
-  oled.drawStr(0, 8, shortMsg.c_str());
+  for (size_t i = 0; i < OLED_LOG_LINE_COUNT - 1; ++i) {
+    oledLogBuffer[i] = oledLogBuffer[i + 1];
+  }
+  oledLogBuffer[OLED_LOG_LINE_COUNT - 1] = shortMsg;
+  for (size_t i = 0; i < OLED_LOG_LINE_COUNT; ++i) {
+    if (oledLogBuffer[i].length() == 0) {
+      continue;
+    }
+    uint8_t y = OLED_LOG_TOP_MARGIN + (i * OLED_LOG_LINE_HEIGHT);
+    oled.drawStr(0, y, oledLogBuffer[i].c_str());
+  }
   oled.sendBuffer();
 }
 
