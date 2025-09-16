@@ -966,7 +966,9 @@ String buildSessionCookie(const String &value, bool expire) {
     cookie += "; Max-Age=0";
   }
   cookie += "; HttpOnly";
-  cookie += "; Secure";
+  if (HAS_SECURE_SERVER) {
+    cookie += "; Secure";
+  }
   cookie += "; SameSite=Strict";
   return cookie;
 }
