@@ -1952,11 +1952,19 @@ void setupServer() {
     // Reduce TLS memory footprint and keep session tickets so repeated
     // connections do not require a full handshake each time.  The default
     // 16 KB I/O buffers exceeded the available heap once the application is
-    // running which caused the TLS stack to abort mid-handshake.  Using
-    // 2 KB buffers still accommodates the certificate chain while keeping
-    // enough headroom to avoid brown-outs and reboots.
+    // running which caused the TLS stack to abort mid-handshake, so we still
+    // shrink them substantially while leaving enough space for modern clients.
     bear.setRSACert(&cert, &key);
-    bear.setBufferSizes(2048, 2048);
+    // Modern browsers advertise a very large list of TLS 1.2 extensions and
+    // cipher suites.  The resulting ClientHello can exceed 2 KB, so BearSSL
+    // aborted the handshake when we limited both buffers to 2048 bytes.  Chrome
+    // reports this failure as ERR_SOCKET_NOT_CONNECTED.  Using 4 KB buffers
+    // keeps enough headroom for those handshakes while remaining well below the
+    // 16 KB default that previously exhausted the heap once the application was
+    // running.
+    const size_t tlsBufferSize = 4096;
+    bear.setBufferSizes(tlsBufferSize, tlsBufferSize);
+    logPrintf("TLS I/O buffers set to %u bytes", static_cast<unsigned>(tlsBufferSize));
     configureSessionCache(bear, &secureSessionCache);
     registerRoutes(secureServer);
     secureServer.begin();
