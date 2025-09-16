@@ -17,82 +17,15 @@
 #include <LittleFS.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
-#include <ESP8266WebServerSecure.h>
 #include <ArduinoJson.h>
 #include <WiFiUdp.h>
-#include <WiFiClientSecureBearSSL.h>
 #include <Wire.h>
 #include <Adafruit_ADS1015.h>
 #include <ESP8266mDNS.h>
 #include <U8g2lib.h>
 #include <Updater.h>
-#include <type_traits>
-#include <utility>
+#include <memory>
 static const char *FIRMWARE_VERSION = "1.0.0";
-
-// ---------------------------------------------------------------------------
-// TLS certificate and private key used for the HTTPS server.  The pair is a
-// long-lived self-signed certificate generated specifically for MiniLabBox.
-// Subject alternative names cover "minilabbox.local" plus generic "*.local"
-// and "*.lan" hostnames so the same certificate is valid for the default
-// node ID as well as auto-generated names based on the MAC address.  The
-// certificate is embedded directly in firmware so the device can expose HTTPS
-// endpoints without external provisioning.
-// ---------------------------------------------------------------------------
-static const char TLS_CERT[] PROGMEM = R"CERT(-----BEGIN CERTIFICATE-----
-MIID7DCCAtSgAwIBAgIUAj7jRjIY90o1korkuWrODFlAR/QwDQYJKoZIhvcNAQEL
-BQAwbjELMAkGA1UEBhMCRlIxDDAKBgNVBAgMA0lERjEOMAwGA1UEBwwFUGFyaXMx
-EzARBgNVBAoMCk1pbmlMYWJCb3gxETAPBgNVBAsMCEZpcm13YXJlMRkwFwYDVQQD
-DBBtaW5pbGFiYm94LmxvY2FsMB4XDTI1MDkxNjE2NDI1M1oXDTM1MDkxNDE2NDI1
-M1owbjELMAkGA1UEBhMCRlIxDDAKBgNVBAgMA0lERjEOMAwGA1UEBwwFUGFyaXMx
-EzARBgNVBAoMCk1pbmlMYWJCb3gxETAPBgNVBAsMCEZpcm13YXJlMRkwFwYDVQQD
-DBBtaW5pbGFiYm94LmxvY2FsMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKC
-AQEAwXhjrlC61X7DRbP1inbnuYxytpPqZ5jfAlhsIG398xBpN1WVHyLnTk1dWqfI
-x1z2MlFtsmEK6XneAEiR+KBvfkvLj4PA1iQK+rrBgasMyP8JGu7jNYuqN3HE+lWa
-ExO9ZGXjt+QFysyaPXuqeggAlN4XNIHgLDlQcm5Qk3aDxnCVuPBwW+/GupB77cSm
-wxB1dUu22OVIoukngQ8yLhSvJEhUhPrWRTu8lbIkL/LeXj3s/2ap4YLqSpW8KRHp
-OmelCN3zlpi5fLeqj01QlPDl69M2n4/F5efbW17Uw6AgkX7Wx9NCtUlZBhzE+7K9
-q27rupYfvwFOIztGTkOQ7M88fwIDAQABo4GBMH8wKwYDVR0RBCQwIoIQbWluaWxh
-YmJveC5sb2NhbIIHKi5sb2NhbIIFKi5sYW4wDAYDVR0TAQH/BAIwADAOBgNVHQ8B
-Af8EBAMCBaAwEwYDVR0lBAwwCgYIKwYBBQUHAwEwHQYDVR0OBBYEFPFY4V3DtwQL
-+ASKPSSA3CUuSxSGMA0GCSqGSIb3DQEBCwUAA4IBAQATXSNhFp5lDsgd2gvbBEOI
-+LpqPorGQbest90GGodWPaqfnhAiebtn6QS6JH+eEJuLMM3KFucnpmE5S6GoHcoq
-SrOFN6TWfscv3JqbAQNWiAw4YqvTJPjtz9WZmvBYBb8rkZvGPTetUhe2MHkFtid0
-MbUHJMVmgC2mSQxgoizFAmNG/Z4amQhemNe4cFX0VJJoq+npuXT4fqNM3pvzDXcn
-P2ZwEcGE7QjZxDkvjHKjIklo4TWiBSvjl0/3+2ajeMUN4k2BVhV8rIshmmWqDLsZ
-HkDI5y7c8WpPx0kJAQ70/QkFyc14/PCxbRdupbiXTN6mvMGiPD8a1LyCsGynD9UQ
------END CERTIFICATE-----
-)CERT";
-
-static const char TLS_KEY[] PROGMEM = R"KEY(-----BEGIN PRIVATE KEY-----
-MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDBeGOuULrVfsNF
-s/WKdue5jHK2k+pnmN8CWGwgbf3zEGk3VZUfIudOTV1ap8jHXPYyUW2yYQrped4A
-SJH4oG9+S8uPg8DWJAr6usGBqwzI/wka7uM1i6o3ccT6VZoTE71kZeO35AXKzJo9
-e6p6CACU3hc0geAsOVByblCTdoPGcJW48HBb78a6kHvtxKbDEHV1S7bY5Uii6SeB
-DzIuFK8kSFSE+tZFO7yVsiQv8t5ePez/ZqnhgupKlbwpEek6Z6UI3fOWmLl8t6qP
-TVCU8OXr0zafj8Xl59tbXtTDoCCRftbH00K1SVkGHMT7sr2rbuu6lh+/AU4jO0ZO
-Q5Dszzx/AgMBAAECggEAHBJAvFkgUrvaz3FGDjokcyqqtk0N9Mwch3WW8rmi4DKg
-YZP8WBEzaIwXIIE5w5t8aV6hQQGNmMTC7l2ZOG7m3ndW6NLgFvIR2cFhNFRCPaOr
-iYnh07IZF4RdZUkoWt5BW6DhApyGLp+zPXqFCMHCe9chnM+/XAtQ3dmdvVez1QXe
-JuPP52/gEdPMNU8Orm9xM8qyXuwdcdqHD2qRXGujU9Kbma+DD4DMpq4665PSJRxP
-X/qmkvKeG4m8LVTr9cAEq5andhzOHuaPlaKjevr631krx5u1WYbJMcMcnkv1CcYF
-nMz+t2P1EYJjyE4+JERw7PTg1X6el2r4GfW1f3JqMQKBgQDufsUV19l6Oje2MJYf
-bjrHy6PjRXU3YUbTPcJxYLUVC7MVJZVKKoXT5uKmYnbEsYArGnCqC07R1QlpMQmp
-hvhJxKNIvRfMtYVWhIxjOGdgYwpVfRqofCRrTDDWKhNkNhGQXaBj6Fv5O6g3x/Ll
-qN04eTtYpTjHspTbKeMPxz006QKBgQDPq556HZMYTtBph1uYmhnvX2hk6RApbt0T
-MbrXtosx+g4rTtYx+DNVbyug98JR6phuPYh+RcoaSSGdDlkIkuMVEJx5IZfbJvdb
-OZCSiZCo7X+Kc7+U94DeEv6MR1CcOD0FS64NA9Rnv0U3D3VCGGn8OtFfyp7tthfo
-ORXBzxKlJwKBgQCAx7ssPE2WjnEe08V8W00qLW/lfM/6g3B3CFZCWnHtV0/wD0c5
-sRRqg7XHGkv/kckffTtw1oJNE7ftMSmCfPr8+k0hLdn4E9xYB2K3APHxPgmKd+85
-Iy+XMKD+Q+IMrpV1WtkMmZ9wSSJgXHtwP2qU4AGHsE+kpW1zmn6dOnx2YQKBgHxM
-IkzBCtvPwJqJM9/AzKkjl95eSRgjjRsB9u1KC0JcgsKVK0s5XbBTG+/6m0pged/x
-4JKDvxXAk+fnQI8LK/Pdv2oZG0VGq2Lkr42l3PnfPSlnYlINWgqRn93iiXMXjh5v
-T7vmgOmf6BOuouZuqnEX213Ubw+kn+aU1FruUCCdAoGBAMkuZjSh9OHMbedYjYfN
-a6n8T6TgN3znBPFq1MRsqujeWJUEokuxahupQglijDhPxspXtrcUEP9jio1fXsX5
-IzaZzUgEpLCmf8UmKtj5LMdl8NtJNKVQwwrcgEpMYuZrz1JlAMiT6iLEh5ViLklS
-+hJTMx3KgJEpJA1cBbNfbtxu
------END PRIVATE KEY-----
-)KEY";
 
 // ---------------------------------------------------------------------------
 // Simple logging facility.  Log messages are written to Serial and appended
@@ -577,50 +510,8 @@ struct Config {
 };
 
 static Config config;            // Global configuration instance
-static const bool HAS_SECURE_SERVER = true;
-static const uint16_t HTTPS_PORT = 443;
 static const uint16_t HTTP_PORT = 80;
-static BearSSL::ESP8266WebServerSecure secureServer(HTTPS_PORT);  // HTTPS server
-static BearSSL::ServerSessions secureSessionCache(4);              // TLS session cache
-static const bool ENABLE_TLS_SESSION_CACHE = false;                // Disable to save RAM unless explicitly needed
-static const size_t TLS_RX_BUFFER_SIZE = 1024;                     // Smaller buffers reduce fragmentation pressure
-static const size_t TLS_TX_BUFFER_SIZE = 1024;
-static const uint32_t MIN_TLS_HEAP = 8192;                         // Minimum free heap before enabling HTTPS
-
-// Some versions of the ESP8266 Arduino core expose BearSSL session caching via
-// WiFiServerSecure::setSessionCache while older releases lack this API.  Use a
-// small traits helper to detect the capability at compile time and only call
-// the method when it is available so the firmware builds against multiple
-// framework revisions.
-template <typename T>
-struct HasSetSessionCache {
- private:
-  template <typename U>
-  static auto test(int)
-      -> decltype(std::declval<U &>().setSessionCache(
-                       static_cast<BearSSL::ServerSessions *>(nullptr)),
-                   std::true_type());
-
-  template <typename>
-  static std::false_type test(...);
-
- public:
-  static constexpr bool value = decltype(test<T>(0))::value;
-};
-
-template <typename T>
-typename std::enable_if<HasSetSessionCache<T>::value, void>::type
-configureSessionCache(T &server, BearSSL::ServerSessions *cache) {
-  server.setSessionCache(cache);
-}
-
-template <typename T>
-typename std::enable_if<!HasSetSessionCache<T>::value, void>::type
-configureSessionCache(T &, BearSSL::ServerSessions *cache) {
-  (void)cache;
-}
-static ESP8266WebServer primaryHttpServer(HTTP_PORT);              // HTTP server or redirector
-static bool secureServerActive = false;
+static ESP8266WebServer primaryHttpServer(HTTP_PORT);              // HTTP server instance
 static WiFiUDP udp;               // UDP object for broadcasting and listening
 static Adafruit_ADS1115 ads;      // ADS1115 ADC instance
 
@@ -681,8 +572,7 @@ void parseConfigFromJson(const JsonDocument &doc);
 String formatPin(uint16_t value);
 void initialiseSecurity();
 String generateSessionToken();
-String buildSessionCookie(const String &value, bool expire,
-                          bool secureTransport);
+String buildSessionCookie(const String &value, bool expire);
 template <typename ServerT>
 bool extractSessionToken(ServerT *server, String &tokenOut);
 bool sessionTokenValid(const String &token, bool refreshActivity);
@@ -1034,25 +924,12 @@ String generateSessionToken() {
   return String(buf);
 }
 
-template <typename ServerT>
-bool serverUsesTLS(ServerT *) {
-  return false;
-}
-
-bool serverUsesTLS(BearSSL::ESP8266WebServerSecure *) {
-  return secureServerActive;
-}
-
-String buildSessionCookie(const String &value, bool expire,
-                          bool secureTransport) {
+String buildSessionCookie(const String &value, bool expire) {
   String cookie = String(SESSION_COOKIE_NAME) + "=" + value + "; Path=/";
   if (expire) {
     cookie += "; Max-Age=0";
   }
   cookie += "; HttpOnly";
-  if (secureTransport) {
-    cookie += "; Secure";
-  }
   cookie += "; SameSite=Strict";
   return cookie;
 }
@@ -1194,8 +1071,7 @@ void triggerDiscovery() {
 // Initialise Wi-Fi according to the configuration.  If STA mode is
 // requested but connection fails within a timeout, the ESP8266 falls
 // back to AP mode.  Once connected, an mDNS hostname is published
-// allowing access via nodeId.local on the same network.  When TLS is
-// enabled the HTTPS endpoint is announced alongside an HTTP redirector.
+// allowing access via nodeId.local on the same network.
 void setupWiFi() {
   WiFi.mode(WIFI_OFF);
   delay(100);
@@ -1242,9 +1118,6 @@ void setupWiFi() {
   if (MDNS.begin(config.nodeId.c_str())) {
     logMessage("mDNS responder started");
     MDNS.addService("http", "tcp", HTTP_PORT);
-    if (HAS_SECURE_SERVER) {
-      MDNS.addService("https", "tcp", HTTPS_PORT);
-    }
   }
 }
 
@@ -1535,8 +1408,7 @@ void registerRoutes(ServerT &server) {
     String pin = doc["pin"].as<String>();
     pin.trim();
     if (pin != sessionPin) {
-      srv->sendHeader("Set-Cookie",
-                      buildSessionCookie("", true, serverUsesTLS(srv)));
+      srv->sendHeader("Set-Cookie", buildSessionCookie("", true));
       srv->send(401, "application/json", R"({"error":"invalid_pin"})");
       return;
     }
@@ -1549,15 +1421,14 @@ void registerRoutes(ServerT &server) {
     String payload;
     serializeJson(respDoc, payload);
     srv->sendHeader("Set-Cookie",
-                    buildSessionCookie(sessionToken, false, serverUsesTLS(srv)));
+                    buildSessionCookie(sessionToken, false));
     srv->send(200, "application/json", payload);
   });
 
   server.on("/api/session/logout", HTTP_POST, [&server]() {
     auto *srv = &server;
     invalidateSession();
-    srv->sendHeader("Set-Cookie",
-                    buildSessionCookie("", true, serverUsesTLS(srv)));
+    srv->sendHeader("Set-Cookie", buildSessionCookie("", true));
     srv->send(200, "application/json", R"({"status":"ok"})");
   });
 
@@ -1950,147 +1821,18 @@ void registerRoutes(ServerT &server) {
   });
 }
 
-static bool isUrlSafeChar(char c) {
-  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-         (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' ||
-         c == '~';
-}
-
-static String urlEncode(const String &value) {
-  String encoded;
-  encoded.reserve(value.length());
-  static const char kHexDigits[] = "0123456789ABCDEF";
-  for (size_t i = 0; i < value.length(); ++i) {
-    uint8_t c = static_cast<uint8_t>(value.charAt(i));
-    if (isUrlSafeChar(static_cast<char>(c))) {
-      encoded += static_cast<char>(c);
-    } else {
-      encoded += '%';
-      encoded += kHexDigits[(c >> 4) & 0x0F];
-      encoded += kHexDigits[c & 0x0F];
-    }
-  }
-  return encoded;
-}
-
-static String buildHttpsRedirectLocation(ESP8266WebServer &server) {
-  String host = server.hostHeader();
-  if (host.length() == 0) {
-    IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP()
-                                               : WiFi.softAPIP();
-    host = ip.toString();
-  }
-  int colon = host.indexOf(':');
-  if (colon != -1) {
-    host = host.substring(0, colon);
-  }
-  if (HTTPS_PORT != 443) {
-    host += ':';
-    host += String(HTTPS_PORT);
-  }
-  String location = String("https://") + host;
-  String uri = server.uri();
-  if (uri.length() == 0) {
-    uri = "/";
-  }
-  location += uri;
-  if (server.method() == HTTP_GET || server.method() == HTTP_HEAD) {
-    String query;
-    for (int i = 0; i < server.args(); ++i) {
-      String name = server.argName(i);
-      if (name == "plain") {
-        continue;
-      }
-      if (query.length() == 0) {
-        query = "?";
-      } else {
-        query += '&';
-      }
-      query += urlEncode(name);
-      query += '=';
-      query += urlEncode(server.arg(i));
-    }
-    location += query;
-  }
-  return location;
-}
-
-static void sendHttpsRedirect(ESP8266WebServer &server) {
-  String location = buildHttpsRedirectLocation(server);
-  server.sendHeader("Location", location);
-  server.sendHeader("Connection", "close");
-  if (server.method() == HTTP_HEAD) {
-    server.send(308, "text/plain", "");
-  } else {
-    server.send(308, "text/plain", String("Redirection vers ") + location);
-  }
-}
-
 void setupServer() {
-  secureServerActive = false;
-  if (HAS_SECURE_SERVER) {
-    static BearSSL::X509List cert(TLS_CERT);
-    static BearSSL::PrivateKey key(TLS_KEY);
-    uint32_t freeHeap = ESP.getFreeHeap();
-    uint32_t maxBlock = ESP.getMaxFreeBlockSize();
-    logPrintf("Heap before TLS: %u bytes (largest block %u bytes)",
-              static_cast<unsigned>(freeHeap),
-              static_cast<unsigned>(maxBlock));
-    if (!cert.getCount()) {
-      logMessage("TLS certificate invalid, HTTPS disabled");
-    } else if (!key.isRSA() && !key.isEC()) {
-      logMessage("TLS private key invalid, HTTPS disabled");
-    } else if (freeHeap < MIN_TLS_HEAP ||
-               maxBlock < (TLS_RX_BUFFER_SIZE + TLS_TX_BUFFER_SIZE)) {
-      logMessage("Insufficient heap for HTTPS, falling back to HTTP only");
-    } else {
-      auto &bear = secureServer.getServer();
-      bear.setRSACert(&cert, &key);
-      // Keep TLS buffers tight so the ESP8266 can find contiguous heap blocks
-      // even after the rest of the application is initialised.
-      bear.setBufferSizes(TLS_RX_BUFFER_SIZE, TLS_TX_BUFFER_SIZE);
-      logPrintf("TLS buffers set to %u/%u bytes (rx/tx)",
-                static_cast<unsigned>(TLS_RX_BUFFER_SIZE),
-                static_cast<unsigned>(TLS_TX_BUFFER_SIZE));
-      if (ENABLE_TLS_SESSION_CACHE) {
-        configureSessionCache(bear, &secureSessionCache);
-        logMessage("TLS session cache enabled");
-      } else {
-        logMessage("TLS session cache disabled");
-      }
-      registerRoutes(secureServer);
-      secureServer.begin();
-      secureServerActive = true;
-      logPrintf("HTTPS server started on port %u", HTTPS_PORT);
-    }
-  } else {
-    logMessage("HTTPS server disabled at compile time");
-  }
-
-  if (secureServerActive) {
-    primaryHttpServer.on("/", HTTP_ANY, []() {
-      sendHttpsRedirect(primaryHttpServer);
-    });
-    primaryHttpServer.onNotFound([]() {
-      sendHttpsRedirect(primaryHttpServer);
-    });
-    primaryHttpServer.begin();
-    logPrintf("HTTP server started on port %u and redirects to HTTPS",
-              HTTP_PORT);
-  } else {
-    registerRoutes(primaryHttpServer);
-    primaryHttpServer.begin();
-    logPrintf("HTTP server started on port %u", HTTP_PORT);
-  }
+  registerRoutes(primaryHttpServer);
+  primaryHttpServer.begin();
+  logPrintf("HTTP server started on port %u", HTTP_PORT);
 }
 
-static void diagnosticHTTPS() {
-  logMessage("=== Diagnostic HTTPS ===");
+static void diagnosticHttp() {
+  logMessage("=== Diagnostic HTTP ===");
   logPrintf("Heap free: %u bytes", static_cast<unsigned>(ESP.getFreeHeap()));
   logPrintf("Max free block: %u bytes",
             static_cast<unsigned>(ESP.getMaxFreeBlockSize()));
-  logPrintf("Secure server active: %s", secureServerActive ? "YES" : "NO");
-  logPrintf("TLS support compiled: %s", HAS_SECURE_SERVER ? "YES" : "NO");
+  logPrintf("HTTP server listening on port %u", HTTP_PORT);
   IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
   logPrintf("Local IP: %s", ip.toString().c_str());
   logPrintf("WiFi mode: %d", static_cast<int>(WiFi.getMode()));
@@ -2122,7 +1864,7 @@ void setup() {
   udp.begin(BROADCAST_PORT);
   setupSensors();
   setupServer();
-  diagnosticHTTPS();
+  diagnosticHttp();
   triggerDiscovery();
   // After network and services are up, show basic status on the OLED
   // so users immediately know the node ID and how to reach it.  This
@@ -2136,9 +1878,8 @@ void setup() {
 }
 
 // Main loop.  Inputs are sampled on a schedule.  Broadcasts are sent
-// periodically.  Incoming UDP packets are processed continuously.  HTTP
-// servers are serviced on each pass so that both the HTTPS endpoint and the
-// plain HTTP server remain responsive.
+// periodically.  Incoming UDP packets are processed continuously.  The HTTP
+// server is serviced on each pass so the web interface remains responsive.
 void loop() {
   unsigned long now = millis();
   if (now - lastInputUpdate >= INPUT_UPDATE_INTERVAL) {
@@ -2155,13 +1896,7 @@ void loop() {
       logPrintf("ALERT: heap critically low (%u bytes)", static_cast<unsigned>(freeHeap));
     }
   }
-  if (secureServerActive) {
-    secureServer.handleClient();
-    yield();
-    primaryHttpServer.handleClient();
-  } else {
-    primaryHttpServer.handleClient();
-  }
+  primaryHttpServer.handleClient();
   yield();
   // Sleep briefly to yield to background tasks
   delay(5);
