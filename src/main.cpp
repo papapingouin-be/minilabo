@@ -231,16 +231,88 @@ static bool enforceSampleFilePolicy() {
 static U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(
     U8G2_R0, /* reset=*/ U8X8_PIN_NONE, /* clock=*/ 14, /* data=*/ 12);
 static bool oledLogging = true;
-static const size_t OLED_LOG_LINE_COUNT = 4;
+static const size_t OLED_STATUS_LINE_COUNT = 3;
+static const size_t OLED_LOG_LINE_COUNT = 1;
 static const size_t OLED_MAX_LINE_CHARS = 21;
-static const uint8_t OLED_LOG_LINE_HEIGHT = 12;
-static const uint8_t OLED_LOG_TOP_MARGIN = 10;
+static const uint8_t OLED_STATUS_TOP_MARGIN = 14;
+static const uint8_t OLED_STATUS_LINE_HEIGHT = 16;
+static const uint8_t OLED_LOG_LINE_HEIGHT = 9;
+static const uint8_t OLED_LOG_BOTTOM_MARGIN = 2;
+static String oledStatusLines[OLED_STATUS_LINE_COUNT];
 static String oledLogBuffer[OLED_LOG_LINE_COUNT];
+
+static void clearOledStatusLines() {
+  for (size_t i = 0; i < OLED_STATUS_LINE_COUNT; ++i) {
+    oledStatusLines[i] = "";
+  }
+}
 
 static void clearOledLogBuffer() {
   for (size_t i = 0; i < OLED_LOG_LINE_COUNT; ++i) {
     oledLogBuffer[i] = "";
   }
+}
+
+static String normaliseOledText(const String &text) {
+  String normalised = text;
+  normalised.replace('\r', ' ');
+  normalised.replace('\n', ' ');
+  normalised.trim();
+  if (normalised.length() > OLED_MAX_LINE_CHARS) {
+    normalised.remove(OLED_MAX_LINE_CHARS);
+  }
+  return normalised;
+}
+
+static void renderOledStatusAndLog() {
+  if (!oledLogging) return;
+
+  oled.clearBuffer();
+
+  oled.setFont(u8g2_font_7x14B_tr);
+  for (size_t i = 0; i < OLED_STATUS_LINE_COUNT; ++i) {
+    if (oledStatusLines[i].length() == 0) {
+      continue;
+    }
+    uint8_t y = OLED_STATUS_TOP_MARGIN + (i * OLED_STATUS_LINE_HEIGHT);
+    oled.drawStr(0, y, oledStatusLines[i].c_str());
+  }
+
+  oled.setFont(u8g2_font_5x7_tf);
+  for (size_t i = 0; i < OLED_LOG_LINE_COUNT; ++i) {
+    if (oledLogBuffer[i].length() == 0) {
+      continue;
+    }
+    uint8_t y = 64 - OLED_LOG_BOTTOM_MARGIN -
+                ((OLED_LOG_LINE_COUNT - 1 - i) * OLED_LOG_LINE_HEIGHT);
+    oled.drawStr(0, y, oledLogBuffer[i].c_str());
+  }
+
+  oled.sendBuffer();
+  oled.setFont(u8g2_font_5x7_tf);
+}
+
+static void setOledStatusLine(size_t index, const String &text,
+                              bool refreshDisplay = true) {
+  if (!oledLogging || index >= OLED_STATUS_LINE_COUNT) {
+    return;
+  }
+  oledStatusLines[index] = normaliseOledText(text);
+  if (refreshDisplay) {
+    renderOledStatusAndLog();
+  }
+}
+
+static void setOledStatusLines(const String &line0,
+                               const String &line1,
+                               const String &line2) {
+  if (!oledLogging) {
+    return;
+  }
+  setOledStatusLine(0, line0, false);
+  setOledStatusLine(1, line1, false);
+  setOledStatusLine(2, line2, false);
+  renderOledStatusAndLog();
 }
 
 static bool initOled() {
@@ -281,6 +353,7 @@ static bool initOled() {
   oled.clearBuffer();
   oled.setFont(u8g2_font_5x7_tf);
   oled.sendBuffer();
+  clearOledStatusLines();
   clearOledLogBuffer();
   Serial.printf("OLED initialised at 0x%02X using SDA=GPIO12 SCL=GPIO14\n",
                 address);
@@ -288,15 +361,8 @@ static bool initOled() {
 }
 
 static void oledLog(const String &msg) {
-  if (!oledLogging) return;
-  oled.clearBuffer();
-  oled.setFont(u8g2_font_5x7_tf);
-  String shortMsg = msg;
-  shortMsg.replace('\r', ' ');
-  shortMsg.replace('\n', ' ');
-  if (shortMsg.length() > OLED_MAX_LINE_CHARS) {
-    shortMsg.remove(OLED_MAX_LINE_CHARS);
-  }
+  if (!oledLogging || OLED_LOG_LINE_COUNT == 0) return;
+  String shortMsg = normaliseOledText(msg);
 
   size_t insertIndex = 0;
   while (insertIndex < OLED_LOG_LINE_COUNT &&
@@ -312,15 +378,7 @@ static void oledLog(const String &msg) {
     }
     oledLogBuffer[OLED_LOG_LINE_COUNT - 1] = shortMsg;
   }
-
-  for (size_t i = 0; i < OLED_LOG_LINE_COUNT; ++i) {
-    if (oledLogBuffer[i].length() == 0) {
-      continue;
-    }
-    uint8_t y = OLED_LOG_TOP_MARGIN + (i * OLED_LOG_LINE_HEIGHT);
-    oled.drawStr(0, y, oledLogBuffer[i].c_str());
-  }
-  oled.sendBuffer();
+  renderOledStatusAndLog();
 }
 
 static const size_t MAX_LOG_FILE_SIZE = 16 * 1024;  // 16 KB
@@ -956,7 +1014,14 @@ void initialiseSecurity() {
   invalidateSession();
   uint16_t rawPin = static_cast<uint16_t>(random(0, 10000));
   sessionPin = formatPin(rawPin);
+  setOledStatusLine(2, String("PIN: ") + sessionPin);
   logPrintf("Session PIN generated: %s", sessionPin.c_str());
+}
+
+static void updateOledStatusSummary() {
+  if (!oledLogging) return;
+  IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
+  setOledStatusLines(config.nodeId, ip.toString(), String("PIN: ") + sessionPin);
 }
 
 String generateSessionToken() {
@@ -2063,17 +2128,7 @@ void setup() {
   // so users immediately know the node ID and how to reach it.  This
   // reuses the boot logging screen and will remain until another log
   // message is printed or configuration changes disable OLED logging.
-  if (oledLogging) {
-    oled.clearBuffer();
-    oled.setFont(u8g2_font_7x14B_tr);
-    oled.drawStr(0, 16, config.nodeId.c_str());
-    IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
-    oled.drawStr(0, 32, ip.toString().c_str());
-    String pinLine = String("PIN: ") + sessionPin;
-    oled.drawStr(0, 48, pinLine.c_str());
-    oled.sendBuffer();
-    oled.setFont(u8g2_font_5x7_tf);
-  }
+  updateOledStatusSummary();
   // Initialise output pins to their default state
   updateOutputs();
   lastInputUpdate = millis();
