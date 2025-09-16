@@ -16,20 +16,16 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <ESP8266WiFi.h>
-#include <ESPAsyncWebServer.h>
-#include <ESPAsyncTCP.h>
+#include <ESP8266WebServer.h>
+#include <ESP8266WebServerSecure.h>
 #include <ArduinoJson.h>
 #include <WiFiUdp.h>
+#include <WiFiClientSecureBearSSL.h>
 #include <Wire.h>
 #include <Adafruit_ADS1015.h>
 #include <ESP8266mDNS.h>
 #include <U8g2lib.h>
 #include <Updater.h>
-#if defined(ASYNC_TCP_SSL_ENABLED)
-#include <type_traits>
-#include <utility>
-#endif
-
 static const char *FIRMWARE_VERSION = "1.0.0";
 
 // ---------------------------------------------------------------------------
@@ -38,7 +34,6 @@ static const char *FIRMWARE_VERSION = "1.0.0";
 // The certificate is embedded directly in firmware so the device can expose
 // HTTPS endpoints without external provisioning.
 // ---------------------------------------------------------------------------
-#if defined(ASYNC_TCP_SSL_ENABLED)
 static const char TLS_CERT[] PROGMEM = R"CERT(-----BEGIN CERTIFICATE-----
 MIIDvTCCAqWgAwIBAgIUSPqBltAiDymlJeyrbqMDBZOYx74wDQYJKoZIhvcNAQEL
 BQAwbjELMAkGA1UEBhMCRlIxDDAKBgNVBAgMA0lERjEOMAwGA1UEBwwFUGFyaXMx
@@ -93,65 +88,6 @@ oAETBCgzxCO/AYrebG18rXFBbR8uGVUiRHvxzhUiqyITY7/3/59dISVXkZZQ+kDf
 xfuP17fzRNjzewM8mDmktjA=
 -----END PRIVATE KEY-----
 )KEY";
-#endif
-
-#if defined(ASYNC_TCP_SSL_ENABLED)
-namespace tls_detail {
-template <typename...>
-using void_t = void;
-
-template <typename T, typename = void>
-struct HasBeginSecure : std::false_type {};
-
-template <typename T>
-struct HasBeginSecure<
-    T, void_t<decltype(std::declval<T &>().beginSecure(
-           (const char *)nullptr, (const char *)nullptr,
-           (const char *)nullptr))>> : std::true_type {};
-}  // namespace tls_detail
-
-template <typename ServerType>
-static bool beginSecureServerImpl(ServerType &server, const char *cert,
-                                  const char *key, const char *password,
-                                  std::true_type) {
-  server.beginSecure(cert, key, password);
-  return true;
-}
-
-template <typename ServerType>
-static bool beginSecureServerImpl(ServerType &server, const char *cert,
-                                  const char *key, const char *password,
-                                  std::false_type) {
-  return server.beginSecure(cert, key, password);
-}
-
-template <typename ServerType>
-static bool beginSecureServerDispatch(ServerType &server, const char *cert,
-                                      const char *key,
-                                      const char *password,
-                                      std::true_type) {
-  using BeginSecureReturn =
-      decltype(server.beginSecure(cert, key, password));
-  return beginSecureServerImpl(
-      server, cert, key, password,
-      typename std::is_void<BeginSecureReturn>::type{});
-}
-
-template <typename ServerType>
-static bool beginSecureServerDispatch(ServerType &, const char *,
-                                      const char *, const char *,
-                                      std::false_type) {
-  return false;
-}
-
-template <typename ServerType>
-static bool beginSecureServer(ServerType &server, const char *cert,
-                              const char *key, const char *password) {
-  return beginSecureServerDispatch(
-      server, cert, key, password,
-      typename tls_detail::HasBeginSecure<ServerType>::type{});
-}
-#endif
 
 // ---------------------------------------------------------------------------
 // Simple logging facility.  Log messages are written to Serial and appended
@@ -542,23 +478,14 @@ struct Config {
 };
 
 static Config config;            // Global configuration instance
-#if defined(ASYNC_TCP_SSL_ENABLED)
-static const bool HAS_SECURE_SERVER =
-    tls_detail::HasBeginSecure<AsyncWebServer>::value;
-static const uint16_t PRIMARY_WEB_PORT = HAS_SECURE_SERVER ? 443 : 80;
-static AsyncWebServer server(PRIMARY_WEB_PORT);       // HTTPS or HTTP server
-static AsyncWebServer redirectServer(80);             // HTTP redirector
-#else
-static const bool HAS_SECURE_SERVER = false;
-static const uint16_t PRIMARY_WEB_PORT = 80;
-static AsyncWebServer server(PRIMARY_WEB_PORT);       // Primary server instance
-#endif
+static const bool HAS_SECURE_SERVER = true;
+static const uint16_t HTTPS_PORT = 443;
+static const uint16_t HTTP_PORT = 80;
+static BearSSL::ESP8266WebServerSecure secureServer(HTTPS_PORT);  // HTTPS server
+static ESP8266WebServer primaryHttpServer(HTTP_PORT);              // HTTP server or redirector
+static bool secureServerActive = false;
 static WiFiUDP udp;               // UDP object for broadcasting and listening
 static Adafruit_ADS1115 ads;      // ADS1115 ADC instance
-static String configSetBody;      // buffer for incoming /api/config/set JSON
-static String loginRequestBody;   // buffer for incoming /api/session/login JSON
-static String outputSetBody;      // buffer for incoming /api/output/set JSON
-static String fileSaveBody;       // buffer for incoming /api/files/save JSON
 
 // Remote value cache.  When a broadcast packet is received from another
 // node, each measurement is stored in this table.  Inputs configured
@@ -618,9 +545,11 @@ String formatPin(uint16_t value);
 void initialiseSecurity();
 String generateSessionToken();
 String buildSessionCookie(const String &value, bool expire);
-bool extractSessionToken(AsyncWebServerRequest *req, String &tokenOut);
+template <typename ServerT>
+bool extractSessionToken(ServerT *server, String &tokenOut);
 bool sessionTokenValid(const String &token, bool refreshActivity);
-bool requireAuth(AsyncWebServerRequest *req);
+template <typename ServerT>
+bool requireAuth(ServerT *server);
 void invalidateSession();
 void triggerDiscovery();
 void registerDiscoveredNode(const String &nodeId, const IPAddress &ip);
@@ -966,17 +895,18 @@ String buildSessionCookie(const String &value, bool expire) {
     cookie += "; Max-Age=0";
   }
   cookie += "; HttpOnly";
-  if (HAS_SECURE_SERVER) {
+  if (secureServerActive) {
     cookie += "; Secure";
   }
   cookie += "; SameSite=Strict";
   return cookie;
 }
 
-bool extractSessionToken(AsyncWebServerRequest *req, String &tokenOut) {
+template <typename ServerT>
+bool extractSessionToken(ServerT *server, String &tokenOut) {
   tokenOut = "";
-  if (req->hasHeader("Cookie")) {
-    String cookie = req->header("Cookie");
+  if (server->hasHeader("Cookie")) {
+    String cookie = server->header("Cookie");
     int start = 0;
     int cookieLen = static_cast<int>(cookie.length());
     while (start < cookieLen) {
@@ -993,12 +923,12 @@ bool extractSessionToken(AsyncWebServerRequest *req, String &tokenOut) {
       start = end + 1;
     }
   }
-  if (tokenOut.length() == 0 && req->hasHeader("X-Session-Token")) {
-    tokenOut = req->header("X-Session-Token");
+  if (tokenOut.length() == 0 && server->hasHeader("X-Session-Token")) {
+    tokenOut = server->header("X-Session-Token");
     tokenOut.trim();
   }
-  if (tokenOut.length() == 0 && req->hasHeader("Authorization")) {
-    String auth = req->header("Authorization");
+  if (tokenOut.length() == 0 && server->hasHeader("Authorization")) {
+    String auth = server->header("Authorization");
     const String bearer = "Bearer ";
     if (auth.startsWith(bearer)) {
       tokenOut = auth.substring(bearer.length());
@@ -1030,14 +960,15 @@ bool sessionTokenValid(const String &token, bool refreshActivity) {
   return true;
 }
 
-bool requireAuth(AsyncWebServerRequest *req) {
+template <typename ServerT>
+bool requireAuth(ServerT *server) {
   String token;
-  if (!extractSessionToken(req, token)) {
-    req->send(401, "application/json", "{\"error\":\"unauthorized\"}");
+  if (!extractSessionToken(server, token)) {
+    server->send(401, "application/json", "{\"error\":\"unauthorized\"}");
     return false;
   }
   if (!sessionTokenValid(token, true)) {
-    req->send(401, "application/json", "{\"error\":\"unauthorized\"}");
+    server->send(401, "application/json", "{\"error\":\"unauthorized\"}");
     return false;
   }
   return true;
@@ -1141,12 +1072,10 @@ void setupWiFi() {
   // Start mDNS if possible
   if (MDNS.begin(config.nodeId.c_str())) {
     logMessage("mDNS responder started");
-#if defined(ASYNC_TCP_SSL_ENABLED)
-    MDNS.addService("http", "tcp", 80);
-    MDNS.addService("https", "tcp", PRIMARY_WEB_PORT);
-#else
-    MDNS.addService("http", "tcp", PRIMARY_WEB_PORT);
-#endif
+    MDNS.addService("http", "tcp", HTTP_PORT);
+    if (HAS_SECURE_SERVER) {
+      MDNS.addService("https", "tcp", HTTPS_PORT);
+    }
   }
 }
 
@@ -1417,89 +1346,54 @@ void sendBroadcast() {
   udp.endPacket();
 }
 
-// Helper used by HTTP POST handlers to accumulate request body data.  The
-// buffer is reset on the first chunk and each byte is appended so JSON payloads
-// are available once AsyncWebServer invokes the main handler.
-static void appendRequestBodyChunk(String &buffer, const uint8_t *data,
-                                   size_t len, size_t index, size_t total) {
-  if (index == 0) {
-    buffer = "";
-    if (total > 0 && total < 65536) {
-      buffer.reserve(total);
-    }
-  }
-  for (size_t i = 0; i < len; i++) {
-    buffer += static_cast<char>(data[i]);
-  }
-}
-
 // Set up the HTTP server and API routes.  Static content is served
 // directly from LittleFS.  Configuration and value endpoints return
 // JSON.  POST requests allow modifying configuration and outputs.
-void setupServer() {
-  // Session endpoints (login, logout, status)
-  server.on(
-      "/api/session/login", HTTP_POST,
-      [](AsyncWebServerRequest *req) {
-        if (req->contentLength() == 0) {
-          loginRequestBody = "";
-          req->send(400, "application/json", "{\"error\":\"No body\"}");
-          return;
-        }
-        String body = loginRequestBody;
-        loginRequestBody = "";
-        if (body.length() == 0) {
-          req->send(400, "application/json", "{\"error\":\"No body\"}");
-          return;
-        }
-        DynamicJsonDocument doc(256);
-        if (deserializeJson(doc, body)) {
-          req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-          return;
-        }
-        String pin = doc["pin"].as<String>();
-        pin.trim();
-        if (pin != sessionPin) {
-          AsyncWebServerResponse *res = req->beginResponse(
-              401, "application/json", "{\"error\":\"invalid_pin\"}");
-          String cookie = buildSessionCookie("", true);
-          res->addHeader("Set-Cookie", cookie);
-          req->send(res);
-          return;
-        }
-        sessionToken = generateSessionToken();
-        sessionIssuedAt = millis();
-        sessionLastActivity = sessionIssuedAt;
-        DynamicJsonDocument respDoc(256);
-        respDoc["status"] = "ok";
-        respDoc["token"] = sessionToken;
-        String payload;
-        serializeJson(respDoc, payload);
-        AsyncWebServerResponse *res =
-            req->beginResponse(200, "application/json", payload);
-        String cookie = buildSessionCookie(sessionToken, false);
-        res->addHeader("Set-Cookie", cookie);
-        req->send(res);
-      },
-      NULL,
-      [](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index,
-         size_t total) {
-        appendRequestBodyChunk(loginRequestBody, data, len, index, total);
-      });
-
-  server.on("/api/session/logout", HTTP_POST, [](AsyncWebServerRequest *req) {
-    invalidateSession();
-    AsyncWebServerResponse *res =
-        req->beginResponse(200, "application/json", "{\"status\":\"ok\"}");
-    String cookie = buildSessionCookie("", true);
-    res->addHeader("Set-Cookie", cookie);
-    req->send(res);
+template <typename ServerT>
+void registerRoutes(ServerT &server) {
+  server.on("/api/session/login", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", "{"error":"No body"}");
+      return;
+    }
+    DynamicJsonDocument doc(256);
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", "{"error":"Invalid JSON"}");
+      return;
+    }
+    String pin = doc["pin"].as<String>();
+    pin.trim();
+    if (pin != sessionPin) {
+      srv->sendHeader("Set-Cookie", buildSessionCookie("", true));
+      srv->send(401, "application/json", "{"error":"invalid_pin"}");
+      return;
+    }
+    sessionToken = generateSessionToken();
+    sessionIssuedAt = millis();
+    sessionLastActivity = sessionIssuedAt;
+    DynamicJsonDocument respDoc(256);
+    respDoc["status"] = "ok";
+    respDoc["token"] = sessionToken;
+    String payload;
+    serializeJson(respDoc, payload);
+    srv->sendHeader("Set-Cookie", buildSessionCookie(sessionToken, false));
+    srv->send(200, "application/json", payload);
   });
 
-  server.on("/api/session/status", HTTP_GET, [](AsyncWebServerRequest *req) {
+  server.on("/api/session/logout", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    invalidateSession();
+    srv->sendHeader("Set-Cookie", buildSessionCookie("", true));
+    srv->send(200, "application/json", "{"status":"ok"}");
+  });
+
+  server.on("/api/session/status", HTTP_GET, [&server]() {
+    auto *srv = &server;
     String token;
-    if (!extractSessionToken(req, token) || !sessionTokenValid(token, true)) {
-      req->send(401, "application/json", "{\"status\":\"invalid\"}");
+    if (!extractSessionToken(srv, token) || !sessionTokenValid(token, true)) {
+      srv->send(401, "application/json", "{"status":"invalid"}");
       return;
     }
     uint32_t now = millis();
@@ -1512,20 +1406,24 @@ void setupServer() {
     doc["expiresIn"] = static_cast<uint32_t>(remaining);
     String payload;
     serializeJson(doc, payload);
-    req->send(200, "application/json", payload);
+    srv->send(200, "application/json", payload);
   });
 
-  // Serve the root page
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *req) {
-    req->send(LittleFS, "/index.html", "text/html");
+  server.on("/", HTTP_GET, [&server]() {
+    auto *srv = &server;
+    File f = LittleFS.open("/index.html", "r");
+    if (!f) {
+      srv->send(404, "text/plain", "Not found");
+      return;
+    }
+    srv->streamFile(f, "text/plain");
+    f.close();
   });
-  // Serve other static files (config.html, example.html, etc.)
-  server.serveStatic("/", LittleFS, "/");
 
-  // API: return current configuration
-  server.on("/api/config/get", HTTP_GET, [](AsyncWebServerRequest *req) {
-    if (!requireAuth(req)) return;
-    DynamicJsonDocument doc(2048);
+  server.on("/api/config/get", HTTP_GET, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    DynamicJsonDocument doc(4096);
     doc["nodeId"] = config.nodeId;
     doc["fwVersion"] = FIRMWARE_VERSION;
     JsonObject wifiObj = doc.createNestedObject("wifi");
@@ -1534,10 +1432,10 @@ void setupServer() {
     wifiObj["pass"] = config.wifi.pass;
     JsonObject modObj = doc.createNestedObject("modules");
     modObj["ads1115"] = config.modules.ads1115;
-    modObj["pwm010"]  = config.modules.pwm010;
-    modObj["zmpt"]    = config.modules.zmpt;
-    modObj["zmct"]    = config.modules.zmct;
-    modObj["div"]     = config.modules.div;
+    modObj["pwm010"] = config.modules.pwm010;
+    modObj["zmpt"] = config.modules.zmpt;
+    modObj["zmct"] = config.modules.zmct;
+    modObj["div"] = config.modules.div;
     doc["inputCount"] = config.inputCount;
     JsonArray inArr = doc.createNestedArray("inputs");
     for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
@@ -1566,6 +1464,7 @@ void setupServer() {
       o["scale"] = oc.scale;
       o["offset"] = oc.offset;
       o["active"] = oc.active;
+      o["value"] = oc.value;
     }
     doc["peerCount"] = config.peerCount;
     JsonArray peerArr = doc.createNestedArray("peers");
@@ -1574,138 +1473,134 @@ void setupServer() {
       o["nodeId"] = config.peers[i].nodeId;
       o["pin"] = config.peers[i].pin;
     }
-    String resp;
-    serializeJson(doc, resp);
-    req->send(200, "application/json", resp);
+    String payload;
+    serializeJson(doc, payload);
+    srv->send(200, "application/json", payload);
   });
 
-  // API: set configuration.  Expects a JSON body.  After saving
-  // configuration a reboot is performed to apply changes.
-  server.on(
-      "/api/config/set", HTTP_POST,
-      [](AsyncWebServerRequest *req) {
-        if (!requireAuth(req)) {
-          configSetBody = "";
-          return;
-        }
-        if (configSetBody.length() == 0) {
-          logMessage("Config set request missing body");
-          req->send(400, "application/json", "{\"error\":\"No body\"}");
-          return;
-        }
-        DynamicJsonDocument doc(4096);
-        auto err = deserializeJson(doc, configSetBody);
-        configSetBody = "";
-        if (err) {
-          logPrintf("Config set JSON parse error: %s", err.c_str());
-          req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-          return;
-        }
-        // Update global config from JSON
-        parseConfigFromJson(doc);
-        if (!saveConfig()) {
-          req->send(500, "application/json", "{\"error\":\"Save failed\"}");
-          return;
-        }
-        oledLogging = false;
-        req->send(200, "application/json", "{\"status\":\"ok\"}");
-        // Delay slightly to ensure response is sent before rebooting
-        delay(200);
-        ESP.restart();
-      },
-      NULL,
-      [](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index,
-         size_t total) {
-        String token;
-        if (!extractSessionToken(req, token) || !sessionTokenValid(token, false)) {
-          return;
-        }
-        appendRequestBodyChunk(configSetBody, data, len, index, total);
-      });
-
-  // API: reboot device on demand
-  server.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest *req) {
-    if (!requireAuth(req)) return;
-    req->send(200, "application/json", "{\"status\":\"ok\"}");
-    delay(200);
+  server.on("/api/config/set", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", "{"error":"No body"}");
+      return;
+    }
+    DynamicJsonDocument doc(8192);
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", "{"error":"Invalid JSON"}");
+      return;
+    }
+    parseConfigFromJson(doc);
+    if (!saveConfig()) {
+      srv->send(500, "application/json", "{"error":"save failed"}");
+      return;
+    }
+    srv->send(200, "application/json", "{"status":"ok"}");
+    delay(100);
     ESP.restart();
   });
 
-  // API: OTA firmware update
-  server.on(
-      "/api/ota", HTTP_POST,
-      [](AsyncWebServerRequest *req) {
-        if (!requireAuth(req)) return;
-        bool success = !Update.hasError();
-        req->send(success ? 200 : 500, "application/json",
-                  success ? "{\"status\":\"ok\"}"
-                          : "{\"status\":\"fail\"}");
-        if (success) {
-          delay(200);
-          ESP.restart();
-        }
-      },
-      [](AsyncWebServerRequest *req, String filename, size_t index,
-         uint8_t *data, size_t len, bool final) {
-        String token;
-        if (!extractSessionToken(req, token) || !sessionTokenValid(token, false)) {
-          return;
-        }
-        if (!index) {
-          logPrintf("OTA update: %s", filename.c_str());
-          if (!Update.begin((ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000)) {
-            Update.printError(Serial);
-          }
-        }
-        if (Update.write(data, len) != len) {
-          Update.printError(Serial);
-        }
-        if (final) {
-          if (Update.end(true)) {
-            logMessage("Update successful");
-          } else {
-            Update.printError(Serial);
-          }
-        }
-      });
+  server.on("/api/reboot", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    srv->send(200, "application/json", "{"status":"rebooting"}");
+    delay(100);
+    ESP.restart();
+  });
 
-  // API: return current input values
-  server.on("/api/inputs", HTTP_GET, [](AsyncWebServerRequest *req) {
-    if (!requireAuth(req)) return;
+  server.on("/api/output/set", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", "{"error":"No body"}");
+      return;
+    }
     DynamicJsonDocument doc(1024);
-    JsonObject obj = doc.to<JsonObject>();
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", "{"error":"Invalid JSON"}");
+      return;
+    }
+    bool updated = false;
+    if (doc.containsKey("outputs") && doc["outputs"].is<JsonArray>()) {
+      JsonArray arr = doc["outputs"].as<JsonArray>();
+      for (JsonObject o : arr) {
+        String name = o["name"].as<String>();
+        float value = o["value"].as<float>();
+        for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
+          OutputConfig &oc = config.outputs[i];
+          if (oc.name == name) {
+            oc.value = value;
+            oc.active = true;
+            updated = true;
+          }
+        }
+      }
+    } else if (doc.containsKey("name")) {
+      String name = doc["name"].as<String>();
+      float value = doc["value"].as<float>();
+      for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
+        OutputConfig &oc = config.outputs[i];
+        if (oc.name == name) {
+          oc.value = value;
+          oc.active = true;
+          updated = true;
+          break;
+        }
+      }
+    }
+    if (!updated) {
+      srv->send(404, "application/json", "{"error":"Unknown output"}");
+      return;
+    }
+    updateOutputs();
+    saveConfig();
+    srv->send(200, "application/json", "{"status":"ok"}");
+  });
+
+  server.on("/api/inputs", HTTP_GET, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    DynamicJsonDocument doc(2048);
+    JsonArray arr = doc.createNestedArray("inputs");
     for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
       const InputConfig &ic = config.inputs[i];
-      if (ic.active) {
-        obj[ic.name] = isnan(ic.value) ? 0 : ic.value;
-      }
+      if (!ic.active || ic.type == INPUT_DISABLED) continue;
+      JsonObject o = arr.createNestedObject();
+      o["name"] = ic.name;
+      o["value"] = ic.value;
+      o["unit"] = ic.unit;
+      o["timestamp"] = millis();
     }
-    String resp;
-    serializeJson(doc, resp);
-    req->send(200, "application/json", resp);
+    String payload;
+    serializeJson(doc, payload);
+    srv->send(200, "application/json", payload);
   });
 
-  // API: return current output values
-  server.on("/api/outputs", HTTP_GET, [](AsyncWebServerRequest *req) {
-    if (!requireAuth(req)) return;
+  server.on("/api/outputs", HTTP_GET, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
     DynamicJsonDocument doc(1024);
-    JsonObject obj = doc.to<JsonObject>();
+    JsonArray arr = doc.createNestedArray("outputs");
     for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
       const OutputConfig &oc = config.outputs[i];
-      if (oc.active) {
-        obj[oc.name] = oc.value;
-      }
+      JsonObject o = arr.createNestedObject();
+      o["name"] = oc.name;
+      o["value"] = oc.value;
+      o["active"] = oc.active;
     }
-    String resp;
-    serializeJson(doc, resp);
-    req->send(200, "application/json", resp);
+    String payload;
+    serializeJson(doc, payload);
+    srv->send(200, "application/json", payload);
   });
 
-  server.on("/api/discovery", HTTP_GET, [](AsyncWebServerRequest *req) {
-    if (!requireAuth(req)) return;
+  server.on("/api/discovery", HTTP_GET, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
     triggerDiscovery();
-    DynamicJsonDocument doc(2048);
-    JsonArray arr = doc.to<JsonArray>();
+    DynamicJsonDocument doc(1024);
+    JsonArray arr = doc.createNestedArray("nodes");
     uint32_t now = millis();
     for (uint8_t i = 0; i < discoveredCount; i++) {
       if (now - discoveredNodes[i].lastSeen > DISCOVERY_TIMEOUT_MS) {
@@ -1715,268 +1610,221 @@ void setupServer() {
       o["nodeId"] = discoveredNodes[i].nodeId;
       o["ip"] = discoveredNodes[i].ip.toString();
       o["ageMs"] = static_cast<uint32_t>(now - discoveredNodes[i].lastSeen);
-      bool hasPin = false;
-      for (uint8_t p = 0; p < config.peerCount && p < MAX_PEERS; p++) {
-        if (config.peers[p].nodeId == discoveredNodes[i].nodeId &&
-            config.peers[p].pin.length() > 0) {
-          hasPin = true;
-          break;
-        }
-      }
-      o["hasPin"] = hasPin;
     }
-    String resp;
-    serializeJson(doc, resp);
-    req->send(200, "application/json", resp);
+    String payload;
+    serializeJson(doc, payload);
+    srv->send(200, "application/json", payload);
   });
 
-  // API: set an output value.  Expects JSON {"name":"output1","value":x}
-  server.on(
-      "/api/output/set", HTTP_POST,
-      [](AsyncWebServerRequest *req) {
-        if (!requireAuth(req)) {
-          outputSetBody = "";
-          return;
-        }
-        if (req->contentLength() == 0) {
-          outputSetBody = "";
-          req->send(400, "application/json", "{\"error\":\"No body\"}");
-          return;
-        }
-        String body = outputSetBody;
-        outputSetBody = "";
-        if (body.length() == 0) {
-          req->send(400, "application/json", "{\"error\":\"No body\"}");
-          return;
-        }
-        DynamicJsonDocument doc(512);
-        auto err = deserializeJson(doc, body);
-        if (err) {
-          req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-          return;
-        }
-        String name = doc["name"].as<String>();
-        float val = doc["value"].as<float>();
-        bool found = false;
-        for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
-          if (config.outputs[i].name == name) {
-            config.outputs[i].value = val;
-            found = true;
-            break;
-          }
-        }
-        if (!found) {
-          req->send(404, "application/json",
-                    "{\"error\":\"Unknown output\"}");
-          return;
-        }
-        updateOutputs();
-        saveConfig();
-        req->send(200, "application/json", "{\"status\":\"ok\"}");
-      },
-      NULL,
-      [](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index,
-         size_t total) {
-        appendRequestBodyChunk(outputSetBody, data, len, index, total);
-      });
+  server.on("/api/peers/set", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", "{"error":"No body"}");
+      return;
+    }
+    DynamicJsonDocument doc(1024);
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", "{"error":"Invalid JSON"}");
+      return;
+    }
+    if (!doc.containsKey("peers") || !doc["peers"].is<JsonArray>()) {
+      srv->send(400, "application/json", "{"error":"Invalid JSON"}");
+      return;
+    }
+    JsonArray arr = doc["peers"].as<JsonArray>();
+    config.peerCount = min<uint8_t>(arr.size(), MAX_PEERS);
+    uint8_t idx = 0;
+    for (JsonObject o : arr) {
+      if (idx >= MAX_PEERS) break;
+      config.peers[idx].nodeId = o["nodeId"].as<String>();
+      config.peers[idx].pin = o["pin"].as<String>();
+      idx++;
+    }
+    saveConfig();
+    srv->send(200, "application/json", "{"status":"ok"}");
+  });
 
-  // API: return remote values
-  server.on("/api/remote", HTTP_GET, [](AsyncWebServerRequest *req) {
-    if (!requireAuth(req)) return;
+  server.on("/api/remote", HTTP_GET, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
     DynamicJsonDocument doc(1024);
     JsonObject obj = doc.to<JsonObject>();
     for (int i = 0; i < remoteCount; i++) {
       String key = remoteValues[i].nodeId + ":" + remoteValues[i].inputName;
       obj[key] = remoteValues[i].value;
     }
-    String resp;
-    serializeJson(doc, resp);
-    req->send(200, "application/json", resp);
+    String payload;
+    serializeJson(doc, payload);
+    srv->send(200, "application/json", payload);
   });
 
-  // API: return system logs
-  server.on("/api/logs", HTTP_GET, [](AsyncWebServerRequest *req) {
-    if (!requireAuth(req)) return;
+  server.on("/api/logs", HTTP_GET, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
     if (!LittleFS.exists(LOG_PATH)) {
-      req->send(404, "text/plain", "No log");
+      srv->send(404, "text/plain", "No log");
       return;
     }
     File f = LittleFS.open(LOG_PATH, "r");
     if (!f) {
-      req->send(500, "text/plain", "Failed to open log");
+      srv->send(500, "text/plain", "Failed to open log");
       return;
     }
-    String content = f.readString();
+    srv->streamFile(f, "text/plain");
     f.close();
-    req->send(200, "text/plain", content);
   });
 
-  // API: simple file browser (LittleFS)
-  server.on("/api/files/list", HTTP_GET, [](AsyncWebServerRequest *req) {
-    if (!requireAuth(req)) return;
+  server.on("/api/files/list", HTTP_GET, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
     if (!enforceSampleFilePolicy()) {
-      req->send(500, "application/json", "{\"error\":\"private directory\"}");
+      srv->send(500, "application/json", "{"error":"storage unavailable"}");
       return;
     }
-    DynamicJsonDocument doc(256);
-    JsonArray arr = doc.to<JsonArray>();
-    if (LittleFS.exists(SAMPLE_FILE_PATH)) {
-      arr.add(SAMPLE_FILE_NAME);
+    DynamicJsonDocument doc(512);
+    JsonArray arr = doc.createNestedArray("files");
+    Dir dir = LittleFS.openDir(USER_FILES_DIR);
+    while (dir.next()) {
+      if (dir.isDirectory()) continue;
+      String relative = toRelativeUserPath(dir.fileName());
+      if (relative.length() == 0) continue;
+      JsonObject o = arr.createNestedObject();
+      o["name"] = relative;
+      o["size"] = dir.fileSize();
     }
-    String resp;
-    serializeJson(arr, resp);
-    req->send(200, "application/json", resp);
+    String payload;
+    serializeJson(doc, payload);
+    srv->send(200, "application/json", payload);
   });
 
-  server.on("/api/files/get", HTTP_GET, [](AsyncWebServerRequest *req) {
-    if (!requireAuth(req)) return;
-    if (!req->hasParam("path")) {
-      req->send(400, "text/plain", "missing path");
+  server.on("/api/files/get", HTTP_GET, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    if (!srv->hasArg("path")) {
+      srv->send(400, "application/json", "{"error":"missing path"}");
       return;
     }
     if (!enforceSampleFilePolicy()) {
-      req->send(500, "text/plain", "storage unavailable");
+      srv->send(500, "application/json", "{"error":"storage unavailable"}");
       return;
     }
-    String clientPath = req->getParam("path")->value();
+    String clientPath = srv->arg("path");
     String fsPath;
     if (!resolveUserPath(clientPath, fsPath)) {
-      req->send(400, "text/plain", "invalid path");
+      srv->send(400, "application/json", "{"error":"invalid path"}");
       return;
     }
     if (!LittleFS.exists(fsPath)) {
-      req->send(404, "text/plain", "not found");
+      srv->send(404, "application/json", "{"error":"not found"}");
       return;
     }
     File f = LittleFS.open(fsPath, "r");
     if (!f) {
-      req->send(500, "text/plain", "open failed");
+      srv->send(500, "application/json", "{"error":"open failed"}");
       return;
     }
-    String content = f.readString();
+    srv->streamFile(f, "text/html");
     f.close();
-    req->send(200, "text/plain", content);
   });
 
-  server.on(
-      "/api/files/save", HTTP_POST,
-      [](AsyncWebServerRequest *req) {
-        if (!requireAuth(req)) {
-          fileSaveBody = "";
-          return;
-        }
-        if (req->contentLength() == 0) {
-          fileSaveBody = "";
-          req->send(400, "application/json", "{\"error\":\"No body\"}");
-          return;
-        }
-        if (!enforceSampleFilePolicy()) {
-          fileSaveBody = "";
-          req->send(500, "application/json",
-                    "{\"error\":\"storage unavailable\"}");
-          return;
-        }
-        String body = fileSaveBody;
-        fileSaveBody = "";
-        if (body.length() == 0) {
-          req->send(400, "application/json", "{\"error\":\"No body\"}");
-          return;
-        }
-        DynamicJsonDocument doc(8192);
-        if (deserializeJson(doc, body)) {
-          req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-          return;
-        }
-        String clientPath = doc["path"].as<String>();
-        String fsPath;
-        if (!resolveUserPath(clientPath, fsPath)) {
-          req->send(400, "application/json", "{\"error\":\"invalid path\"}");
-          return;
-        }
-        String content = doc["content"].as<String>();
-        File f = LittleFS.open(fsPath, "w");
-        if (!f) {
-          req->send(500, "application/json", "{\"error\":\"open failed\"}");
-          return;
-        }
-        f.print(content);
-        f.close();
-        req->send(200, "application/json", "{\"status\":\"ok\"}");
-      },
-      NULL,
-      [](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index,
-         size_t total) {
-        appendRequestBodyChunk(fileSaveBody, data, len, index, total);
-      });
-
-  server.on("/api/files/create", HTTP_POST, [](AsyncWebServerRequest *req) {
-    if (!requireAuth(req)) return;
+  server.on("/api/files/save", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", "{"error":"No body"}");
+      return;
+    }
     if (!enforceSampleFilePolicy()) {
-      req->send(500, "application/json", "{\"error\":\"storage unavailable\"}");
+      srv->send(500, "application/json", "{"error":"storage unavailable"}");
       return;
     }
-    req->send(403, "application/json", "{\"error\":\"forbidden\"}");
+    DynamicJsonDocument doc(2048);
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", "{"error":"Invalid JSON"}");
+      return;
+    }
+    String clientPath = doc["path"].as<String>();
+    String fsPath;
+    if (!resolveUserPath(clientPath, fsPath)) {
+      srv->send(400, "application/json", "{"error":"invalid path"}");
+      return;
+    }
+    String content = doc["content"].as<String>();
+    File f = LittleFS.open(fsPath, "w");
+    if (!f) {
+      srv->send(500, "application/json", "{"error":"open failed"}");
+      return;
+    }
+    f.print(content);
+    f.close();
+    srv->send(200, "application/json", "{"status":"ok"}");
   });
 
-  server.on("/api/files/rename", HTTP_POST, [](AsyncWebServerRequest *req) {
-    if (!requireAuth(req)) return;
-    if (!enforceSampleFilePolicy()) {
-      req->send(500, "application/json", "{\"error\":\"storage unavailable\"}");
-      return;
-    }
-    req->send(403, "application/json", "{\"error\":\"forbidden\"}");
+  auto forbiddenHandler = [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    srv->send(403, "application/json", "{"error":"forbidden"}");
+  };
+  server.on("/api/files/create", HTTP_POST, forbiddenHandler);
+  server.on("/api/files/rename", HTTP_POST, forbiddenHandler);
+  server.on("/api/files/delete", HTTP_POST, forbiddenHandler);
+
+  server.serveStatic("/", LittleFS, "/");
+  server.onNotFound([&server]() {
+    server.send(404, "text/plain", "Not found");
   });
-
-  server.on("/api/files/delete", HTTP_POST, [](AsyncWebServerRequest *req) {
-    if (!requireAuth(req)) return;
-    if (!enforceSampleFilePolicy()) {
-      req->send(500, "application/json", "{\"error\":\"storage unavailable\"}");
-      return;
-    }
-    req->send(403, "application/json", "{\"error\":\"forbidden\"}");
-  });
-
-#if defined(ASYNC_TCP_SSL_ENABLED)
-  if (HAS_SECURE_SERVER) {
-    // Start HTTPS server and HTTP redirector
-    bool httpsStarted = beginSecureServer(server, TLS_CERT, TLS_KEY, nullptr);
-    if (!httpsStarted) {
-      logMessage("Failed to start HTTPS server");
-      return;
-    }
-    logPrintf("HTTPS server started on port %u", PRIMARY_WEB_PORT);
-
-    redirectServer.on("/", HTTP_ANY, [](AsyncWebServerRequest *req) {
-      String host = req->host();
-      if (!host.length()) {
-        IPAddress ip =
-            (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
-        host = ip.toString();
-      }
-      req->redirect(String("https://") + host + "/");
-    });
-    redirectServer.onNotFound([](AsyncWebServerRequest *req) {
-      String host = req->host();
-      if (!host.length()) {
-        IPAddress ip =
-            (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
-        host = ip.toString();
-      }
-      String target = String("https://") + host + req->url();
-      req->redirect(target);
-    });
-    redirectServer.begin();
-  } else {
-    server.begin();
-    logPrintf("HTTP server started on port %u (TLS unsupported)",
-              PRIMARY_WEB_PORT);
-  }
-#else
-  server.begin();
-  logPrintf("HTTP server started on port %u (TLS disabled)", PRIMARY_WEB_PORT);
-#endif
 }
 
+void setupServer() {
+  secureServerActive = false;
+  do {
+    static BearSSL::X509List cert(TLS_CERT);
+    static BearSSL::PrivateKey key(TLS_KEY);
+    secureServer.setRSACert(&cert, &key);
+    registerRoutes(secureServer);
+    secureServer.begin();
+    secureServerActive = true;
+    logPrintf("HTTPS server started on port %u", HTTPS_PORT);
+  } while (false);
+
+  if (secureServerActive) {
+    auto redirectHandler = []() {
+      String host = primaryHttpServer.hostHeader();
+      if (!host.length()) {
+        IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
+        host = ip.toString();
+      }
+      String target = String("https://") + host + primaryHttpServer.uri();
+      if (primaryHttpServer.args() > 0) {
+        String query;
+        for (uint8_t i = 0; i < primaryHttpServer.args(); i++) {
+          if (i == 0) {
+            query = "?";
+          } else {
+            query += "&";
+          }
+          query += primaryHttpServer.argName(i);
+          query += "=";
+          query += primaryHttpServer.arg(i);
+        }
+        target += query;
+      }
+      primaryHttpServer.sendHeader("Location", target);
+      primaryHttpServer.send(302, "text/plain", "Redirecting to HTTPS");
+    };
+    primaryHttpServer.on("/", HTTP_ANY, redirectHandler);
+    primaryHttpServer.onNotFound(redirectHandler);
+    primaryHttpServer.begin();
+    logPrintf("HTTP redirector started on port %u", HTTP_PORT);
+  } else {
+    registerRoutes(primaryHttpServer);
+    primaryHttpServer.begin();
+    logPrintf("HTTP server started on port %u (TLS unavailable)", HTTP_PORT);
+  }
+}
 // Arduino setup entry point.  Serial is initialised for debug output.
 // Configuration is loaded or initialised.  Wi-Fi, sensors and the
 // server are then configured.  UDP listener starts on the broadcast
@@ -2027,8 +1875,9 @@ void setup() {
 }
 
 // Main loop.  Inputs are sampled on a schedule.  Broadcasts are sent
-// periodically.  Incoming UDP packets are processed continuously.  The
-// web server runs asynchronously and does not need servicing here.
+// periodically.  Incoming UDP packets are processed continuously.  HTTP
+// servers are serviced on each pass so that both the HTTPS endpoint and
+// HTTP redirect remain responsive.
 void loop() {
   unsigned long now = millis();
   if (now - lastInputUpdate >= INPUT_UPDATE_INTERVAL) {
@@ -2037,6 +1886,12 @@ void loop() {
   }
   processUdp();
   sendBroadcast();
+  if (secureServerActive) {
+    secureServer.handleClient();
+    primaryHttpServer.handleClient();
+  } else {
+    primaryHttpServer.handleClient();
+  }
   // Sleep briefly to yield to background tasks
   delay(5);
 }
