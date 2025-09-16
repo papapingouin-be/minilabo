@@ -524,6 +524,10 @@ static const uint16_t HTTPS_PORT = 443;
 static const uint16_t HTTP_PORT = 80;
 static BearSSL::ESP8266WebServerSecure secureServer(HTTPS_PORT);  // HTTPS server
 static BearSSL::ServerSessions secureSessionCache(4);              // TLS session cache
+static const bool ENABLE_TLS_SESSION_CACHE = false;                // Disable to save RAM unless explicitly needed
+static const size_t TLS_RX_BUFFER_SIZE = 1024;                     // Smaller buffers reduce fragmentation pressure
+static const size_t TLS_TX_BUFFER_SIZE = 1024;
+static const uint32_t MIN_TLS_HEAP = 8192;                         // Minimum free heap before enabling HTTPS
 
 // Some versions of the ESP8266 Arduino core expose BearSSL session caching via
 // WiFiServerSecure::setSessionCache while older releases lack this API.  Use a
@@ -1155,6 +1159,20 @@ void setupWiFi() {
   }
   IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
   logPrintf("IP address: %s", ip.toString().c_str());
+  if (WiFi.status() == WL_CONNECTED) {
+    logPrintf("WiFi RSSI: %d dBm", WiFi.RSSI());
+  }
+  IPAddress gateway = WiFi.gatewayIP();
+  logPrintf("Gateway: %s", gateway.toString().c_str());
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClient testClient;
+    if (testClient.connect("8.8.8.8", 53)) {
+      logMessage("Internet connectivity OK");
+      testClient.stop();
+    } else {
+      logMessage("Internet connectivity test failed");
+    }
+  }
   // Start mDNS if possible
   if (MDNS.begin(config.nodeId.c_str())) {
     logMessage("mDNS responder started");
@@ -1948,28 +1966,38 @@ void setupServer() {
   if (HAS_SECURE_SERVER) {
     static BearSSL::X509List cert(TLS_CERT);
     static BearSSL::PrivateKey key(TLS_KEY);
-    auto &bear = secureServer.getServer();
-    // Reduce TLS memory footprint and keep session tickets so repeated
-    // connections do not require a full handshake each time.  The default
-    // 16 KB I/O buffers exceeded the available heap once the application is
-    // running which caused the TLS stack to abort mid-handshake, so we still
-    // shrink them substantially while leaving enough space for modern clients.
-    bear.setRSACert(&cert, &key);
-    // Modern browsers advertise a very large list of TLS 1.2 extensions and
-    // cipher suites.  The resulting ClientHello can exceed 2 KB, so BearSSL
-    // aborted the handshake when we limited both buffers to 2048 bytes.  Chrome
-    // reports this failure as ERR_SOCKET_NOT_CONNECTED.  Using 4 KB buffers
-    // keeps enough headroom for those handshakes while remaining well below the
-    // 16 KB default that previously exhausted the heap once the application was
-    // running.
-    const size_t tlsBufferSize = 4096;
-    bear.setBufferSizes(tlsBufferSize, tlsBufferSize);
-    logPrintf("TLS I/O buffers set to %u bytes", static_cast<unsigned>(tlsBufferSize));
-    configureSessionCache(bear, &secureSessionCache);
-    registerRoutes(secureServer);
-    secureServer.begin();
-    secureServerActive = true;
-    logPrintf("HTTPS server started on port %u", HTTPS_PORT);
+    uint32_t freeHeap = ESP.getFreeHeap();
+    uint32_t maxBlock = ESP.getMaxFreeBlockSize();
+    logPrintf("Heap before TLS: %u bytes (largest block %u bytes)",
+              static_cast<unsigned>(freeHeap),
+              static_cast<unsigned>(maxBlock));
+    if (!cert.getCount()) {
+      logMessage("TLS certificate invalid, HTTPS disabled");
+    } else if (!key.isRSA() && !key.isEC()) {
+      logMessage("TLS private key invalid, HTTPS disabled");
+    } else if (freeHeap < MIN_TLS_HEAP ||
+               maxBlock < (TLS_RX_BUFFER_SIZE + TLS_TX_BUFFER_SIZE)) {
+      logMessage("Insufficient heap for HTTPS, falling back to HTTP only");
+    } else {
+      auto &bear = secureServer.getServer();
+      bear.setRSACert(&cert, &key);
+      // Keep TLS buffers tight so the ESP8266 can find contiguous heap blocks
+      // even after the rest of the application is initialised.
+      bear.setBufferSizes(TLS_RX_BUFFER_SIZE, TLS_TX_BUFFER_SIZE);
+      logPrintf("TLS buffers set to %u/%u bytes (rx/tx)",
+                static_cast<unsigned>(TLS_RX_BUFFER_SIZE),
+                static_cast<unsigned>(TLS_TX_BUFFER_SIZE));
+      if (ENABLE_TLS_SESSION_CACHE) {
+        configureSessionCache(bear, &secureSessionCache);
+        logMessage("TLS session cache enabled");
+      } else {
+        logMessage("TLS session cache disabled");
+      }
+      registerRoutes(secureServer);
+      secureServer.begin();
+      secureServerActive = true;
+      logPrintf("HTTPS server started on port %u", HTTPS_PORT);
+    }
   } else {
     logMessage("HTTPS server disabled at compile time");
   }
@@ -1989,6 +2017,18 @@ void setupServer() {
     primaryHttpServer.begin();
     logPrintf("HTTP server started on port %u", HTTP_PORT);
   }
+}
+
+static void diagnosticHTTPS() {
+  logMessage("=== Diagnostic HTTPS ===");
+  logPrintf("Heap free: %u bytes", static_cast<unsigned>(ESP.getFreeHeap()));
+  logPrintf("Max free block: %u bytes",
+            static_cast<unsigned>(ESP.getMaxFreeBlockSize()));
+  logPrintf("Secure server active: %s", secureServerActive ? "YES" : "NO");
+  logPrintf("TLS support compiled: %s", HAS_SECURE_SERVER ? "YES" : "NO");
+  IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
+  logPrintf("Local IP: %s", ip.toString().c_str());
+  logPrintf("WiFi mode: %d", static_cast<int>(WiFi.getMode()));
 }
 // Arduino setup entry point.  Serial is initialised for debug output.
 // Configuration is loaded or initialised.  Wi-Fi, sensors and the
@@ -2017,6 +2057,7 @@ void setup() {
   udp.begin(BROADCAST_PORT);
   setupSensors();
   setupServer();
+  diagnosticHTTPS();
   triggerDiscovery();
   // After network and services are up, show basic status on the OLED
   // so users immediately know the node ID and how to reach it.  This
@@ -2051,12 +2092,22 @@ void loop() {
   }
   processUdp();
   sendBroadcast();
+  static uint32_t lastMemCheck = 0;
+  if (now - lastMemCheck > 10000UL) {
+    lastMemCheck = now;
+    uint32_t freeHeap = ESP.getFreeHeap();
+    if (freeHeap < 2048) {
+      logPrintf("ALERT: heap critically low (%u bytes)", static_cast<unsigned>(freeHeap));
+    }
+  }
   if (secureServerActive) {
     secureServer.handleClient();
+    yield();
     primaryHttpServer.handleClient();
   } else {
     primaryHttpServer.handleClient();
   }
+  yield();
   // Sleep briefly to yield to background tasks
   delay(5);
 }
