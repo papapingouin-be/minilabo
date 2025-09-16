@@ -27,6 +27,7 @@
 #include <Updater.h>
 #if defined(ASYNC_TCP_SSL_ENABLED)
 #include <type_traits>
+#include <utility>
 #endif
 
 static const char *FIRMWARE_VERSION = "1.0.0";
@@ -95,6 +96,20 @@ xfuP17fzRNjzewM8mDmktjA=
 #endif
 
 #if defined(ASYNC_TCP_SSL_ENABLED)
+namespace tls_detail {
+template <typename...>
+using void_t = void;
+
+template <typename T, typename = void>
+struct HasBeginSecure : std::false_type {};
+
+template <typename T>
+struct HasBeginSecure<
+    T, void_t<decltype(std::declval<T &>().beginSecure(
+           (const char *)nullptr, (const char *)nullptr,
+           (const char *)nullptr))>> : std::true_type {};
+}  // namespace tls_detail
+
 template <typename ServerType>
 static bool beginSecureServerImpl(ServerType &server, const char *cert,
                                   const char *key, const char *password,
@@ -111,12 +126,30 @@ static bool beginSecureServerImpl(ServerType &server, const char *cert,
 }
 
 template <typename ServerType>
-static bool beginSecureServer(ServerType &server, const char *cert,
-                              const char *key, const char *password) {
+static bool beginSecureServerDispatch(ServerType &server, const char *cert,
+                                      const char *key,
+                                      const char *password,
+                                      std::true_type) {
   using BeginSecureReturn =
       decltype(server.beginSecure(cert, key, password));
-  return beginSecureServerImpl(server, cert, key, password,
-                               typename std::is_void<BeginSecureReturn>::type{});
+  return beginSecureServerImpl(
+      server, cert, key, password,
+      typename std::is_void<BeginSecureReturn>::type{});
+}
+
+template <typename ServerType>
+static bool beginSecureServerDispatch(ServerType &, const char *,
+                                      const char *, const char *,
+                                      std::false_type) {
+  return false;
+}
+
+template <typename ServerType>
+static bool beginSecureServer(ServerType &server, const char *cert,
+                              const char *key, const char *password) {
+  return beginSecureServerDispatch(
+      server, cert, key, password,
+      typename tls_detail::HasBeginSecure<ServerType>::type{});
 }
 #endif
 
@@ -510,10 +543,13 @@ struct Config {
 
 static Config config;            // Global configuration instance
 #if defined(ASYNC_TCP_SSL_ENABLED)
-static const uint16_t PRIMARY_WEB_PORT = 443;
-static AsyncWebServer server(PRIMARY_WEB_PORT);       // HTTPS server instance
+static const bool HAS_SECURE_SERVER =
+    tls_detail::HasBeginSecure<AsyncWebServer>::value;
+static const uint16_t PRIMARY_WEB_PORT = HAS_SECURE_SERVER ? 443 : 80;
+static AsyncWebServer server(PRIMARY_WEB_PORT);       // HTTPS or HTTP server
 static AsyncWebServer redirectServer(80);             // HTTP redirector
 #else
+static const bool HAS_SECURE_SERVER = false;
 static const uint16_t PRIMARY_WEB_PORT = 80;
 static AsyncWebServer server(PRIMARY_WEB_PORT);       // Primary server instance
 #endif
@@ -1899,32 +1935,40 @@ void setupServer() {
   });
 
 #if defined(ASYNC_TCP_SSL_ENABLED)
-  // Start HTTPS server and HTTP redirector
-  bool httpsStarted = beginSecureServer(server, TLS_CERT, TLS_KEY, nullptr);
-  if (!httpsStarted) {
-    logMessage("Failed to start HTTPS server");
-    return;
-  }
-  logPrintf("HTTPS server started on port %u", PRIMARY_WEB_PORT);
+  if (HAS_SECURE_SERVER) {
+    // Start HTTPS server and HTTP redirector
+    bool httpsStarted = beginSecureServer(server, TLS_CERT, TLS_KEY, nullptr);
+    if (!httpsStarted) {
+      logMessage("Failed to start HTTPS server");
+      return;
+    }
+    logPrintf("HTTPS server started on port %u", PRIMARY_WEB_PORT);
 
-  redirectServer.on("/", HTTP_ANY, [](AsyncWebServerRequest *req) {
-    String host = req->host();
-    if (!host.length()) {
-      IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
-      host = ip.toString();
-    }
-    req->redirect(String("https://") + host + "/");
-  });
-  redirectServer.onNotFound([](AsyncWebServerRequest *req) {
-    String host = req->host();
-    if (!host.length()) {
-      IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
-      host = ip.toString();
-    }
-    String target = String("https://") + host + req->url();
-    req->redirect(target);
-  });
-  redirectServer.begin();
+    redirectServer.on("/", HTTP_ANY, [](AsyncWebServerRequest *req) {
+      String host = req->host();
+      if (!host.length()) {
+        IPAddress ip =
+            (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
+        host = ip.toString();
+      }
+      req->redirect(String("https://") + host + "/");
+    });
+    redirectServer.onNotFound([](AsyncWebServerRequest *req) {
+      String host = req->host();
+      if (!host.length()) {
+        IPAddress ip =
+            (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
+        host = ip.toString();
+      }
+      String target = String("https://") + host + req->url();
+      req->redirect(target);
+    });
+    redirectServer.begin();
+  } else {
+    server.begin();
+    logPrintf("HTTP server started on port %u (TLS unsupported)",
+              PRIMARY_WEB_PORT);
+  }
 #else
   server.begin();
   logPrintf("HTTP server started on port %u (TLS disabled)", PRIMARY_WEB_PORT);
