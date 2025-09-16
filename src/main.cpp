@@ -964,11 +964,11 @@ template <typename ServerT>
 bool requireAuth(ServerT *server) {
   String token;
   if (!extractSessionToken(server, token)) {
-    server->send(401, "application/json", "{\"error\":\"unauthorized\"}");
+    server->send(401, "application/json", R"({"error":"unauthorized"})");
     return false;
   }
   if (!sessionTokenValid(token, true)) {
-    server->send(401, "application/json", "{\"error\":\"unauthorized\"}");
+    server->send(401, "application/json", R"({"error":"unauthorized"})");
     return false;
   }
   return true;
@@ -1355,19 +1355,19 @@ void registerRoutes(ServerT &server) {
     auto *srv = &server;
     String body = srv->hasArg("plain") ? srv->arg("plain") : String();
     if (body.length() == 0) {
-      srv->send(400, "application/json", "{"error":"No body"}");
+      srv->send(400, "application/json", R"({"error":"No body"})");
       return;
     }
     DynamicJsonDocument doc(256);
     if (deserializeJson(doc, body)) {
-      srv->send(400, "application/json", "{"error":"Invalid JSON"}");
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
       return;
     }
     String pin = doc["pin"].as<String>();
     pin.trim();
     if (pin != sessionPin) {
       srv->sendHeader("Set-Cookie", buildSessionCookie("", true));
-      srv->send(401, "application/json", "{"error":"invalid_pin"}");
+      srv->send(401, "application/json", R"({"error":"invalid_pin"})");
       return;
     }
     sessionToken = generateSessionToken();
@@ -1386,14 +1386,14 @@ void registerRoutes(ServerT &server) {
     auto *srv = &server;
     invalidateSession();
     srv->sendHeader("Set-Cookie", buildSessionCookie("", true));
-    srv->send(200, "application/json", "{"status":"ok"}");
+    srv->send(200, "application/json", R"({"status":"ok"})");
   });
 
   server.on("/api/session/status", HTTP_GET, [&server]() {
     auto *srv = &server;
     String token;
     if (!extractSessionToken(srv, token) || !sessionTokenValid(token, true)) {
-      srv->send(401, "application/json", "{"status":"invalid"}");
+      srv->send(401, "application/json", R"({"status":"invalid"})");
       return;
     }
     uint32_t now = millis();
@@ -1483,20 +1483,20 @@ void registerRoutes(ServerT &server) {
     if (!requireAuth(srv)) return;
     String body = srv->hasArg("plain") ? srv->arg("plain") : String();
     if (body.length() == 0) {
-      srv->send(400, "application/json", "{"error":"No body"}");
+      srv->send(400, "application/json", R"({"error":"No body"})");
       return;
     }
     DynamicJsonDocument doc(8192);
     if (deserializeJson(doc, body)) {
-      srv->send(400, "application/json", "{"error":"Invalid JSON"}");
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
       return;
     }
     parseConfigFromJson(doc);
     if (!saveConfig()) {
-      srv->send(500, "application/json", "{"error":"save failed"}");
+      srv->send(500, "application/json", R"({"error":"save failed"})");
       return;
     }
-    srv->send(200, "application/json", "{"status":"ok"}");
+    srv->send(200, "application/json", R"({"status":"ok"})");
     delay(100);
     ESP.restart();
   });
@@ -1504,7 +1504,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/reboot", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    srv->send(200, "application/json", "{"status":"rebooting"}");
+    srv->send(200, "application/json", R"({"status":"rebooting"})");
     delay(100);
     ESP.restart();
   });
@@ -1514,12 +1514,12 @@ void registerRoutes(ServerT &server) {
     if (!requireAuth(srv)) return;
     String body = srv->hasArg("plain") ? srv->arg("plain") : String();
     if (body.length() == 0) {
-      srv->send(400, "application/json", "{"error":"No body"}");
+      srv->send(400, "application/json", R"({"error":"No body"})");
       return;
     }
     DynamicJsonDocument doc(1024);
     if (deserializeJson(doc, body)) {
-      srv->send(400, "application/json", "{"error":"Invalid JSON"}");
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
       return;
     }
     bool updated = false;
@@ -1551,12 +1551,12 @@ void registerRoutes(ServerT &server) {
       }
     }
     if (!updated) {
-      srv->send(404, "application/json", "{"error":"Unknown output"}");
+      srv->send(404, "application/json", R"({"error":"Unknown output"})");
       return;
     }
     updateOutputs();
     saveConfig();
-    srv->send(200, "application/json", "{"status":"ok"}");
+    srv->send(200, "application/json", R"({"status":"ok"})");
   });
 
   server.on("/api/inputs", HTTP_GET, [&server]() {
@@ -1621,16 +1621,16 @@ void registerRoutes(ServerT &server) {
     if (!requireAuth(srv)) return;
     String body = srv->hasArg("plain") ? srv->arg("plain") : String();
     if (body.length() == 0) {
-      srv->send(400, "application/json", "{"error":"No body"}");
+      srv->send(400, "application/json", R"({"error":"No body"})");
       return;
     }
     DynamicJsonDocument doc(1024);
     if (deserializeJson(doc, body)) {
-      srv->send(400, "application/json", "{"error":"Invalid JSON"}");
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
       return;
     }
     if (!doc.containsKey("peers") || !doc["peers"].is<JsonArray>()) {
-      srv->send(400, "application/json", "{"error":"Invalid JSON"}");
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
       return;
     }
     JsonArray arr = doc["peers"].as<JsonArray>();
@@ -1643,7 +1643,7 @@ void registerRoutes(ServerT &server) {
       idx++;
     }
     saveConfig();
-    srv->send(200, "application/json", "{"status":"ok"}");
+    srv->send(200, "application/json", R"({"status":"ok"})");
   });
 
   server.on("/api/remote", HTTP_GET, [&server]() {
@@ -1680,7 +1680,7 @@ void registerRoutes(ServerT &server) {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
     if (!enforceSampleFilePolicy()) {
-      srv->send(500, "application/json", "{"error":"storage unavailable"}");
+      srv->send(500, "application/json", R"({"error":"storage unavailable"})");
       return;
     }
     DynamicJsonDocument doc(512);
@@ -1703,26 +1703,26 @@ void registerRoutes(ServerT &server) {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
     if (!srv->hasArg("path")) {
-      srv->send(400, "application/json", "{"error":"missing path"}");
+      srv->send(400, "application/json", R"({"error":"missing path"})");
       return;
     }
     if (!enforceSampleFilePolicy()) {
-      srv->send(500, "application/json", "{"error":"storage unavailable"}");
+      srv->send(500, "application/json", R"({"error":"storage unavailable"})");
       return;
     }
     String clientPath = srv->arg("path");
     String fsPath;
     if (!resolveUserPath(clientPath, fsPath)) {
-      srv->send(400, "application/json", "{"error":"invalid path"}");
+      srv->send(400, "application/json", R"({"error":"invalid path"})");
       return;
     }
     if (!LittleFS.exists(fsPath)) {
-      srv->send(404, "application/json", "{"error":"not found"}");
+      srv->send(404, "application/json", R"({"error":"not found"})");
       return;
     }
     File f = LittleFS.open(fsPath, "r");
     if (!f) {
-      srv->send(500, "application/json", "{"error":"open failed"}");
+      srv->send(500, "application/json", R"({"error":"open failed"})");
       return;
     }
     srv->streamFile(f, "text/html");
@@ -1734,39 +1734,39 @@ void registerRoutes(ServerT &server) {
     if (!requireAuth(srv)) return;
     String body = srv->hasArg("plain") ? srv->arg("plain") : String();
     if (body.length() == 0) {
-      srv->send(400, "application/json", "{"error":"No body"}");
+      srv->send(400, "application/json", R"({"error":"No body"})");
       return;
     }
     if (!enforceSampleFilePolicy()) {
-      srv->send(500, "application/json", "{"error":"storage unavailable"}");
+      srv->send(500, "application/json", R"({"error":"storage unavailable"})");
       return;
     }
     DynamicJsonDocument doc(2048);
     if (deserializeJson(doc, body)) {
-      srv->send(400, "application/json", "{"error":"Invalid JSON"}");
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
       return;
     }
     String clientPath = doc["path"].as<String>();
     String fsPath;
     if (!resolveUserPath(clientPath, fsPath)) {
-      srv->send(400, "application/json", "{"error":"invalid path"}");
+      srv->send(400, "application/json", R"({"error":"invalid path"})");
       return;
     }
     String content = doc["content"].as<String>();
     File f = LittleFS.open(fsPath, "w");
     if (!f) {
-      srv->send(500, "application/json", "{"error":"open failed"}");
+      srv->send(500, "application/json", R"({"error":"open failed"})");
       return;
     }
     f.print(content);
     f.close();
-    srv->send(200, "application/json", "{"status":"ok"}");
+    srv->send(200, "application/json", R"({"status":"ok"})");
   });
 
   auto forbiddenHandler = [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    srv->send(403, "application/json", "{"error":"forbidden"}");
+    srv->send(403, "application/json", R"({"error":"forbidden"})");
   };
   server.on("/api/files/create", HTTP_POST, forbiddenHandler);
   server.on("/api/files/rename", HTTP_POST, forbiddenHandler);
@@ -1783,7 +1783,7 @@ void setupServer() {
   do {
     static BearSSL::X509List cert(TLS_CERT);
     static BearSSL::PrivateKey key(TLS_KEY);
-    secureServer.setRSACert(&cert, &key);
+    secureServer.getServer().setServerKeyAndCert(&key, &cert);
     registerRoutes(secureServer);
     secureServer.begin();
     secureServerActive = true;
