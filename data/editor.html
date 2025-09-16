@@ -38,228 +38,265 @@
     <div id="editor"></div>
   </div>
   <script src="auth.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.14/ace.js"></script>
+  <script src="/vendor/ace/ace.js"></script>
   <script>
-    const editor = ace.edit('editor');
-    editor.setTheme('ace/theme/monokai');
-    editor.session.setMode('ace/mode/html');
-    editor.setShowPrintMargin(false);
-
-    const fileListContainer = document.getElementById('fileListContent');
-    const currentFileLabel = document.getElementById('currentFile');
-    const messageLabel = document.getElementById('message');
-    const saveBtn = document.getElementById('saveBtn');
-    const DEFAULT_FILE = 'sample.html';
-    const ERROR_MESSAGES = {
-      exists: 'Un fichier portant ce nom existe déjà.',
-      'not found': 'Fichier introuvable.',
-      'invalid path': 'Chemin de fichier invalide.',
-      'storage unavailable': 'Stockage indisponible.',
-      'private directory': 'Répertoire privé inaccessible.',
-      'open failed': 'Impossible d\'ouvrir le fichier sur le module.',
-      'delete failed': 'Suppression impossible.',
-      'rename failed': 'Impossible de renommer le fichier.',
-      'No body': 'Requête invalide.',
-      'Invalid JSON': 'JSON invalide.',
-      forbidden: 'Opération non autorisée.'
-    };
-
-    let currentPath = '';
-    let isDirty = false;
-    let suppressDirtyEvents = false;
-    let selectedLink = null;
-    let messageTimer = null;
-
-    function setMessage(text, type = '') {
-      clearTimeout(messageTimer);
-      messageLabel.textContent = text || '';
-      messageLabel.classList.remove('error', 'success');
-      if (type) {
-        messageLabel.classList.add(type);
+    function setupEditor() {
+      if (!(window.ace && typeof window.ace.edit === 'function')) {
+        const messageLabel = document.getElementById('message');
+        if (messageLabel) {
+          messageLabel.textContent = 'Ace Editor est indisponible.';
+          messageLabel.classList.add('error');
+        }
+        return;
       }
-      if (text) {
-        messageTimer = setTimeout(() => {
-          messageLabel.textContent = '';
-          messageLabel.classList.remove('error', 'success');
-        }, 4000);
+
+      const editor = ace.edit('editor');
+      editor.setTheme('ace/theme/monokai');
+      editor.session.setMode('ace/mode/html');
+      editor.setShowPrintMargin(false);
+
+      const fileListContainer = document.getElementById('fileListContent');
+      const currentFileLabel = document.getElementById('currentFile');
+      const messageLabel = document.getElementById('message');
+      const saveBtn = document.getElementById('saveBtn');
+      const DEFAULT_FILE = 'sample.html';
+      const ERROR_MESSAGES = {
+        exists: 'Un fichier portant ce nom existe déjà.',
+        'not found': 'Fichier introuvable.',
+        'invalid path': 'Chemin de fichier invalide.',
+        'storage unavailable': 'Stockage indisponible.',
+        'private directory': 'Répertoire privé inaccessible.',
+        'open failed': 'Impossible d\'ouvrir le fichier sur le module.',
+        'delete failed': 'Suppression impossible.',
+        'rename failed': 'Impossible de renommer le fichier.',
+        'No body': 'Requête invalide.',
+        'Invalid JSON': 'JSON invalide.',
+        forbidden: 'Opération non autorisée.'
+      };
+
+      let currentPath = '';
+      let isDirty = false;
+      let suppressDirtyEvents = false;
+      let selectedLink = null;
+      let messageTimer = null;
+
+      function setMessage(text, type = '') {
+        clearTimeout(messageTimer);
+        messageLabel.textContent = text || '';
+        messageLabel.classList.remove('error', 'success');
+        if (type) {
+          messageLabel.classList.add(type);
+        }
+        if (text) {
+          messageTimer = setTimeout(() => {
+            messageLabel.textContent = '';
+            messageLabel.classList.remove('error', 'success');
+          }, 4000);
+        }
       }
-    }
 
-    function updateToolbar() {
-      saveBtn.disabled = !currentPath || !isDirty;
-      currentFileLabel.textContent = currentPath
-        ? `Fichier : ${currentPath}${isDirty ? ' *' : ''}`
-        : 'Aucun fichier ouvert';
-    }
+      function updateToolbar() {
+        saveBtn.disabled = !currentPath || !isDirty;
+        currentFileLabel.textContent = currentPath
+          ? `Fichier : ${currentPath}${isDirty ? ' *' : ''}`
+          : 'Aucun fichier ouvert';
+      }
 
-    function setDirty(value) {
-      isDirty = value;
+      function setDirty(value) {
+        isDirty = value;
+        updateToolbar();
+      }
+
+      function selectFileLink(path) {
+        if (selectedLink) {
+          selectedLink.classList.remove('active');
+          selectedLink = null;
+        }
+        if (!path) return;
+        const links = fileListContainer.querySelectorAll('a[data-path]');
+        links.forEach(link => {
+          if (link.dataset.path === path) {
+            selectedLink = link;
+          }
+        });
+        if (selectedLink) {
+          selectedLink.classList.add('active');
+        }
+      }
+
+      function extractErrorMessage(payload, fallback) {
+        if (!payload) return fallback;
+        try {
+          const parsed = JSON.parse(payload);
+          if (parsed) {
+            const key = parsed.error || parsed.message;
+            if (key && Object.prototype.hasOwnProperty.call(ERROR_MESSAGES, key)) {
+              return ERROR_MESSAGES[key];
+            }
+            if (key) {
+              return key;
+            }
+          }
+        } catch (err) {
+          // Ignore parsing errors and fall back to raw payload.
+        }
+        if (Object.prototype.hasOwnProperty.call(ERROR_MESSAGES, payload)) {
+          return ERROR_MESSAGES[payload];
+        }
+        return payload;
+      }
+
+      function guessEditorMode(path) {
+        const lower = path.toLowerCase();
+        if (lower.endsWith('.js')) return 'ace/mode/javascript';
+        if (lower.endsWith('.css')) return 'ace/mode/css';
+        if (lower.endsWith('.json')) return 'ace/mode/json';
+        if (lower.endsWith('.md')) return 'ace/mode/markdown';
+        if (lower.endsWith('.txt') || lower.endsWith('.log')) return 'ace/mode/text';
+        if (lower.endsWith('.c') || lower.endsWith('.h') || lower.endsWith('.cpp') || lower.endsWith('.hpp') || lower.endsWith('.ino')) {
+          return 'ace/mode/c_cpp';
+        }
+        if (lower.endsWith('.xml')) return 'ace/mode/xml';
+        return 'ace/mode/html';
+      }
+
+      async function loadFileList() {
+        try {
+          const resp = await authFetch('/api/files/list');
+          if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(extractErrorMessage(text, 'Erreur lors du chargement.'));
+          }
+          const data = await resp.json();
+          const files = Array.isArray(data)
+            ? data.filter(name => name === DEFAULT_FILE)
+            : [];
+          fileListContainer.innerHTML = '';
+          if (files.length === 0) {
+            const empty = document.createElement('p');
+            empty.className = 'empty';
+            empty.textContent = 'Fichier sample.html introuvable.';
+            fileListContainer.appendChild(empty);
+            selectFileLink('');
+            return [];
+          }
+          files.forEach(name => {
+            const link = document.createElement('a');
+            link.href = '#';
+            link.dataset.path = name;
+            link.textContent = name;
+            link.addEventListener('click', evt => {
+              evt.preventDefault();
+              openFile(name);
+            });
+            fileListContainer.appendChild(link);
+          });
+          selectFileLink(currentPath);
+          return files;
+        } catch (err) {
+          fileListContainer.innerHTML = '<p class="empty">Impossible de charger la liste.</p>';
+          setMessage(err.message || 'Erreur de lecture du répertoire privé.', 'error');
+          console.error(err);
+          return [];
+        }
+      }
+
+      async function openFile(path) {
+        if (!path) return;
+        if (isDirty && currentPath && currentPath !== path) {
+          const proceed = confirm('Les modifications non enregistrées seront perdues. Continuer ?');
+          if (!proceed) return;
+        }
+        try {
+          const resp = await authFetch('/api/files/get?path=' + encodeURIComponent(path));
+          const text = await resp.text();
+          if (!resp.ok) {
+            throw new Error(extractErrorMessage(text, 'Impossible de charger le fichier.'));
+          }
+          suppressDirtyEvents = true;
+          editor.setValue(text, -1);
+          if (editor.session && editor.session.getUndoManager) {
+            editor.session.getUndoManager().reset();
+          }
+          suppressDirtyEvents = false;
+          currentPath = path;
+          if (editor.session && typeof editor.session.setMode === 'function') {
+            editor.session.setMode(guessEditorMode(path));
+          }
+          if (typeof editor.focus === 'function') {
+            editor.focus();
+          }
+          setDirty(false);
+          selectFileLink(path);
+          setMessage(`Fichier "${path}" chargé.`, 'success');
+        } catch (err) {
+          setMessage(err.message, 'error');
+          console.error(err);
+        }
+      }
+
+      async function saveCurrentFile() {
+        if (!currentPath) return;
+        try {
+          const resp = await authFetch('/api/files/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: currentPath, content: editor.getValue() })
+          });
+          const payload = await resp.text();
+          if (!resp.ok) {
+            throw new Error(extractErrorMessage(payload, 'Échec de l\'enregistrement.'));
+          }
+          setDirty(false);
+          setMessage(`Fichier "${currentPath}" enregistré.`, 'success');
+        } catch (err) {
+          setMessage(err.message, 'error');
+          console.error(err);
+        }
+      }
+
+      saveBtn.addEventListener('click', saveCurrentFile);
+
+      if (editor.session && typeof editor.session.on === 'function') {
+        editor.session.on('change', () => {
+          if (suppressDirtyEvents) return;
+          if (currentPath) {
+            setDirty(true);
+          }
+        });
+      }
+
+      ensureSession()
+        .then(async () => {
+          const files = await loadFileList();
+          if (Array.isArray(files) && files.includes(DEFAULT_FILE)) {
+            await openFile(DEFAULT_FILE);
+          }
+        })
+        .catch(err => {
+          console.error(err);
+          setMessage('Authentification requise pour accéder aux fichiers.', 'error');
+        });
       updateToolbar();
     }
 
-    function selectFileLink(path) {
-      if (selectedLink) {
-        selectedLink.classList.remove('active');
-        selectedLink = null;
+    (function ensureAceReady() {
+      if (window.ace && typeof window.ace.edit === 'function') {
+        setupEditor();
+        return;
       }
-      if (!path) return;
-      const links = fileListContainer.querySelectorAll('a[data-path]');
-      links.forEach(link => {
-        if (link.dataset.path === path) {
-          selectedLink = link;
+      const fallback = document.createElement('script');
+      fallback.src = 'https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.14/ace.js';
+      fallback.onload = setupEditor;
+      fallback.onerror = () => {
+        const messageLabel = document.getElementById('message');
+        if (messageLabel) {
+          messageLabel.textContent = 'Impossible de charger l\'éditeur Ace.';
+          messageLabel.classList.add('error');
         }
-      });
-      if (selectedLink) {
-        selectedLink.classList.add('active');
-      }
-    }
-
-    function extractErrorMessage(payload, fallback) {
-      if (!payload) return fallback;
-      try {
-        const parsed = JSON.parse(payload);
-        if (parsed) {
-          const key = parsed.error || parsed.message;
-          if (key && Object.prototype.hasOwnProperty.call(ERROR_MESSAGES, key)) {
-            return ERROR_MESSAGES[key];
-          }
-          if (key) {
-            return key;
-          }
-        }
-      } catch (err) {
-        // Ignore parsing errors and fall back to raw payload.
-      }
-      if (Object.prototype.hasOwnProperty.call(ERROR_MESSAGES, payload)) {
-        return ERROR_MESSAGES[payload];
-      }
-      return payload;
-    }
-
-    function guessEditorMode(path) {
-      const lower = path.toLowerCase();
-      if (lower.endsWith('.js')) return 'ace/mode/javascript';
-      if (lower.endsWith('.css')) return 'ace/mode/css';
-      if (lower.endsWith('.json')) return 'ace/mode/json';
-      if (lower.endsWith('.md')) return 'ace/mode/markdown';
-      if (lower.endsWith('.txt') || lower.endsWith('.log')) return 'ace/mode/text';
-      if (lower.endsWith('.c') || lower.endsWith('.h') || lower.endsWith('.cpp') || lower.endsWith('.hpp') || lower.endsWith('.ino')) {
-        return 'ace/mode/c_cpp';
-      }
-      if (lower.endsWith('.xml')) return 'ace/mode/xml';
-      return 'ace/mode/html';
-    }
-
-    async function loadFileList() {
-      try {
-        const resp = await authFetch('/api/files/list');
-        if (!resp.ok) {
-          const text = await resp.text();
-          throw new Error(extractErrorMessage(text, 'Erreur lors du chargement.'));
-        }
-        const data = await resp.json();
-        const files = Array.isArray(data)
-          ? data.filter(name => name === DEFAULT_FILE)
-          : [];
-        fileListContainer.innerHTML = '';
-        if (files.length === 0) {
-          const empty = document.createElement('p');
-          empty.className = 'empty';
-          empty.textContent = 'Fichier sample.html introuvable.';
-          fileListContainer.appendChild(empty);
-          selectFileLink('');
-          return [];
-        }
-        files.forEach(name => {
-          const link = document.createElement('a');
-          link.href = '#';
-          link.dataset.path = name;
-          link.textContent = name;
-          link.addEventListener('click', evt => {
-            evt.preventDefault();
-            openFile(name);
-          });
-          fileListContainer.appendChild(link);
-        });
-        selectFileLink(currentPath);
-        return files;
-      } catch (err) {
-        fileListContainer.innerHTML = '<p class="empty">Impossible de charger la liste.</p>';
-        setMessage(err.message || 'Erreur de lecture du répertoire privé.', 'error');
-        console.error(err);
-        return [];
-      }
-    }
-
-    async function openFile(path) {
-      if (!path) return;
-      if (isDirty && currentPath && currentPath !== path) {
-        const proceed = confirm('Les modifications non enregistrées seront perdues. Continuer ?');
-        if (!proceed) return;
-      }
-      try {
-        const resp = await authFetch('/api/files/get?path=' + encodeURIComponent(path));
-        const text = await resp.text();
-        if (!resp.ok) {
-          throw new Error(extractErrorMessage(text, 'Impossible de charger le fichier.'));
-        }
-        suppressDirtyEvents = true;
-        editor.setValue(text, -1);
-        editor.session.getUndoManager().reset();
-        suppressDirtyEvents = false;
-        currentPath = path;
-        editor.session.setMode(guessEditorMode(path));
-        editor.focus();
-        setDirty(false);
-        selectFileLink(path);
-        setMessage(`Fichier "${path}" chargé.`, 'success');
-      } catch (err) {
-        setMessage(err.message, 'error');
-        console.error(err);
-      }
-    }
-
-    async function saveCurrentFile() {
-      if (!currentPath) return;
-      try {
-        const resp = await authFetch('/api/files/save', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: currentPath, content: editor.getValue() })
-        });
-        const payload = await resp.text();
-        if (!resp.ok) {
-          throw new Error(extractErrorMessage(payload, 'Échec de l\'enregistrement.'));
-        }
-        setDirty(false);
-        setMessage(`Fichier "${currentPath}" enregistré.`, 'success');
-      } catch (err) {
-        setMessage(err.message, 'error');
-        console.error(err);
-      }
-    }
-
-    saveBtn.addEventListener('click', saveCurrentFile);
-
-    editor.session.on('change', () => {
-      if (suppressDirtyEvents) return;
-      if (currentPath) {
-        setDirty(true);
-      }
-    });
-
-    ensureSession()
-      .then(async () => {
-        const files = await loadFileList();
-        if (Array.isArray(files) && files.includes(DEFAULT_FILE)) {
-          await openFile(DEFAULT_FILE);
-        }
-      })
-      .catch(err => {
-        console.error(err);
-        setMessage('Authentification requise pour accéder aux fichiers.', 'error');
-      });
-    updateToolbar();
+      };
+      document.head.appendChild(fallback);
+    })();
   </script>
 </body>
 </html>
