@@ -509,6 +509,7 @@ static const bool HAS_SECURE_SERVER = true;
 static const uint16_t HTTPS_PORT = 443;
 static const uint16_t HTTP_PORT = 80;
 static BearSSL::ESP8266WebServerSecure secureServer(HTTPS_PORT);  // HTTPS server
+static BearSSL::ServerSessions secureSessionCache(4);              // TLS session cache
 static ESP8266WebServer primaryHttpServer(HTTP_PORT);              // HTTP server or redirector
 static bool secureServerActive = false;
 static WiFiUDP udp;               // UDP object for broadcasting and listening
@@ -1824,7 +1825,16 @@ void setupServer() {
   if (HAS_SECURE_SERVER) {
     static BearSSL::X509List cert(TLS_CERT);
     static BearSSL::PrivateKey key(TLS_KEY);
-    secureServer.getServer().setRSACert(&cert, &key);
+    auto &bear = secureServer.getServer();
+    // Reduce TLS memory footprint and keep session tickets so repeated
+    // connections do not require a full handshake each time.  The default
+    // 16 KB I/O buffers exceeded the available heap once the application is
+    // running which caused the TLS stack to abort mid-handshake.  Using
+    // 2 KB buffers still accommodates the certificate chain while keeping
+    // enough headroom to avoid brown-outs and reboots.
+    bear.setRSACert(&cert, &key);
+    bear.setBufferSizes(2048, 2048);
+    bear.setSessionCache(&secureSessionCache);
     registerRoutes(secureServer);
     secureServer.begin();
     secureServerActive = true;
