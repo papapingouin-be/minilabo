@@ -103,11 +103,9 @@
   </fieldset>
 
   <fieldset>
-    <legend>Cache de l'éditeur de fichiers</legend>
-    <p>Le script Ace utilisé par l'éditeur de fichiers est chargé depuis le CDN. Vous pouvez le précharger dans le cache du navigateur pour améliorer l'ouverture hors connexion. Cette opération nécessite un navigateur autorisant l'API Cache (connexion HTTPS ou contexte sécurisé).</p>
-    <button type="button" id="cacheAceBtn">Mettre en cache la librairie</button>
-    <button type="button" id="cacheAceClearBtn">Vider le cache</button>
-    <div id="cacheAceStatus"></div>
+    <legend>Éditeur de fichiers</legend>
+    <p>La librairie Ace 1.4.14 est désormais fournie par le firmware et servie localement depuis le système de fichiers. L'éditeur fonctionne sans connexion Internet.</p>
+    <p class="hint">Un chargement depuis le CDN public ne sera tenté qu'en cas d'absence du fichier local.</p>
   </fieldset>
 
   <button id="saveBtn">Enregistrer et redémarrer</button>
@@ -117,11 +115,6 @@
 <script>
 const MAX_INPUTS = 4;
 const MAX_OUTPUTS = 2;
-const ACE_CACHE_NAME = 'minilabbox-ace-cache';
-const ACE_CDN_URL = 'https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.14/ace.js';
-let aceCacheStatusEl;
-let aceCacheBtn;
-let aceCacheClearBtn;
 let discoveryTableBody;
 let discoveryStatusEl;
 let discoveryTimer = null;
@@ -559,97 +552,6 @@ async function refreshDiscovery() {
   }
 }
 
-function setAceStatus(text, isError = false) {
-  if (!aceCacheStatusEl) return;
-  aceCacheStatusEl.textContent = text;
-  if (isError) {
-    aceCacheStatusEl.classList.add('error');
-  } else {
-    aceCacheStatusEl.classList.remove('error');
-  }
-}
-
-async function updateAceCacheStatus() {
-  if (!aceCacheStatusEl || !aceCacheBtn || !aceCacheClearBtn) return;
-  if (!('caches' in window)) {
-    aceCacheBtn.disabled = true;
-    aceCacheClearBtn.disabled = true;
-    aceCacheBtn.classList.add('hidden');
-    aceCacheClearBtn.classList.add('hidden');
-    const reason = window.isSecureContext
-      ? 'fonction non prise en charge par ce navigateur.'
-      : 'fonction disponible uniquement via une connexion HTTPS.';
-    setAceStatus(`Mise en cache indisponible (${reason})`);
-    return;
-  }
-  aceCacheBtn.classList.remove('hidden');
-  aceCacheClearBtn.classList.remove('hidden');
-  try {
-    const keys = await caches.keys();
-    const hasCache = keys.includes(ACE_CACHE_NAME);
-    let cached = false;
-    if (hasCache) {
-      const cache = await caches.open(ACE_CACHE_NAME);
-      const match = await cache.match(ACE_CDN_URL);
-      cached = !!match;
-    }
-    const timestamp = localStorage.getItem('aceCacheTimestamp');
-    if (cached) {
-      const readable = timestamp ? new Date(timestamp).toLocaleString() : 'inconnue';
-      setAceStatus(`Librairie en cache (mise à jour : ${readable}).`);
-      aceCacheBtn.textContent = 'Actualiser le cache';
-      aceCacheClearBtn.disabled = false;
-    } else {
-      setAceStatus('Librairie non mise en cache.');
-      aceCacheBtn.textContent = 'Mettre en cache la librairie';
-      aceCacheClearBtn.disabled = !hasCache;
-    }
-    aceCacheBtn.disabled = false;
-  } catch (err) {
-    console.error(err);
-    setAceStatus('Erreur lors de l’accès au cache.', true);
-    aceCacheBtn.disabled = false;
-    aceCacheClearBtn.disabled = false;
-  }
-}
-
-async function cacheAceLibrary() {
-  if (!('caches' in window) || !aceCacheBtn) return;
-  aceCacheBtn.disabled = true;
-  setAceStatus('Mise en cache en cours...');
-  let errorMessage = '';
-  try {
-    const cache = await caches.open(ACE_CACHE_NAME);
-    await cache.add(new Request(ACE_CDN_URL, { mode: 'cors' }));
-    localStorage.setItem('aceCacheTimestamp', new Date().toISOString());
-  } catch (err) {
-    console.error(err);
-    errorMessage = `Échec de la mise en cache : ${err.message}`;
-  }
-  await updateAceCacheStatus();
-  if (errorMessage) {
-    setAceStatus(errorMessage, true);
-  }
-}
-
-async function clearAceCache() {
-  if (!('caches' in window) || !aceCacheClearBtn) return;
-  aceCacheClearBtn.disabled = true;
-  setAceStatus('Suppression du cache...');
-  let errorMessage = '';
-  try {
-    await caches.delete(ACE_CACHE_NAME);
-    localStorage.removeItem('aceCacheTimestamp');
-  } catch (err) {
-    console.error(err);
-    errorMessage = `Erreur lors de la suppression du cache : ${err.message}`;
-  }
-  await updateAceCacheStatus();
-  if (errorMessage) {
-    setAceStatus(errorMessage, true);
-  }
-}
-
 // Event listeners
 window.addEventListener('DOMContentLoaded', () => {
   buildTables();
@@ -713,14 +615,6 @@ window.addEventListener('DOMContentLoaded', () => {
       st.textContent = 'Erreur de mise à jour';
     }
   });
-  aceCacheStatusEl = document.getElementById('cacheAceStatus');
-  aceCacheBtn = document.getElementById('cacheAceBtn');
-  aceCacheClearBtn = document.getElementById('cacheAceClearBtn');
-  if (aceCacheBtn && aceCacheClearBtn && aceCacheStatusEl) {
-    aceCacheBtn.addEventListener('click', cacheAceLibrary);
-    aceCacheClearBtn.addEventListener('click', clearAceCache);
-    updateAceCacheStatus();
-  }
 });
 </script>
 </body>
