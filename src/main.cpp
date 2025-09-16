@@ -547,7 +547,8 @@ void parseConfigFromJson(const JsonDocument &doc);
 String formatPin(uint16_t value);
 void initialiseSecurity();
 String generateSessionToken();
-String buildSessionCookie(const String &value, bool expire);
+String buildSessionCookie(const String &value, bool expire,
+                          bool secureTransport);
 template <typename ServerT>
 bool extractSessionToken(ServerT *server, String &tokenOut);
 bool sessionTokenValid(const String &token, bool refreshActivity);
@@ -892,13 +893,23 @@ String generateSessionToken() {
   return String(buf);
 }
 
-String buildSessionCookie(const String &value, bool expire) {
+template <typename ServerT>
+bool serverUsesTLS(ServerT *) {
+  return false;
+}
+
+bool serverUsesTLS(BearSSL::ESP8266WebServerSecure *) {
+  return secureServerActive;
+}
+
+String buildSessionCookie(const String &value, bool expire,
+                          bool secureTransport) {
   String cookie = String(SESSION_COOKIE_NAME) + "=" + value + "; Path=/";
   if (expire) {
     cookie += "; Max-Age=0";
   }
   cookie += "; HttpOnly";
-  if (secureServerActive) {
+  if (secureTransport) {
     cookie += "; Secure";
   }
   cookie += "; SameSite=Strict";
@@ -1369,7 +1380,8 @@ void registerRoutes(ServerT &server) {
     String pin = doc["pin"].as<String>();
     pin.trim();
     if (pin != sessionPin) {
-      srv->sendHeader("Set-Cookie", buildSessionCookie("", true));
+      srv->sendHeader("Set-Cookie",
+                      buildSessionCookie("", true, serverUsesTLS(srv)));
       srv->send(401, "application/json", R"({"error":"invalid_pin"})");
       return;
     }
@@ -1381,14 +1393,16 @@ void registerRoutes(ServerT &server) {
     respDoc["token"] = sessionToken;
     String payload;
     serializeJson(respDoc, payload);
-    srv->sendHeader("Set-Cookie", buildSessionCookie(sessionToken, false));
+    srv->sendHeader("Set-Cookie",
+                    buildSessionCookie(sessionToken, false, serverUsesTLS(srv)));
     srv->send(200, "application/json", payload);
   });
 
   server.on("/api/session/logout", HTTP_POST, [&server]() {
     auto *srv = &server;
     invalidateSession();
-    srv->sendHeader("Set-Cookie", buildSessionCookie("", true));
+    srv->sendHeader("Set-Cookie",
+                    buildSessionCookie("", true, serverUsesTLS(srv)));
     srv->send(200, "application/json", R"({"status":"ok"})");
   });
 
@@ -1783,7 +1797,7 @@ void registerRoutes(ServerT &server) {
 
 void setupServer() {
   secureServerActive = false;
-  do {
+  if (HAS_SECURE_SERVER) {
     static BearSSL::X509List cert(TLS_CERT);
     static BearSSL::PrivateKey key(TLS_KEY);
     secureServer.getServer().setRSACert(&cert, &key);
@@ -1791,41 +1805,17 @@ void setupServer() {
     secureServer.begin();
     secureServerActive = true;
     logPrintf("HTTPS server started on port %u", HTTPS_PORT);
-  } while (false);
-
-  if (secureServerActive) {
-    auto redirectHandler = []() {
-      String host = primaryHttpServer.hostHeader();
-      if (!host.length()) {
-        IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
-        host = ip.toString();
-      }
-      String target = String("https://") + host + primaryHttpServer.uri();
-      if (primaryHttpServer.args() > 0) {
-        String query;
-        for (uint8_t i = 0; i < primaryHttpServer.args(); i++) {
-          if (i == 0) {
-            query = "?";
-          } else {
-            query += "&";
-          }
-          query += primaryHttpServer.argName(i);
-          query += "=";
-          query += primaryHttpServer.arg(i);
-        }
-        target += query;
-      }
-      primaryHttpServer.sendHeader("Location", target);
-      primaryHttpServer.send(302, "text/plain", "Redirecting to HTTPS");
-    };
-    primaryHttpServer.on("/", HTTP_ANY, redirectHandler);
-    primaryHttpServer.onNotFound(redirectHandler);
-    primaryHttpServer.begin();
-    logPrintf("HTTP redirector started on port %u", HTTP_PORT);
   } else {
-    registerRoutes(primaryHttpServer);
-    primaryHttpServer.begin();
-    logPrintf("HTTP server started on port %u (TLS unavailable)", HTTP_PORT);
+    logMessage("HTTPS server disabled at compile time");
+  }
+
+  registerRoutes(primaryHttpServer);
+  primaryHttpServer.begin();
+  if (secureServerActive) {
+    logPrintf("HTTP server started on port %u (serving alongside HTTPS)",
+              HTTP_PORT);
+  } else {
+    logPrintf("HTTP server started on port %u", HTTP_PORT);
   }
 }
 // Arduino setup entry point.  Serial is initialised for debug output.
@@ -1879,8 +1869,8 @@ void setup() {
 
 // Main loop.  Inputs are sampled on a schedule.  Broadcasts are sent
 // periodically.  Incoming UDP packets are processed continuously.  HTTP
-// servers are serviced on each pass so that both the HTTPS endpoint and
-// HTTP redirect remain responsive.
+// servers are serviced on each pass so that both the HTTPS endpoint and the
+// plain HTTP server remain responsive.
 void loop() {
   unsigned long now = millis();
   if (now - lastInputUpdate >= INPUT_UPDATE_INTERVAL) {
