@@ -1,6 +1,54 @@
 (function() {
+  const TOKEN_STORAGE_KEY = 'mlbSessionToken';
   let sessionCheckPromise = null;
   let loginPromise = null;
+  let sessionToken = null;
+
+  function loadStoredToken() {
+    try {
+      const stored = window.localStorage.getItem(TOKEN_STORAGE_KEY);
+      if (stored && stored.length > 0) {
+        sessionToken = stored;
+      }
+    } catch (err) {
+      sessionToken = null;
+    }
+  }
+
+  function storeSessionToken(token) {
+    sessionToken = token || null;
+    try {
+      if (sessionToken) {
+        window.localStorage.setItem(TOKEN_STORAGE_KEY, sessionToken);
+      } else {
+        window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+      }
+    } catch (err) {
+      // Ignore storage failures (private mode, etc.)
+    }
+  }
+
+  function clearSessionToken() {
+    storeSessionToken(null);
+  }
+
+  function prepareOptions(options) {
+    const opts = Object.assign({}, options || {});
+    if (!opts.credentials) {
+      opts.credentials = 'include';
+    }
+    const headers = new Headers(opts.headers || {});
+    if (sessionToken) {
+      headers.set('Authorization', 'Bearer ' + sessionToken);
+      headers.set('X-Session-Token', sessionToken);
+    }
+    opts.headers = headers;
+    return opts;
+  }
+
+  async function rawAuthFetch(url, options) {
+    return fetch(url, prepareOptions(options));
+  }
 
   async function loginWithPin(pin) {
     const response = await fetch('/api/session/login', {
@@ -10,16 +58,28 @@
       body: JSON.stringify({ pin })
     });
     if (!response.ok) {
+      clearSessionToken();
       return response;
+    }
+    try {
+      const data = await response.clone().json();
+      if (data && data.token) {
+        storeSessionToken(data.token);
+      }
+    } catch (err) {
+      // Ignore JSON parsing issues – cookie may still work.
     }
     return response;
   }
+
+  loadStoredToken();
 
   async function promptForPin() {
     if (loginPromise) {
       return loginPromise;
     }
     loginPromise = (async () => {
+      clearSessionToken();
       while (true) {
         const input = window.prompt('Code PIN affiché sur l\'OLED (4 chiffres) :');
         if (input === null) {
@@ -61,9 +121,12 @@
     }
     sessionCheckPromise = (async () => {
       try {
-        const response = await fetch('/api/session/status', { credentials: 'include' });
+        const response = await rawAuthFetch('/api/session/status');
         if (response.ok) {
           return true;
+        }
+        if (response.status === 401) {
+          clearSessionToken();
         }
       } catch (err) {
         // Ignore network errors and fall back to prompting.
@@ -79,21 +142,18 @@
   }
 
   async function authFetch(url, options = {}) {
-    const opts = Object.assign({}, options || {});
-    if (!opts.credentials) {
-      opts.credentials = 'include';
-    }
     let response;
     try {
-      response = await fetch(url, opts);
+      response = await rawAuthFetch(url, options);
     } catch (err) {
       throw err;
     }
     if (response.status !== 401) {
       return response;
     }
+    clearSessionToken();
     await promptForPin();
-    response = await fetch(url, opts);
+    response = await rawAuthFetch(url, options);
     if (response.status === 401) {
       throw new Error('Authentification requise');
     }
