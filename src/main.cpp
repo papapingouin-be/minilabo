@@ -295,10 +295,22 @@ static void oledLog(const String &msg) {
   if (shortMsg.length() > OLED_MAX_LINE_CHARS) {
     shortMsg.remove(OLED_MAX_LINE_CHARS);
   }
-  for (size_t i = 0; i < OLED_LOG_LINE_COUNT - 1; ++i) {
-    oledLogBuffer[i] = oledLogBuffer[i + 1];
+
+  size_t insertIndex = 0;
+  while (insertIndex < OLED_LOG_LINE_COUNT &&
+         oledLogBuffer[insertIndex].length() > 0) {
+    insertIndex++;
   }
-  oledLogBuffer[OLED_LOG_LINE_COUNT - 1] = shortMsg;
+
+  if (insertIndex < OLED_LOG_LINE_COUNT) {
+    oledLogBuffer[insertIndex] = shortMsg;
+  } else {
+    for (size_t i = 1; i < OLED_LOG_LINE_COUNT; ++i) {
+      oledLogBuffer[i - 1] = oledLogBuffer[i];
+    }
+    oledLogBuffer[OLED_LOG_LINE_COUNT - 1] = shortMsg;
+  }
+
   for (size_t i = 0; i < OLED_LOG_LINE_COUNT; ++i) {
     if (oledLogBuffer[i].length() == 0) {
       continue;
@@ -1458,7 +1470,7 @@ void registerRoutes(ServerT &server) {
       srv->send(404, "text/plain", "Not found");
       return;
     }
-    srv->streamFile(f, "text/plain");
+    srv->streamFile(f, "text/html");
     f.close();
   });
 
@@ -1820,6 +1832,82 @@ void registerRoutes(ServerT &server) {
   });
 }
 
+static bool isUrlSafeChar(char c) {
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+         (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' ||
+         c == '~';
+}
+
+static String urlEncode(const String &value) {
+  String encoded;
+  encoded.reserve(value.length());
+  static const char HEX[] = "0123456789ABCDEF";
+  for (size_t i = 0; i < value.length(); ++i) {
+    uint8_t c = static_cast<uint8_t>(value.charAt(i));
+    if (isUrlSafeChar(static_cast<char>(c))) {
+      encoded += static_cast<char>(c);
+    } else {
+      encoded += '%';
+      encoded += HEX[(c >> 4) & 0x0F];
+      encoded += HEX[c & 0x0F];
+    }
+  }
+  return encoded;
+}
+
+static String buildHttpsRedirectLocation(ESP8266WebServer &server) {
+  String host = server.hostHeader();
+  if (host.length() == 0) {
+    IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP()
+                                               : WiFi.softAPIP();
+    host = ip.toString();
+  }
+  int colon = host.indexOf(':');
+  if (colon != -1) {
+    host = host.substring(0, colon);
+  }
+  if (HTTPS_PORT != 443) {
+    host += ':';
+    host += String(HTTPS_PORT);
+  }
+  String location = String("https://") + host;
+  String uri = server.uri();
+  if (uri.length() == 0) {
+    uri = "/";
+  }
+  location += uri;
+  if (server.method() == HTTP_GET || server.method() == HTTP_HEAD) {
+    String query;
+    for (int i = 0; i < server.args(); ++i) {
+      String name = server.argName(i);
+      if (name == "plain") {
+        continue;
+      }
+      if (query.length() == 0) {
+        query = "?";
+      } else {
+        query += '&';
+      }
+      query += urlEncode(name);
+      query += '=';
+      query += urlEncode(server.arg(i));
+    }
+    location += query;
+  }
+  return location;
+}
+
+static void sendHttpsRedirect(ESP8266WebServer &server) {
+  String location = buildHttpsRedirectLocation(server);
+  server.sendHeader("Location", location);
+  server.sendHeader("Connection", "close");
+  if (server.method() == HTTP_HEAD) {
+    server.send(308, "text/plain", "");
+  } else {
+    server.send(308, "text/plain", String("Redirection vers ") + location);
+  }
+}
+
 void setupServer() {
   secureServerActive = false;
   if (HAS_SECURE_SERVER) {
@@ -1843,12 +1931,19 @@ void setupServer() {
     logMessage("HTTPS server disabled at compile time");
   }
 
-  registerRoutes(primaryHttpServer);
-  primaryHttpServer.begin();
   if (secureServerActive) {
-    logPrintf("HTTP server started on port %u (serving alongside HTTPS)",
+    primaryHttpServer.on("/", HTTP_ANY, []() {
+      sendHttpsRedirect(primaryHttpServer);
+    });
+    primaryHttpServer.onNotFound([]() {
+      sendHttpsRedirect(primaryHttpServer);
+    });
+    primaryHttpServer.begin();
+    logPrintf("HTTP server started on port %u and redirects to HTTPS",
               HTTP_PORT);
   } else {
+    registerRoutes(primaryHttpServer);
+    primaryHttpServer.begin();
     logPrintf("HTTP server started on port %u", HTTP_PORT);
   }
 }
