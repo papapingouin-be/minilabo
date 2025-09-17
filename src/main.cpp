@@ -110,14 +110,14 @@ static const char SAMPLE_FILE_CONTENT[] = R"rawliteral(
 
 static bool ensureUserDirectory() {
   if (!ensureLittleFsReady(false)) {
-    Serial.println("LittleFS unavailable, cannot ensure private directory");
+    logMessage("LittleFS unavailable, cannot ensure private directory");
     return false;
   }
   if (LittleFS.exists(USER_FILES_DIR)) {
     return true;
   }
   if (!LittleFS.mkdir(USER_FILES_DIR)) {
-    Serial.println("Failed to create private user directory");
+    logMessage("Failed to create private user directory");
     return false;
   }
   return true;
@@ -1102,26 +1102,81 @@ void parseConfigFromJson(const JsonDocument &doc) {
   config.inputCount = 0;
   if (doc.containsKey("inputs") && doc["inputs"].is<JsonArray>()) {
     JsonArrayConst arr = doc["inputs"].as<JsonArrayConst>();
-    uint8_t desired = min((uint8_t)arr.size(), MAX_INPUTS);
+    size_t totalInputs = arr.size();
+    if (totalInputs > MAX_INPUTS) {
+      logPrintf(
+          "Configuration provides %u inputs but only %u are supported; ignoring extras",
+          static_cast<unsigned>(totalInputs),
+          static_cast<unsigned>(MAX_INPUTS));
+    }
+    uint8_t desired = static_cast<uint8_t>(totalInputs);
+    if (desired > MAX_INPUTS) {
+      desired = MAX_INPUTS;
+    }
     for (uint8_t idx = 0; idx < desired; ++idx) {
       JsonVariantConst entry = arr[idx];
       if (!entry.is<JsonObject>()) {
+        logPrintf("Input entry %u is not an object; skipping",
+                  static_cast<unsigned>(idx));
         continue;
       }
       JsonObjectConst o = entry.as<JsonObjectConst>();
       InputConfig &ic = config.inputs[config.inputCount];
-      if (o.containsKey("name")) ic.name = o["name"].as<String>();
-      if (o.containsKey("type")) ic.type = parseInputType(o["type"].as<String>());
-      if (o.containsKey("pin")) ic.pin = parsePin(o["pin"].as<String>());
-      if (o.containsKey("adsChannel")) ic.adsChannel = o["adsChannel"].as<int>();
-      if (o.containsKey("remoteNode")) ic.remoteNode = o["remoteNode"].as<String>();
-      if (o.containsKey("remoteName")) ic.remoteName = o["remoteName"].as<String>();
+      String defaultName = ic.name;
+      if (o.containsKey("name")) {
+        ic.name = o["name"].as<String>();
+      } else {
+        logPrintf("Input entry %u missing 'name', keeping default %s",
+                  static_cast<unsigned>(idx), defaultName.c_str());
+        ic.name = defaultName;
+      }
+      if (o.containsKey("type")) {
+        String typeStr = o["type"].as<String>();
+        InputType parsedType = parseInputType(typeStr);
+        ic.type = parsedType;
+        String lower = typeStr;
+        lower.toLowerCase();
+        if (parsedType == INPUT_DISABLED && lower.length() > 0 &&
+            lower != "disabled") {
+          logPrintf(
+              "Input %s has unsupported type '%s', defaulting to disabled",
+              ic.name.c_str(), typeStr.c_str());
+        }
+      } else {
+        logPrintf("Input %s missing type, defaulting to disabled",
+                  ic.name.c_str());
+        ic.type = INPUT_DISABLED;
+      }
+      if (o.containsKey("pin")) {
+        String pinStr = o["pin"].as<String>();
+        int parsedPin = parsePin(pinStr);
+        if (parsedPin == -1) {
+          logPrintf("Input %s has invalid pin '%s'; leaving unassigned",
+                    ic.name.c_str(), pinStr.c_str());
+        } else {
+          ic.pin = parsedPin;
+        }
+      }
+      if (o.containsKey("adsChannel")) {
+        int channel = o["adsChannel"].as<int>();
+        ic.adsChannel = channel;
+        if (channel < 0 || channel > 3) {
+          logPrintf("Input %s has out-of-range adsChannel %d (expected 0-3)",
+                    ic.name.c_str(), channel);
+        }
+      }
+      if (o.containsKey("remoteNode"))
+        ic.remoteNode = o["remoteNode"].as<String>();
+      if (o.containsKey("remoteName"))
+        ic.remoteName = o["remoteName"].as<String>();
       if (o.containsKey("scale")) ic.scale = o["scale"].as<float>();
       if (o.containsKey("offset")) ic.offset = o["offset"].as<float>();
       if (o.containsKey("unit")) ic.unit = o["unit"].as<String>();
       if (o.containsKey("active")) ic.active = o["active"].as<bool>();
       config.inputCount++;
     }
+  } else if (doc.containsKey("inputs")) {
+    logMessage("Input configuration malformed: expected array");
   }
   // outputs
   for (uint8_t i = 0; i < MAX_OUTPUTS; i++) {
@@ -1130,19 +1185,64 @@ void parseConfigFromJson(const JsonDocument &doc) {
   config.outputCount = 0;
   if (doc.containsKey("outputs") && doc["outputs"].is<JsonArray>()) {
     JsonArrayConst arr = doc["outputs"].as<JsonArrayConst>();
-    uint8_t desired = min((uint8_t)arr.size(), MAX_OUTPUTS);
+    size_t totalOutputs = arr.size();
+    if (totalOutputs > MAX_OUTPUTS) {
+      logPrintf(
+          "Configuration provides %u outputs but only %u are supported; ignoring extras",
+          static_cast<unsigned>(totalOutputs),
+          static_cast<unsigned>(MAX_OUTPUTS));
+    }
+    uint8_t desired = static_cast<uint8_t>(totalOutputs);
+    if (desired > MAX_OUTPUTS) {
+      desired = MAX_OUTPUTS;
+    }
     for (uint8_t idx = 0; idx < desired; ++idx) {
       JsonVariantConst entry = arr[idx];
       if (!entry.is<JsonObject>()) {
+        logPrintf("Output entry %u is not an object; skipping",
+                  static_cast<unsigned>(idx));
         continue;
       }
       JsonObjectConst o = entry.as<JsonObjectConst>();
       OutputConfig &oc = config.outputs[config.outputCount];
-      if (o.containsKey("name")) oc.name = o["name"].as<String>();
-      if (o.containsKey("type")) oc.type = parseOutputType(o["type"].as<String>());
-      if (o.containsKey("pin")) oc.pin = parsePin(o["pin"].as<String>());
+      String defaultName = oc.name;
+      if (o.containsKey("name")) {
+        oc.name = o["name"].as<String>();
+      } else {
+        logPrintf("Output entry %u missing 'name', keeping default %s",
+                  static_cast<unsigned>(idx), defaultName.c_str());
+        oc.name = defaultName;
+      }
+      if (o.containsKey("type")) {
+        String typeStr = o["type"].as<String>();
+        OutputType parsedType = parseOutputType(typeStr);
+        oc.type = parsedType;
+        String lower = typeStr;
+        lower.toLowerCase();
+        if (parsedType == OUTPUT_DISABLED && lower.length() > 0 &&
+            lower != "disabled") {
+          logPrintf(
+              "Output %s has unsupported type '%s', defaulting to disabled",
+              oc.name.c_str(), typeStr.c_str());
+        }
+      } else {
+        logPrintf("Output %s missing type, defaulting to disabled",
+                  oc.name.c_str());
+        oc.type = OUTPUT_DISABLED;
+      }
+      if (o.containsKey("pin")) {
+        String pinStr = o["pin"].as<String>();
+        int parsedPin = parsePin(pinStr);
+        if (parsedPin == -1) {
+          logPrintf("Output %s has invalid pin '%s'; leaving unassigned",
+                    oc.name.c_str(), pinStr.c_str());
+        } else {
+          oc.pin = parsedPin;
+        }
+      }
       if (o.containsKey("pwmFreq")) oc.pwmFreq = o["pwmFreq"].as<int>();
-      if (o.containsKey("i2cAddress")) oc.i2cAddress = parseI2cAddress(o["i2cAddress"].as<String>());
+      if (o.containsKey("i2cAddress"))
+        oc.i2cAddress = parseI2cAddress(o["i2cAddress"].as<String>());
       if (o.containsKey("scale")) oc.scale = o["scale"].as<float>();
       if (o.containsKey("offset")) oc.offset = o["offset"].as<float>();
       if (o.containsKey("active")) oc.active = o["active"].as<bool>();
@@ -1153,19 +1253,47 @@ void parseConfigFromJson(const JsonDocument &doc) {
       }
       config.outputCount++;
     }
+  } else if (doc.containsKey("outputs")) {
+    logMessage("Output configuration malformed: expected array");
   }
   if (doc.containsKey("peers") && doc["peers"].is<JsonArray>()) {
     JsonArrayConst arr = doc["peers"].as<JsonArrayConst>();
-    config.peerCount = min((uint8_t)arr.size(), MAX_PEERS);
-    uint8_t pIdx = 0;
-    for (JsonObjectConst o : arr) {
-      if (pIdx >= MAX_PEERS) break;
-      PeerAuth &pa = config.peers[pIdx];
-      pa.nodeId = o.containsKey("nodeId") ? o["nodeId"].as<String>() : "";
-      pa.pin = o.containsKey("pin") ? o["pin"].as<String>() : "";
-      pIdx++;
+    size_t totalPeers = arr.size();
+    if (totalPeers > MAX_PEERS) {
+      logPrintf(
+          "Configuration provides %u peers but only %u are supported; ignoring extras",
+          static_cast<unsigned>(totalPeers),
+          static_cast<unsigned>(MAX_PEERS));
     }
+    uint8_t stored = 0;
+    for (size_t idx = 0; idx < totalPeers && stored < MAX_PEERS; ++idx) {
+      JsonVariantConst entry = arr[idx];
+      if (!entry.is<JsonObject>()) {
+        logPrintf("Peer entry %u is not an object; skipping",
+                  static_cast<unsigned>(idx));
+        continue;
+      }
+      JsonObjectConst o = entry.as<JsonObjectConst>();
+      PeerAuth &pa = config.peers[stored];
+      pa.nodeId = o.containsKey("nodeId") ? o["nodeId"].as<String>() : "";
+      if (pa.nodeId.length() == 0) {
+        logPrintf("Peer entry %u missing nodeId", static_cast<unsigned>(idx));
+      }
+      pa.pin = o.containsKey("pin") ? o["pin"].as<String>() : "";
+      if (pa.pin.length() == 0) {
+        logPrintf("Peer entry %u missing pin", static_cast<unsigned>(idx));
+      }
+      stored++;
+    }
+    config.peerCount = stored;
     for (uint8_t i = config.peerCount; i < MAX_PEERS; i++) {
+      config.peers[i].nodeId = "";
+      config.peers[i].pin = "";
+    }
+  } else if (doc.containsKey("peers")) {
+    logMessage("Peer configuration malformed: expected array");
+    config.peerCount = 0;
+    for (uint8_t i = 0; i < MAX_PEERS; i++) {
       config.peers[i].nodeId = "";
       config.peers[i].pin = "";
     }
