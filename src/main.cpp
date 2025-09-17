@@ -366,7 +366,7 @@ static String otaLastError;
 
 static String otaErrorMessage() {
 #if defined(ARDUINO_ARCH_ESP8266)
-  return Update.errorString();
+  return Update.getErrorString();
 #else
   return String("update_error");
 #endif
@@ -1644,7 +1644,7 @@ void registerRoutes(ServerT &server) {
                         static_cast<unsigned>(otaUploadSize),
                         otaLastError.c_str());
               Update.printError(Serial);
-              Update.abort();
+              Update.end();
             } else {
               otaUploadSize = upload.totalSize;
             }
@@ -1677,7 +1677,7 @@ void registerRoutes(ServerT &server) {
             otaLastError = "aborted";
             logMessage("OTA upload aborted by client");
             if (Update.isRunning()) {
-              Update.abort();
+              Update.end();
             }
             break;
           }
