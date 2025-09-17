@@ -2432,9 +2432,7 @@ void registerRoutes(ServerT &server) {
       return;
     }
     Config previousConfig = config;
-    Config updatedConfig = config;
-    parseConfigFromJson(doc, updatedConfig, &config, true);
-    config = updatedConfig;
+    parseConfigFromJson(doc, config, &previousConfig, true);
     if (!saveConfig()) {
       config = previousConfig;
       srv->send(500, "application/json", R"({"error":"save failed"})");
