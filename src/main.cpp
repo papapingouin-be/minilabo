@@ -34,6 +34,7 @@ static const char *FIRMWARE_VERSION = "1.0.0";
 // HTTP for display in the UI.
 // ---------------------------------------------------------------------------
 static const char *LOG_PATH = "/log.txt";
+static bool logStorageReady = false;
 static const char *USER_FILES_DIR = "/private";
 static const char *SAMPLE_FILE_NAME = "sample.html";
 static const char *SAMPLE_FILE_PATH = "/private/sample.html";
@@ -320,10 +321,15 @@ static void oledLog(const String &msg) {
 static const size_t MAX_LOG_FILE_SIZE = 16 * 1024;  // 16 KB
 
 static void initLogging() {
-  if (!LittleFS.begin()) {
+  logStorageReady = LittleFS.begin();
+  if (!logStorageReady) {
     Serial.println("LittleFS mount failed, formatting...");
     LittleFS.format();
-    LittleFS.begin();
+    logStorageReady = LittleFS.begin();
+  }
+  if (!logStorageReady) {
+    Serial.println("LittleFS unavailable, file logging disabled");
+    return;
   }
   if (LittleFS.exists(LOG_PATH)) {
     File f = LittleFS.open(LOG_PATH, "r");
@@ -338,7 +344,16 @@ static void initLogging() {
 
 static void logMessage(const String &msg) {
   Serial.println(msg);
+  if (!logStorageReady) {
+    logStorageReady = LittleFS.begin();
+    if (!logStorageReady) {
+      return;
+    }
+  }
   File f = LittleFS.open(LOG_PATH, "a");
+  if (!f) {
+    f = LittleFS.open(LOG_PATH, "w");
+  }
   if (f) {
     f.print('[');
     f.print(millis());

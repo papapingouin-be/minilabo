@@ -141,6 +141,37 @@
     }
   }
 
+  function cloneRequestBody(body) {
+    if (!body) {
+      return body;
+    }
+    if (body instanceof FormData) {
+      const copy = new FormData();
+      body.forEach((value, key) => {
+        if (value instanceof File || value instanceof Blob) {
+          const fileName = value instanceof File ? value.name : undefined;
+          copy.append(key, value, fileName);
+        } else {
+          copy.append(key, value);
+        }
+      });
+      return copy;
+    }
+    if (body instanceof URLSearchParams) {
+      return new URLSearchParams(body.toString());
+    }
+    if (body instanceof Blob) {
+      return body.slice(0, body.size, body.type);
+    }
+    if (ArrayBuffer.isView(body)) {
+      return body.slice();
+    }
+    if (body instanceof ArrayBuffer) {
+      return body.slice(0);
+    }
+    return body;
+  }
+
   async function authFetch(url, options = {}) {
     let response;
     try {
@@ -153,7 +184,11 @@
     }
     clearSessionToken();
     await promptForPin();
-    response = await rawAuthFetch(url, options);
+    const retryOptions = Object.assign({}, options || {});
+    if (options && Object.prototype.hasOwnProperty.call(options, 'body')) {
+      retryOptions.body = cloneRequestBody(options.body);
+    }
+    response = await rawAuthFetch(url, retryOptions);
     if (response.status === 401) {
       throw new Error('Authentification requise');
     }
