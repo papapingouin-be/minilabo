@@ -21,10 +21,12 @@
 #include <WiFiUdp.h>
 #include <Wire.h>
 #include <Adafruit_ADS1015.h>
+#include <Adafruit_MCP4725.h>
 #include <ESP8266mDNS.h>
 #include <U8g2lib.h>
 #include <Updater.h>
 #include <memory>
+#include <cstdlib>
 
 static void logPrintf(const char *fmt, ...);
 
@@ -92,6 +94,8 @@ static const char *LOG_PATH = "/log.txt";
 static const char *USER_FILES_DIR = "/private";
 static const char *SAMPLE_FILE_NAME = "sample.html";
 static const char *SAMPLE_FILE_PATH = "/private/sample.html";
+static const char *CONFIG_FILE_PATH = "/private/io_config.json";
+static const char *LEGACY_CONFIG_FILE_PATH = "/config.json";
 static const char SAMPLE_FILE_CONTENT[] = R"rawliteral(
 <!DOCTYPE html>
 <html lang="fr">
@@ -471,7 +475,8 @@ enum InputType {
 enum OutputType {
   OUTPUT_DISABLED = 0,
   OUTPUT_PWM010,
-  OUTPUT_GPIO
+  OUTPUT_GPIO,
+  OUTPUT_MCP4725
 };
 
 // Convert a type string from JSON/UI into the internal enumeration.  If
@@ -508,6 +513,7 @@ static OutputType parseOutputType(const String &s) {
   t.toLowerCase();
   if (t == "pwm010") return OUTPUT_PWM010;
   if (t == "gpio")   return OUTPUT_GPIO;
+  if (t == "mcp4725") return OUTPUT_MCP4725;
   return OUTPUT_DISABLED;
 }
 
@@ -516,6 +522,7 @@ static String outputTypeToString(OutputType t) {
   switch (t) {
     case OUTPUT_PWM010: return "pwm010";
     case OUTPUT_GPIO:   return "gpio";
+    case OUTPUT_MCP4725: return "mcp4725";
     default:            return "disabled";
   }
 }
@@ -545,6 +552,7 @@ struct OutputConfig {
   OutputType type;         // Which kind of output this represents
   int        pin;          // ESP8266 pin number for PWM/GPIO
   int        pwmFreq;      // PWM frequency in Hz (only global frequency is used)
+  uint8_t    i2cAddress;   // I2C address for MCP4725 outputs
   float      scale;        // Gain for mapping physical value to duty (0–1023)
   float      offset;       // Offset added to duty after scaling
   bool       active;       // Whether this output is enabled
@@ -578,6 +586,7 @@ struct ModulesConfig {
   bool zmpt;
   bool zmct;
   bool div;
+  bool mcp4725;
 };
 
 // Top level configuration.  This object is loaded from and saved to
@@ -600,6 +609,9 @@ static const uint16_t HTTP_PORT = 80;
 static ESP8266WebServer primaryHttpServer(HTTP_PORT);              // HTTP server instance
 static WiFiUDP udp;               // UDP object for broadcasting and listening
 static Adafruit_ADS1115 ads;      // ADS1115 ADC instance
+static Adafruit_MCP4725 mcp4725Drivers[MAX_OUTPUTS];
+static bool mcp4725Ready[MAX_OUTPUTS] = {false};
+static uint8_t mcp4725Addresses[MAX_OUTPUTS] = {0};
 
 // Remote value cache.  When a broadcast packet is received from another
 // node, each measurement is stored in this table.  Inputs configured
@@ -723,6 +735,29 @@ String formatPin(uint16_t value) {
   return String(buf);
 }
 
+static uint8_t parseI2cAddress(const String &s) {
+  String trimmed = s;
+  trimmed.trim();
+  if (trimmed.length() == 0) {
+    return 0x60;
+  }
+  char *endPtr = nullptr;
+  long value = strtol(trimmed.c_str(), &endPtr, 0);
+  if (endPtr == trimmed.c_str()) {
+    return 0x60;
+  }
+  if (value < 0 || value > 0x7F) {
+    return 0x60;
+  }
+  return static_cast<uint8_t>(value);
+}
+
+static String formatI2cAddress(uint8_t address) {
+  char buf[7];
+  snprintf(buf, sizeof(buf), "0x%02X", static_cast<unsigned int>(address & 0x7F));
+  return String(buf);
+}
+
 // Default configuration used when no config file is present.  The
 // default Node ID is derived from the MAC address.  The system starts
 // in access point mode to allow initial configuration via the web UI.
@@ -745,22 +780,20 @@ void setDefaultConfig() {
   config.modules.zmpt    = false;
   config.modules.zmct    = false;
   config.modules.div     = false;
+  config.modules.mcp4725 = false;
 
-  // Default inputs: use meaningful channel names (IN1, IN2…) instead of generic "inputX".
-  // Start with one ADC on A0 and leave remaining channels disabled.  Names can be changed via the UI.
-  config.inputCount = 2;
-  config.inputs[0] = {"IN1", INPUT_ADC, A0, -1, "", "", 1.0f, 0.0f, "", true, 0.0f};
-  config.inputs[1] = {"IN2", INPUT_DISABLED, -1, -1, "", "", 1.0f, 0.0f, "", false, 0.0f};
-  // Clear other potential entries with professional default names
-  for (uint8_t i = 2; i < MAX_INPUTS; i++) {
-    config.inputs[i] = {String("IN") + String(i+1), INPUT_DISABLED, -1, -1, "", "", 1.0f, 0.0f, "", false, 0.0f};
+  // Start with no inputs configured.  Populate the backing array with disabled
+  // placeholders so indexes remain valid until the UI adds channels.
+  config.inputCount = 0;
+  for (uint8_t i = 0; i < MAX_INPUTS; i++) {
+    config.inputs[i] = {String("IN") + String(i + 1), INPUT_DISABLED, -1, -1, "", "", 1.0f, 0.0f, "", false, NAN};
   }
 
-  // Default output: one PWM on D2.  Additional outputs are disabled.  Use professional names (OUT1, OUT2…).
-  config.outputCount = 1;
-  config.outputs[0] = {"OUT1", OUTPUT_PWM010, D2, 2000, 1.0f, 0.0f, true, 0.0f};
-  for (uint8_t i = 1; i < MAX_OUTPUTS; i++) {
-    config.outputs[i] = {String("OUT") + String(i+1), OUTPUT_DISABLED, -1, 2000, 1.0f, 0.0f, false, 0.0f};
+  // Likewise start with no outputs.  Disabled placeholders keep a predictable
+  // naming scheme that can be reused when the user creates new channels.
+  config.outputCount = 0;
+  for (uint8_t i = 0; i < MAX_OUTPUTS; i++) {
+    config.outputs[i] = {String("OUT") + String(i + 1), OUTPUT_DISABLED, -1, 2000, 0x60, 1.0f, 0.0f, false, 0.0f};
   }
 
   config.peerCount = 0;
@@ -778,13 +811,37 @@ void loadConfig() {
     LittleFS.format();
     LittleFS.begin();
   }
-  if (!LittleFS.exists("/config.json")) {
+  ensureUserDirectory();
+  if (!LittleFS.exists(CONFIG_FILE_PATH)) {
+    if (LittleFS.exists(LEGACY_CONFIG_FILE_PATH)) {
+      logMessage("Migrating legacy configuration from /config.json");
+      File legacy = LittleFS.open(LEGACY_CONFIG_FILE_PATH, "r");
+      if (legacy) {
+        size_t size = legacy.size();
+        std::unique_ptr<char[]> buf(new char[size + 1]);
+        legacy.readBytes(buf.get(), size);
+        buf[size] = '\0';
+        legacy.close();
+        DynamicJsonDocument doc(6144);
+        auto err = deserializeJson(doc, buf.get());
+        if (!err) {
+          parseConfigFromJson(doc);
+          if (saveConfig()) {
+            LittleFS.remove(LEGACY_CONFIG_FILE_PATH);
+            logMessage("Legacy configuration migrated to /private/io_config.json");
+            return;
+          }
+        } else {
+          logMessage("Legacy config parse failed, applying defaults");
+        }
+      }
+    }
     logMessage("No config file found, applying defaults");
     setDefaultConfig();
     saveConfig();
     return;
   }
-  File f = LittleFS.open("/config.json", "r");
+  File f = LittleFS.open(CONFIG_FILE_PATH, "r");
   if (!f) {
     logMessage("Failed to open config file, applying defaults");
     setDefaultConfig();
@@ -825,6 +882,7 @@ bool saveConfig() {
   modObj["zmpt"]    = config.modules.zmpt;
   modObj["zmct"]    = config.modules.zmct;
   modObj["div"]     = config.modules.div;
+  modObj["mcp4725"] = config.modules.mcp4725;
   doc["inputCount"]  = config.inputCount;
   JsonArray inputsArr = doc.createNestedArray("inputs");
   for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
@@ -850,6 +908,7 @@ bool saveConfig() {
     o["type"]   = outputTypeToString(oc.type);
     o["pin"]    = pinToString(oc.pin);
     o["pwmFreq"] = oc.pwmFreq;
+    o["i2cAddress"] = formatI2cAddress(oc.i2cAddress);
     o["scale"]  = oc.scale;
     o["offset"] = oc.offset;
     o["active"] = oc.active;
@@ -864,7 +923,11 @@ bool saveConfig() {
     o["pin"] = pa.pin;
   }
   // Write file
-  File f = LittleFS.open("/config.json", "w");
+  if (!ensureUserDirectory()) {
+    logMessage("Failed to ensure private directory for config");
+    return false;
+  }
+  File f = LittleFS.open(CONFIG_FILE_PATH, "w");
   if (!f) {
     logMessage("Failed to open config for writing");
     return false;
@@ -903,15 +966,18 @@ void parseConfigFromJson(const JsonDocument &doc) {
     config.modules.zmpt    = m["zmpt"].as<bool>();
     config.modules.zmct    = m["zmct"].as<bool>();
     config.modules.div     = m["div"].as<bool>();
+    config.modules.mcp4725 = m["mcp4725"].as<bool>();
   }
   // inputs
-  uint8_t idx = 0;
+  for (uint8_t i = 0; i < MAX_INPUTS; i++) {
+    config.inputs[i] = {String("IN") + String(i + 1), INPUT_DISABLED, -1, -1, "", "", 1.0f, 0.0f, "", false, NAN};
+  }
+  config.inputCount = 0;
   if (doc.containsKey("inputs") && doc["inputs"].is<JsonArray>()) {
     JsonArrayConst arr = doc["inputs"].as<JsonArrayConst>();
-    config.inputCount = min((uint8_t)arr.size(), MAX_INPUTS);
     for (JsonObjectConst o : arr) {
-      if (idx >= MAX_INPUTS) break;
-      InputConfig &ic = config.inputs[idx];
+      if (config.inputCount >= MAX_INPUTS) break;
+      InputConfig &ic = config.inputs[config.inputCount];
       if (o.containsKey("name")) ic.name = o["name"].as<String>();
       if (o.containsKey("type")) ic.type = parseInputType(o["type"].as<String>());
       if (o.containsKey("pin"))  ic.pin = parsePin(o["pin"].as<String>());
@@ -922,26 +988,24 @@ void parseConfigFromJson(const JsonDocument &doc) {
       if (o.containsKey("offset")) ic.offset = o["offset"].as<float>();
       if (o.containsKey("unit")) ic.unit = o["unit"].as<String>();
       if (o.containsKey("active")) ic.active = o["active"].as<bool>();
-      idx++;
+      config.inputCount++;
     }
   }
-  // fill remaining inputs as disabled
-  for (uint8_t i = idx; i < MAX_INPUTS; i++) {
-    // Use professional names for unspecified inputs
-    config.inputs[i] = {String("IN") + String(i+1), INPUT_DISABLED, -1, -1, "", "", 1.0f, 0.0f, "", false, 0.0f};
-  }
   // outputs
-  idx = 0;
+  for (uint8_t i = 0; i < MAX_OUTPUTS; i++) {
+    config.outputs[i] = {String("OUT") + String(i + 1), OUTPUT_DISABLED, -1, 2000, 0x60, 1.0f, 0.0f, false, 0.0f};
+  }
+  config.outputCount = 0;
   if (doc.containsKey("outputs") && doc["outputs"].is<JsonArray>()) {
     JsonArrayConst arr = doc["outputs"].as<JsonArrayConst>();
-    config.outputCount = min((uint8_t)arr.size(), MAX_OUTPUTS);
     for (JsonObjectConst o : arr) {
-      if (idx >= MAX_OUTPUTS) break;
-      OutputConfig &oc = config.outputs[idx];
+      if (config.outputCount >= MAX_OUTPUTS) break;
+      OutputConfig &oc = config.outputs[config.outputCount];
       if (o.containsKey("name")) oc.name = o["name"].as<String>();
       if (o.containsKey("type")) oc.type = parseOutputType(o["type"].as<String>());
       if (o.containsKey("pin"))  oc.pin = parsePin(o["pin"].as<String>());
       if (o.containsKey("pwmFreq")) oc.pwmFreq = o["pwmFreq"].as<int>();
+      if (o.containsKey("i2cAddress")) oc.i2cAddress = parseI2cAddress(o["i2cAddress"].as<String>());
       if (o.containsKey("scale")) oc.scale = o["scale"].as<float>();
       if (o.containsKey("offset")) oc.offset = o["offset"].as<float>();
       if (o.containsKey("active")) oc.active = o["active"].as<bool>();
@@ -950,11 +1014,8 @@ void parseConfigFromJson(const JsonDocument &doc) {
       } else {
         oc.value = 0.0f;
       }
-      idx++;
+      config.outputCount++;
     }
-  }
-  for (uint8_t i = idx; i < MAX_OUTPUTS; i++) {
-    config.outputs[i] = {String("OUT") + String(i+1), OUTPUT_DISABLED, -1, 2000, 1.0f, 0.0f, false, 0.0f};
   }
   if (doc.containsKey("peers") && doc["peers"].is<JsonArray>()) {
     JsonArrayConst arr = doc["peers"].as<JsonArrayConst>();
@@ -1226,6 +1287,28 @@ void setupSensors() {
       break;
     }
   }
+  for (uint8_t i = 0; i < MAX_OUTPUTS; i++) {
+    mcp4725Ready[i] = false;
+    mcp4725Addresses[i] = 0;
+  }
+  if (config.modules.mcp4725) {
+    for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
+      const OutputConfig &oc = config.outputs[i];
+      if (!oc.active || oc.type != OUTPUT_MCP4725) {
+        continue;
+      }
+      uint8_t addr = oc.i2cAddress ? oc.i2cAddress : 0x60;
+      if (mcp4725Drivers[i].begin(addr)) {
+        mcp4725Ready[i] = true;
+        mcp4725Addresses[i] = addr;
+      } else {
+        logPrintf("MCP4725 init failed on output %u (addr %s)",
+                  static_cast<unsigned>(i),
+                  formatI2cAddress(addr).c_str());
+        mcp4725Ready[i] = false;
+      }
+    }
+  }
   // No initialisation required for ZMPT/ZMCT/Div; they use analogRead.
 }
 
@@ -1335,6 +1418,28 @@ void updateOutputs() {
       int lvl = (oc.value > 0.5f) ? HIGH : LOW;
       pinMode(oc.pin, OUTPUT);
       digitalWrite(oc.pin, lvl);
+    } else if (oc.type == OUTPUT_MCP4725) {
+      if (!config.modules.mcp4725) {
+        continue;
+      }
+      uint8_t index = i;
+      uint8_t addr = oc.i2cAddress ? oc.i2cAddress : 0x60;
+      if (!mcp4725Ready[index] || mcp4725Addresses[index] != addr) {
+        if (mcp4725Drivers[index].begin(addr)) {
+          mcp4725Ready[index] = true;
+          mcp4725Addresses[index] = addr;
+        } else {
+          mcp4725Ready[index] = false;
+          logPrintf("MCP4725 write skipped on output %u (addr %s)",
+                    static_cast<unsigned>(index),
+                    formatI2cAddress(addr).c_str());
+          continue;
+        }
+      }
+      float code = oc.value * oc.scale + oc.offset;
+      if (code < 0.0f) code = 0.0f;
+      if (code > 4095.0f) code = 4095.0f;
+      mcp4725Drivers[index].setVoltage(static_cast<uint16_t>(code), false);
     }
   }
 }
@@ -1565,6 +1670,7 @@ void registerRoutes(ServerT &server) {
     modObj["zmpt"] = config.modules.zmpt;
     modObj["zmct"] = config.modules.zmct;
     modObj["div"] = config.modules.div;
+    modObj["mcp4725"] = config.modules.mcp4725;
     doc["inputCount"] = config.inputCount;
     JsonArray inArr = doc.createNestedArray("inputs");
     for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
@@ -1590,6 +1696,7 @@ void registerRoutes(ServerT &server) {
       o["type"] = outputTypeToString(oc.type);
       o["pin"] = pinToString(oc.pin);
       o["pwmFreq"] = oc.pwmFreq;
+      o["i2cAddress"] = formatI2cAddress(oc.i2cAddress);
       o["scale"] = oc.scale;
       o["offset"] = oc.offset;
       o["active"] = oc.active;
