@@ -669,6 +669,8 @@ static String diffOutputConfig(const OutputConfig &before, const OutputConfig &a
 static uint8_t parseI2cAddress(const String &s);
 static String formatI2cAddress(uint8_t address);
 static const char *describeJsonType(const JsonVariantConst &value);
+static void logIoDelta(const Config &before, const Config &after);
+static bool verifyConfigStored(const Config &expected, String &errorDetail);
 
 template <typename ArrayHandler, typename ObjectHandler>
 static bool parseJsonContainerString(const String &rawValue,
@@ -1803,6 +1805,152 @@ static String diffOutputConfig(const OutputConfig &before, const OutputConfig &a
   return diff;
 }
 
+static void logIoDelta(const Config &before, const Config &after) {
+  for (uint8_t i = 0; i < after.inputCount && i < MAX_INPUTS; ++i) {
+    const InputConfig &ic = after.inputs[i];
+    const InputConfig *previousEntry = findInputByName(before, ic.name);
+    if (!previousEntry) {
+      String typeStr = inputTypeToString(ic.type);
+      String pinStr = describePinValue(ic.pin);
+      String channelStr = describeOptionalInt(ic.adsChannel);
+      logPrintf("Input added: %s (type=%s, pin=%s, adsChannel=%s, active=%s)",
+                ic.name.c_str(), typeStr.c_str(), pinStr.c_str(),
+                channelStr.c_str(), ic.active ? "true" : "false");
+    } else {
+      String diff = diffInputConfig(*previousEntry, ic);
+      if (diff.length() > 0) {
+        logPrintf("Input updated: %s {%s}", ic.name.c_str(), diff.c_str());
+      }
+    }
+  }
+  for (uint8_t i = 0; i < before.inputCount && i < MAX_INPUTS; ++i) {
+    const InputConfig &prevInput = before.inputs[i];
+    if (!findInputByName(after, prevInput.name)) {
+      logPrintf("Input removed: %s", prevInput.name.c_str());
+    }
+  }
+
+  for (uint8_t i = 0; i < after.outputCount && i < MAX_OUTPUTS; ++i) {
+    const OutputConfig &oc = after.outputs[i];
+    const OutputConfig *previousEntry = findOutputByName(before, oc.name);
+    if (!previousEntry) {
+      String typeStr = outputTypeToString(oc.type);
+      String pinStr = describePinValue(oc.pin);
+      String addrStr = formatI2cAddress(oc.i2cAddress);
+      logPrintf("Output added: %s (type=%s, pin=%s, pwm=%d, addr=%s, active=%s)",
+                oc.name.c_str(), typeStr.c_str(), pinStr.c_str(), oc.pwmFreq,
+                addrStr.c_str(), oc.active ? "true" : "false");
+    } else {
+      String diff = diffOutputConfig(*previousEntry, oc);
+      if (diff.length() > 0) {
+        logPrintf("Output updated: %s {%s}", oc.name.c_str(), diff.c_str());
+      }
+    }
+  }
+  for (uint8_t i = 0; i < before.outputCount && i < MAX_OUTPUTS; ++i) {
+    const OutputConfig &prevOutput = before.outputs[i];
+    if (!findOutputByName(after, prevOutput.name)) {
+      logPrintf("Output removed: %s", prevOutput.name.c_str());
+    }
+  }
+}
+
+static bool inputsMatch(const Config &expected,
+                        const Config &actual,
+                        String &errorDetail) {
+  if (expected.inputCount != actual.inputCount) {
+    errorDetail =
+        String("inputCount mismatch: ") + expected.inputCount + " != " +
+        actual.inputCount;
+    return false;
+  }
+  for (uint8_t i = 0; i < expected.inputCount && i < MAX_INPUTS; ++i) {
+    const InputConfig &ic = expected.inputs[i];
+    const InputConfig *actualEntry = findInputByName(actual, ic.name);
+    if (!actualEntry) {
+      errorDetail = String("input missing: ") + ic.name;
+      return false;
+    }
+    String diff = diffInputConfig(ic, *actualEntry);
+    if (diff.length() > 0) {
+      errorDetail = String("input mismatch ") + ic.name + " {" + diff + "}";
+      return false;
+    }
+  }
+  for (uint8_t i = 0; i < actual.inputCount && i < MAX_INPUTS; ++i) {
+    const InputConfig &ic = actual.inputs[i];
+    if (!findInputByName(expected, ic.name)) {
+      errorDetail = String("unexpected input: ") + ic.name;
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool outputsMatch(const Config &expected,
+                         const Config &actual,
+                         String &errorDetail) {
+  if (expected.outputCount != actual.outputCount) {
+    errorDetail =
+        String("outputCount mismatch: ") + expected.outputCount + " != " +
+        actual.outputCount;
+    return false;
+  }
+  for (uint8_t i = 0; i < expected.outputCount && i < MAX_OUTPUTS; ++i) {
+    const OutputConfig &oc = expected.outputs[i];
+    const OutputConfig *actualEntry = findOutputByName(actual, oc.name);
+    if (!actualEntry) {
+      errorDetail = String("output missing: ") + oc.name;
+      return false;
+    }
+    String diff = diffOutputConfig(oc, *actualEntry);
+    if (diff.length() > 0) {
+      errorDetail = String("output mismatch ") + oc.name + " {" + diff + "}";
+      return false;
+    }
+  }
+  for (uint8_t i = 0; i < actual.outputCount && i < MAX_OUTPUTS; ++i) {
+    const OutputConfig &oc = actual.outputs[i];
+    if (!findOutputByName(expected, oc.name)) {
+      errorDetail = String("unexpected output: ") + oc.name;
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool verifyConfigStored(const Config &expected, String &errorDetail) {
+  File f = LittleFS.open(CONFIG_FILE_PATH, "r");
+  if (!f) {
+    errorDetail = String("open failed: ") + CONFIG_FILE_PATH;
+    return false;
+  }
+  size_t size = f.size();
+  std::unique_ptr<char[]> buf(new char[size + 1]);
+  size_t read = f.readBytes(buf.get(), size);
+  f.close();
+  buf[read] = '\0';
+
+  DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
+  DeserializationError err = deserializeJson(doc, buf.get());
+  if (err) {
+    errorDetail = String("json parse failed: ") + err.c_str();
+    return false;
+  }
+  Config reloaded = expected;
+  parseConfigFromJson(doc, reloaded);
+  if (!inputsMatch(expected, reloaded, errorDetail)) {
+    return false;
+  }
+  if (!outputsMatch(expected, reloaded, errorDetail)) {
+    return false;
+  }
+  logPrintf("Configuration verification succeeded (%u inputs, %u outputs)",
+            static_cast<unsigned>(expected.inputCount),
+            static_cast<unsigned>(expected.outputCount));
+  return true;
+}
+
 // Parse a configuration from a JSON document.  This helper reads
 // optional fields safely, falling back to existing values when keys
 // are missing.  Unknown types are ignored.  String keys are case-
@@ -2449,16 +2597,82 @@ void registerRoutes(ServerT &server) {
               static_cast<unsigned>(body.length()));
     logConfigJson("Received", doc);
     Config previousConfig = config;
-    parseConfigFromJson(doc, config, &previousConfig, true);
+    parseConfigFromJson(doc, config, &previousConfig, false);
     if (!saveConfig()) {
       config = previousConfig;
       logMessage("Configuration update failed to save; changes reverted");
-      srv->send(500, "application/json", R"({"error":"save failed"})");
+      srv->send(500, "application/json", R"({"error":"save_failed"})");
       return;
     }
+    String verifyError;
+    if (!verifyConfigStored(config, verifyError)) {
+      logPrintf("Configuration verification failed: %s",
+                verifyError.c_str());
+      config = previousConfig;
+      if (!saveConfig()) {
+        logMessage("Failed to restore configuration after verification failure");
+      }
+      DynamicJsonDocument errDoc(256);
+      errDoc["error"] = "verify_failed";
+      if (verifyError.length() > 0) {
+        errDoc["detail"] = verifyError;
+      }
+      String errPayload;
+      serializeJson(errDoc, errPayload);
+      srv->send(500, "application/json", errPayload);
+      return;
+    }
+    logIoDelta(previousConfig, config);
     logConfigSummary("Applied");
     logMessage("Configuration update saved; rebooting");
-    srv->send(200, "application/json", R"({"status":"ok"})");
+    DynamicJsonDocument respDoc(2048);
+    respDoc["status"] = "ok";
+    respDoc["verified"] = true;
+    JsonObject applied = respDoc.createNestedObject("applied");
+    JsonArray inputsArr = applied.createNestedArray("inputs");
+    for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
+      JsonObject out = inputsArr.createNestedObject();
+      const InputConfig &ic = config.inputs[i];
+      out["name"] = ic.name;
+      out["type"] = inputTypeToString(ic.type);
+      if (ic.type == INPUT_ADC || ic.type == INPUT_DIV || ic.type == INPUT_ZMPT ||
+          ic.type == INPUT_ZMCT) {
+        out["pin"] = pinToString(ic.pin);
+      }
+      if (ic.type == INPUT_ADS1115) {
+        out["adsChannel"] = ic.adsChannel;
+      }
+      if (ic.type == INPUT_REMOTE) {
+        out["remoteNode"] = ic.remoteNode;
+        out["remoteName"] = ic.remoteName;
+      }
+      out["scale"] = ic.scale;
+      out["offset"] = ic.offset;
+      out["unit"] = ic.unit;
+      out["active"] = ic.active;
+    }
+    JsonArray outputsArr = applied.createNestedArray("outputs");
+    for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
+      JsonObject out = outputsArr.createNestedObject();
+      const OutputConfig &oc = config.outputs[i];
+      out["name"] = oc.name;
+      out["type"] = outputTypeToString(oc.type);
+      if (oc.type == OUTPUT_PWM010 || oc.type == OUTPUT_GPIO) {
+        out["pin"] = pinToString(oc.pin);
+      }
+      if (oc.type == OUTPUT_PWM010) {
+        out["pwmFreq"] = oc.pwmFreq;
+      }
+      if (oc.type == OUTPUT_MCP4725) {
+        out["i2cAddress"] = formatI2cAddress(oc.i2cAddress);
+      }
+      out["scale"] = oc.scale;
+      out["offset"] = oc.offset;
+      out["active"] = oc.active;
+    }
+    String payload;
+    serializeJson(respDoc, payload);
+    srv->send(200, "application/json", payload);
     delay(100);
     ESP.restart();
   });
