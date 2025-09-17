@@ -1579,6 +1579,7 @@ void registerRoutes(ServerT &server) {
           return;
         }
         if (!otaUploadInProgress) {
+          logMessage("OTA finalize requested but no upload in progress");
           srv->send(400, "application/json", R"({"error":"no_upload"})");
           return;
         }
