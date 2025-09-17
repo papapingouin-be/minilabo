@@ -2445,13 +2445,19 @@ void registerRoutes(ServerT &server) {
       srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
       return;
     }
+    logPrintf("Configuration update received (%u bytes)",
+              static_cast<unsigned>(body.length()));
+    logConfigJson("Received", doc);
     Config previousConfig = config;
     parseConfigFromJson(doc, config, &previousConfig, true);
     if (!saveConfig()) {
       config = previousConfig;
+      logMessage("Configuration update failed to save; changes reverted");
       srv->send(500, "application/json", R"({"error":"save failed"})");
       return;
     }
+    logConfigSummary("Applied");
+    logMessage("Configuration update saved; rebooting");
     srv->send(200, "application/json", R"({"status":"ok"})");
     delay(100);
     ESP.restart();
