@@ -63,6 +63,25 @@ static bool ensureUserDirectory() {
   return true;
 }
 
+static bool isValidUserFileName(const String &name) {
+  if (name.length() == 0 || name.length() > 64) {
+    return false;
+  }
+  if (name.equals(".") || name.equals("..")) {
+    return false;
+  }
+  if (name.charAt(0) == '.') {
+    return false;
+  }
+  for (size_t i = 0; i < name.length(); ++i) {
+    char c = name.charAt(i);
+    if (!(isAlphaNumeric(c) || c == '.' || c == '_' || c == '-')) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static bool sanitizeClientRelativePath(const String &clientPath,
                                       String &relativePath) {
   if (clientPath.length() == 0) return false;
@@ -73,20 +92,8 @@ static bool sanitizeClientRelativePath(const String &clientPath,
   }
   cleaned.trim();
   if (cleaned.length() == 0) return false;
-  if (cleaned.indexOf("//") != -1) return false;
-  int start = 0;
-  while (start < static_cast<int>(cleaned.length())) {
-    int sep = cleaned.indexOf('/', start);
-    int end = (sep == -1) ? cleaned.length() : sep;
-    String segment = cleaned.substring(start, end);
-    if (segment.length() == 0 || segment == "." || segment == "..") {
-      return false;
-    }
-    start = (sep == -1) ? cleaned.length() : sep + 1;
-  }
-  if (!cleaned.equals(SAMPLE_FILE_NAME)) {
-    return false;
-  }
+  if (cleaned.indexOf('/') != -1) return false;
+  if (!isValidUserFileName(cleaned)) return false;
   relativePath = cleaned;
   return true;
 }
@@ -126,24 +133,20 @@ static String toRelativeUserPath(const String &fsPath) {
   return fsPath;
 }
 
-static bool enforceSampleFilePolicy() {
+static bool ensureUserStorageReady() {
   if (!ensureUserDirectory()) {
     return false;
   }
   Dir dir = LittleFS.openDir(USER_FILES_DIR);
+  bool hasFile = false;
   while (dir.next()) {
     if (dir.isDirectory()) {
       continue;
     }
-    String relative = toRelativeUserPath(dir.fileName());
-    if (!relative.equals(SAMPLE_FILE_NAME)) {
-      if (!LittleFS.remove(dir.fileName())) {
-        Serial.printf("Failed to remove unexpected file %s from /private\n",
-                      dir.fileName().c_str());
-      }
-    }
+    hasFile = true;
+    break;
   }
-  if (!LittleFS.exists(SAMPLE_FILE_PATH)) {
+  if (!hasFile) {
     File f = LittleFS.open(SAMPLE_FILE_PATH, "w");
     if (!f) {
       Serial.println("Failed to create sample.html in /private");
@@ -1722,7 +1725,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/files/list", HTTP_GET, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    if (!enforceSampleFilePolicy()) {
+    if (!ensureUserStorageReady()) {
       srv->send(500, "application/json", R"({"error":"storage unavailable"})");
       return;
     }
@@ -1749,7 +1752,7 @@ void registerRoutes(ServerT &server) {
       srv->send(400, "application/json", R"({"error":"missing path"})");
       return;
     }
-    if (!enforceSampleFilePolicy()) {
+    if (!ensureUserStorageReady()) {
       srv->send(500, "application/json", R"({"error":"storage unavailable"})");
       return;
     }
@@ -1780,7 +1783,7 @@ void registerRoutes(ServerT &server) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
     }
-    if (!enforceSampleFilePolicy()) {
+    if (!ensureUserStorageReady()) {
       srv->send(500, "application/json", R"({"error":"storage unavailable"})");
       return;
     }
@@ -1806,14 +1809,124 @@ void registerRoutes(ServerT &server) {
     srv->send(200, "application/json", R"({"status":"ok"})");
   });
 
-  auto forbiddenHandler = [&server]() {
+  server.on("/api/files/create", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    srv->send(403, "application/json", R"({"error":"forbidden"})");
-  };
-  server.on("/api/files/create", HTTP_POST, forbiddenHandler);
-  server.on("/api/files/rename", HTTP_POST, forbiddenHandler);
-  server.on("/api/files/delete", HTTP_POST, forbiddenHandler);
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", R"({"error":"No body"})");
+      return;
+    }
+    if (!ensureUserStorageReady()) {
+      srv->send(500, "application/json", R"({"error":"storage unavailable"})");
+      return;
+    }
+    DynamicJsonDocument doc(512);
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+      return;
+    }
+    String clientPath = doc["path"].as<String>();
+    String fsPath;
+    if (!resolveUserPath(clientPath, fsPath)) {
+      srv->send(400, "application/json", R"({"error":"invalid path"})");
+      return;
+    }
+    if (LittleFS.exists(fsPath)) {
+      srv->send(409, "application/json", R"({"error":"exists"})");
+      return;
+    }
+    String content = doc["content"].as<String>();
+    File f = LittleFS.open(fsPath, "w");
+    if (!f) {
+      srv->send(500, "application/json", R"({"error":"create failed"})");
+      return;
+    }
+    if (content.length() > 0) {
+      f.print(content);
+    }
+    f.close();
+    srv->send(200, "application/json", R"({"status":"ok"})");
+  });
+
+  server.on("/api/files/rename", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", R"({"error":"No body"})");
+      return;
+    }
+    if (!ensureUserStorageReady()) {
+      srv->send(500, "application/json", R"({"error":"storage unavailable"})");
+      return;
+    }
+    DynamicJsonDocument doc(512);
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+      return;
+    }
+    String fromClient = doc["from"].as<String>();
+    String toClient = doc["to"].as<String>();
+    String fromPath;
+    String toPath;
+    if (!resolveUserPath(fromClient, fromPath) ||
+        !resolveUserPath(toClient, toPath)) {
+      srv->send(400, "application/json", R"({"error":"invalid path"})");
+      return;
+    }
+    if (fromPath == toPath) {
+      srv->send(200, "application/json", R"({"status":"ok"})");
+      return;
+    }
+    if (!LittleFS.exists(fromPath)) {
+      srv->send(404, "application/json", R"({"error":"not found"})");
+      return;
+    }
+    if (LittleFS.exists(toPath)) {
+      srv->send(409, "application/json", R"({"error":"exists"})");
+      return;
+    }
+    if (!LittleFS.rename(fromPath, toPath)) {
+      srv->send(500, "application/json", R"({"error":"rename failed"})");
+      return;
+    }
+    srv->send(200, "application/json", R"({"status":"ok"})");
+  });
+
+  server.on("/api/files/delete", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", R"({"error":"No body"})");
+      return;
+    }
+    if (!ensureUserStorageReady()) {
+      srv->send(500, "application/json", R"({"error":"storage unavailable"})");
+      return;
+    }
+    DynamicJsonDocument doc(512);
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+      return;
+    }
+    String clientPath = doc["path"].as<String>();
+    String fsPath;
+    if (!resolveUserPath(clientPath, fsPath)) {
+      srv->send(400, "application/json", R"({"error":"invalid path"})");
+      return;
+    }
+    if (!LittleFS.exists(fsPath)) {
+      srv->send(404, "application/json", R"({"error":"not found"})");
+      return;
+    }
+    if (!LittleFS.remove(fsPath)) {
+      srv->send(500, "application/json", R"({"error":"delete failed"})");
+      return;
+    }
+    srv->send(200, "application/json", R"({"status":"ok"})");
+  });
 
   server.serveStatic("/", LittleFS, "/");
   server.onNotFound([&server]() {
@@ -1851,7 +1964,7 @@ void setup() {
   initialiseSecurity();
   if (!ensureUserDirectory()) {
     logMessage("Failed to ensure private directory /private");
-  } else if (!enforceSampleFilePolicy()) {
+  } else if (!ensureUserStorageReady()) {
     logMessage("Failed to initialise /private/sample.html");
   }
   logMessage("MiniLabBox v2 starting...");
