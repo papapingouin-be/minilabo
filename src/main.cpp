@@ -358,6 +358,20 @@ static void logPrintf(const char *fmt, ...) {
   logMessage(String(buf));
 }
 
+static bool otaUploadAuthorized = false;
+static bool otaUploadInProgress = false;
+static bool otaUploadSuccess = false;
+static size_t otaUploadSize = 0;
+static String otaLastError;
+
+static String otaErrorMessage() {
+#if defined(ARDUINO_ARCH_ESP8266)
+  return Update.errorString();
+#else
+  return String("update_error");
+#endif
+}
+
 // Maximum number of inputs and outputs supported.  Adjust to suit your
 // application.  Keeping these small reduces memory usage on the ESP8266.
 static const uint8_t MAX_INPUTS  = 4;
@@ -1554,6 +1568,123 @@ void registerRoutes(ServerT &server) {
     delay(100);
     ESP.restart();
   });
+
+  server.on(
+      "/api/ota", HTTP_POST,
+      [&server]() {
+        auto *srv = &server;
+        if (!requireAuth(srv)) {
+          otaUploadAuthorized = false;
+          otaUploadInProgress = false;
+          return;
+        }
+        if (!otaUploadInProgress) {
+          srv->send(400, "application/json", R"({"error":"no_upload"})");
+          return;
+        }
+        if (!otaUploadSuccess) {
+          DynamicJsonDocument doc(256);
+          doc["error"] = otaLastError.length() ? otaLastError : "ota_failed";
+          String payload;
+          serializeJson(doc, payload);
+          srv->send(500, "application/json", payload);
+          logPrintf("OTA update failed: %s",
+                    otaLastError.length() ? otaLastError.c_str() : "unknown");
+        } else {
+          DynamicJsonDocument doc(128);
+          doc["status"] = "ok";
+          doc["size"] = static_cast<uint32_t>(otaUploadSize);
+          String payload;
+          serializeJson(doc, payload);
+          srv->send(200, "application/json", payload);
+          logPrintf("OTA update applied (%u bytes), rebooting",
+                    static_cast<unsigned>(otaUploadSize));
+          delay(100);
+          ESP.restart();
+        }
+        otaUploadAuthorized = false;
+        otaUploadInProgress = false;
+      },
+      [&server]() {
+        auto *srv = &server;
+        HTTPUpload &upload = srv->upload();
+        switch (upload.status) {
+          case UPLOAD_FILE_START: {
+            otaUploadAuthorized = false;
+            otaUploadInProgress = false;
+            otaUploadSuccess = false;
+            otaUploadSize = 0;
+            otaLastError = "";
+            String token;
+            if (!extractSessionToken(srv, token) ||
+                !sessionTokenValid(token, true)) {
+              otaLastError = "unauthorized";
+              logMessage("OTA upload rejected: unauthorized session");
+              return;
+            }
+            otaUploadAuthorized = true;
+            otaUploadInProgress = true;
+            logPrintf("OTA upload started: %s", upload.filename.c_str());
+            size_t sketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+            if (!Update.begin(sketchSpace)) {
+              otaLastError = String("begin_failed: ") + otaErrorMessage();
+              logPrintf("OTA begin failed: %s", otaLastError.c_str());
+              Update.printError(Serial);
+            }
+            break;
+          }
+          case UPLOAD_FILE_WRITE: {
+            if (!otaUploadAuthorized || !Update.isRunning()) {
+              return;
+            }
+            if (Update.write(upload.buf, upload.currentSize) !=
+                upload.currentSize) {
+              otaLastError = String("write_failed: ") + otaErrorMessage();
+              logPrintf("OTA write failed at %u bytes: %s",
+                        static_cast<unsigned>(otaUploadSize),
+                        otaLastError.c_str());
+              Update.printError(Serial);
+              Update.abort();
+            } else {
+              otaUploadSize = upload.totalSize;
+            }
+            break;
+          }
+          case UPLOAD_FILE_END: {
+            if (!otaUploadAuthorized) {
+              return;
+            }
+            if (!Update.isRunning()) {
+              if (otaLastError.length() == 0) {
+                otaLastError = "not_running";
+              }
+              logMessage("OTA upload ended but updater was not running");
+              return;
+            }
+            if (Update.end(true)) {
+              otaUploadSuccess = true;
+              otaUploadSize = upload.totalSize;
+              logPrintf("OTA upload finished: %u bytes",
+                        static_cast<unsigned>(otaUploadSize));
+            } else {
+              otaLastError = String("finalize_failed: ") + otaErrorMessage();
+              logPrintf("OTA finalize failed: %s", otaLastError.c_str());
+              Update.printError(Serial);
+            }
+            break;
+          }
+          case UPLOAD_FILE_ABORTED: {
+            otaLastError = "aborted";
+            logMessage("OTA upload aborted by client");
+            if (Update.isRunning()) {
+              Update.abort();
+            }
+            break;
+          }
+          default:
+            break;
+        }
+      });
 
   server.on("/api/output/set", HTTP_POST, [&server]() {
     auto *srv = &server;
