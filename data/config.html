@@ -22,6 +22,34 @@
     #cacheAceStatus.error { color: #c0392b; }
     .hint { font-size: 0.9em; color: #555; margin-top: 0.3em; }
     input.peer-pin { width: 70px; text-align: center; }
+    .io-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6em; }
+    .counter { font-size: 0.9em; color: #555; }
+    .io-list { display: grid; gap: 0.75em; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+    .io-card { border: 1px solid #d0d0d0; border-radius: 8px; padding: 0.75em 0.9em; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.08); display: flex; flex-direction: column; }
+    .io-card-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5em; }
+    .io-card h3 { margin: 0; font-size: 1.1em; }
+    .io-type { font-size: 0.85em; color: #555; text-transform: uppercase; letter-spacing: 0.05em; }
+    .io-details { margin: 0.5em 0 0; padding-left: 1.1em; color: #333; }
+    .io-details li { margin-bottom: 0.2em; }
+    .io-empty { font-style: italic; color: #666; }
+    .toggle { font-size: 0.85em; color: #333; }
+    .toggle input { margin-right: 0.35em; }
+    .io-actions { margin-top: auto; display: flex; gap: 0.5em; justify-content: flex-end; }
+    button.secondary { background: #f3f3f3; border: 1px solid #bbb; color: #333; }
+    button.danger { background: #c0392b; border: none; color: #fff; }
+    button.secondary:hover { background: #e6e6e6; }
+    button.danger:hover { background: #a93124; }
+    .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+    .modal.hidden { display: none; }
+    .modal-content { background: #fff; padding: 1.4em 1.6em; border-radius: 10px; width: min(500px, 90%); max-height: 90vh; overflow-y: auto; box-shadow: 0 18px 40px rgba(0,0,0,0.2); }
+    .modal-content h2 { margin-top: 0; }
+    .modal-form-row { margin-bottom: 0.75em; display: flex; flex-direction: column; }
+    .modal-form-row label { font-weight: bold; margin-bottom: 0.35em; }
+    .modal-form-row input[type="text"],
+    .modal-form-row input[type="number"],
+    .modal-form-row select { width: 100%; box-sizing: border-box; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 0.6em; margin-top: 1.2em; }
+    .modal-description { font-size: 0.9em; color: #555; margin-bottom: 0.9em; }
   </style>
   <script src="auth.js"></script>
 </head>
@@ -55,6 +83,7 @@
     <legend>Modules optionnels</legend>
     <label><input type="checkbox" id="modAds"> ADC externe ADS1115</label><br>
     <label><input type="checkbox" id="modPwm"> Convertisseur PWM → 0–10 V</label><br>
+    <label><input type="checkbox" id="modDac"> DAC I²C MCP4725</label><br>
     <label><input type="checkbox" id="modZmpt"> Capteur de tension AC (ZMPT101B)</label><br>
     <label><input type="checkbox" id="modZmct"> Capteur de courant AC (ZMCT103C)</label><br>
     <label><input type="checkbox" id="modDiv"> Pont diviseur DC</label>
@@ -62,22 +91,22 @@
 
   <fieldset>
     <legend>Entrées</legend>
-    <table id="inputsTable">
-      <thead>
-        <tr><th>Actif</th><th>Nom</th><th>Type</th><th>Paramètres</th><th>Échelle</th><th>Décalage</th><th>Unité</th></tr>
-      </thead>
-      <tbody></tbody>
-    </table>
+    <p class="hint">Ajoutez les mesures utiles et associez chaque entrée à son capteur ou à une valeur distante.</p>
+    <div class="io-header">
+      <button type="button" id="addInputBtn">Ajouter une entrée</button>
+      <span class="counter" id="inputsCounter">0 / 4</span>
+    </div>
+    <div id="inputsList" class="io-list"></div>
   </fieldset>
 
   <fieldset>
     <legend>Sorties</legend>
-    <table id="outputsTable">
-      <thead>
-        <tr><th>Actif</th><th>Nom</th><th>Type</th><th>Paramètres</th><th>Gain</th><th>Décalage</th></tr>
-      </thead>
-      <tbody></tbody>
-    </table>
+    <p class="hint">Chaque sortie peut piloter un convertisseur PWM → 0–10 V, un simple GPIO ou le nouveau DAC I²C MCP4725.</p>
+    <div class="io-header">
+      <button type="button" id="addOutputBtn">Ajouter une sortie</button>
+      <span class="counter" id="outputsCounter">0 / 2</span>
+    </div>
+    <div id="outputsList" class="io-list"></div>
   </fieldset>
 
   <fieldset>
@@ -106,164 +135,570 @@
   <span id="status" style="margin-left:1em;"></span>
 </form>
 
+<div id="ioModal" class="modal hidden" role="dialog" aria-modal="true">
+  <div class="modal-content">
+    <h2 id="modalTitle">Configurer</h2>
+    <p class="modal-description" id="modalDescription"></p>
+    <form id="modalForm">
+      <div class="modal-form-row">
+        <label for="modalName">Nom</label>
+        <input type="text" id="modalName" required>
+      </div>
+      <div class="modal-form-row">
+        <label for="modalType">Type</label>
+        <select id="modalType"></select>
+      </div>
+      <div class="modal-form-row">
+        <label class="toggle"><input type="checkbox" id="modalActive"> Activer cette voie</label>
+      </div>
+      <div class="modal-form-row">
+        <label for="modalScale">Échelle</label>
+        <input type="number" step="any" id="modalScale">
+      </div>
+      <div class="modal-form-row">
+        <label for="modalOffset">Décalage</label>
+        <input type="number" step="any" id="modalOffset">
+      </div>
+      <div class="modal-form-row" id="modalUnitRow">
+        <label for="modalUnit">Unité</label>
+        <input type="text" id="modalUnit">
+      </div>
+      <div id="modalTypeFields"></div>
+      <div class="modal-actions">
+        <button type="button" class="secondary" id="modalCancel">Annuler</button>
+        <button type="submit">Enregistrer</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <script>
 const MAX_INPUTS = 4;
 const MAX_OUTPUTS = 2;
+const ANALOG_PINS = ['A0'];
+const DIGITAL_PINS = ['D0','D1','D2','D3','D4','D5','D6','D7','D8'];
+const INPUT_TYPES = [
+  { value: 'adc', label: 'ADC interne (A0)' },
+  { value: 'ads1115', label: 'ADC externe ADS1115' },
+  { value: 'remote', label: 'Valeur distante' },
+  { value: 'zmpt', label: 'Capteur tension AC (ZMPT)' },
+  { value: 'zmct', label: 'Capteur courant AC (ZMCT)' },
+  { value: 'div', label: 'Diviseur DC' },
+  { value: 'disabled', label: 'Désactivée' }
+];
+const OUTPUT_TYPES = [
+  { value: 'pwm010', label: 'PWM → 0–10 V' },
+  { value: 'gpio', label: 'Sortie GPIO' },
+  { value: 'mcp4725', label: 'DAC I²C MCP4725' },
+  { value: 'disabled', label: 'Désactivée' }
+];
+
+let inputs = [];
+let outputs = [];
 let discoveryTableBody;
 let discoveryStatusEl;
 let discoveryTimer = null;
 const knownPeers = new Map();
 let discoveryData = [];
+let modalState = null;
 
-// Create rows for inputs and outputs based on constants
-function buildTables() {
-  const inTBody = document.querySelector('#inputsTable tbody');
-  const outTBody = document.querySelector('#outputsTable tbody');
-  for (let i = 0; i < MAX_INPUTS; i++) {
-    const tr = document.createElement('tr');
-    tr.dataset.idx = i;
-    // Active checkbox
-    const tdActive = document.createElement('td');
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.className = 'in-active';
-    tdActive.appendChild(cb);
-    tr.appendChild(tdActive);
-    // Name
-    const tdName = document.createElement('td');
-    const inpName = document.createElement('input');
-    inpName.type = 'text';
-    inpName.className = 'in-name';
-    inpName.placeholder = 'IN' + (i+1);
-    tdName.appendChild(inpName);
-    tr.appendChild(tdName);
-    // Type
-    const tdType = document.createElement('td');
-    const sel = document.createElement('select');
-    sel.className = 'in-type';
-    ['disabled','adc','ads1115','remote','zmpt','zmct','div'].forEach(opt => {
-      const o = document.createElement('option');
-      o.value = opt;
-      o.textContent = opt;
-      sel.appendChild(o);
-    });
-    tdType.appendChild(sel);
-    tr.appendChild(tdType);
-    // Params
-    const tdParam = document.createElement('td');
-    tdParam.className = 'in-param';
-    tdParam.innerHTML = '';
-    tr.appendChild(tdParam);
-    // Scale
-    const tdScale = document.createElement('td');
-    const inpScale = document.createElement('input');
-    inpScale.type = 'number'; inpScale.step = 'any'; inpScale.className = 'in-scale'; inpScale.value = '1';
-    tdScale.appendChild(inpScale);
-    tr.appendChild(tdScale);
-    // Offset
-    const tdOff = document.createElement('td');
-    const inpOff = document.createElement('input');
-    inpOff.type = 'number'; inpOff.step = 'any'; inpOff.className = 'in-offset'; inpOff.value = '0';
-    tdOff.appendChild(inpOff);
-    tr.appendChild(tdOff);
-    // Unit
-    const tdUnit = document.createElement('td');
-    const inpUnit = document.createElement('input');
-    inpUnit.type = 'text'; inpUnit.className = 'in-unit';
-    tdUnit.appendChild(inpUnit);
-    tr.appendChild(tdUnit);
-    inTBody.appendChild(tr);
+function toNumber(value, fallback) {
+  if (value === null || value === undefined) {
+    return fallback;
   }
-  for (let i = 0; i < MAX_OUTPUTS; i++) {
-    const tr = document.createElement('tr');
-    tr.dataset.idx = i;
-    const tdActive = document.createElement('td');
-    const cb = document.createElement('input');
-    cb.type = 'checkbox'; cb.className = 'out-active';
-    tdActive.appendChild(cb);
-    tr.appendChild(tdActive);
-    const tdName = document.createElement('td');
-    const inpName = document.createElement('input');
-    inpName.type = 'text'; inpName.className = 'out-name'; inpName.placeholder = 'OUT' + (i+1);
-    tdName.appendChild(inpName);
-    tr.appendChild(tdName);
-    const tdType = document.createElement('td');
-    const sel = document.createElement('select'); sel.className = 'out-type';
-    ['disabled','pwm010','gpio'].forEach(opt => {
-      const o = document.createElement('option'); o.value = opt; o.textContent = opt;
-      sel.appendChild(o);
-    });
-    tdType.appendChild(sel);
-    tr.appendChild(tdType);
-    const tdParam = document.createElement('td'); tdParam.className = 'out-param'; tr.appendChild(tdParam);
-    const tdScale = document.createElement('td');
-    const inpScale = document.createElement('input'); inpScale.type='number'; inpScale.step='any'; inpScale.className='out-scale'; inpScale.value='1';
-    tdScale.appendChild(inpScale);
-    tr.appendChild(tdScale);
-    const tdOff = document.createElement('td');
-    const inpOff = document.createElement('input'); inpOff.type='number'; inpOff.step='any'; inpOff.className='out-offset'; inpOff.value='0';
-    tdOff.appendChild(inpOff);
-    tr.appendChild(tdOff);
-    outTBody.appendChild(tr);
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      return fallback;
+    }
+    value = trimmed;
   }
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
 }
 
-// Update param cell based on selected type
-function updateInputParam(row) {
-  const type = row.querySelector('.in-type').value;
-  const paramCell = row.querySelector('.in-param');
-  paramCell.innerHTML = '';
-  if (type === 'adc') {
-    const selPin = document.createElement('select');
-    selPin.className = 'param-pin';
-    ['A0'].concat(['D0','D1','D2','D3','D4','D5','D6','D7','D8']).forEach(p => {
-      const o = document.createElement('option'); o.value = p; o.textContent = p; selPin.appendChild(o);
-    });
-    paramCell.appendChild(document.createTextNode('Pin :'));
-    paramCell.appendChild(selPin);
-  } else if (type === 'ads1115') {
-    const selCh = document.createElement('select'); selCh.className = 'param-ads';
-    [0,1,2,3].forEach(n => {
-      const o = document.createElement('option'); o.value = n; o.textContent = 'A'+n; selCh.appendChild(o);
-    });
-    paramCell.appendChild(document.createTextNode('Canal :'));
-    paramCell.appendChild(selCh);
-  } else if (type === 'remote') {
-    const inpNode = document.createElement('input'); inpNode.type = 'text'; inpNode.placeholder = 'nœud'; inpNode.className='param-remote-node';
-    const inpName = document.createElement('input'); inpName.type = 'text'; inpName.placeholder = 'entrée'; inpName.className='param-remote-name';
-    paramCell.appendChild(document.createTextNode('Nœud :'));
-    paramCell.appendChild(inpNode);
-    paramCell.appendChild(document.createElement('br'));
-    paramCell.appendChild(document.createTextNode('Nom :'));
-    paramCell.appendChild(inpName);
-  } else if (type === 'div' || type === 'zmpt' || type === 'zmct') {
-    const selPin = document.createElement('select'); selPin.className = 'param-pin';
-    ['A0'].concat(['D0','D1','D2','D3','D4','D5','D6','D7','D8']).forEach(p => {
-      const o = document.createElement('option'); o.value = p; o.textContent = p; selPin.appendChild(o);
-    });
-    paramCell.appendChild(document.createTextNode('Pin :'));
-    paramCell.appendChild(selPin);
+function newInputConfig(type) {
+  const cfg = {
+    name: '',
+    type,
+    active: true,
+    pin: '',
+    adsChannel: 0,
+    remoteNode: '',
+    remoteName: '',
+    scale: 1,
+    offset: 0,
+    unit: ''
+  };
+  if (type === 'adc' || type === 'div' || type === 'zmpt' || type === 'zmct') {
+    cfg.pin = 'A0';
   }
+  if (type === 'ads1115') {
+    cfg.adsChannel = 0;
+  }
+  if (type === 'disabled') {
+    cfg.active = false;
+  }
+  return cfg;
 }
 
-function updateOutputParam(row) {
-  const type = row.querySelector('.out-type').value;
-  const paramCell = row.querySelector('.out-param');
-  paramCell.innerHTML = '';
-  if (type === 'pwm010' || type === 'gpio') {
-    const selPin = document.createElement('select'); selPin.className = 'param-pin';
-    ['D0','D1','D2','D3','D4','D5','D6','D7','D8'].forEach(p => {
-      const o = document.createElement('option'); o.value = p; o.textContent = p; selPin.appendChild(o);
+function newOutputConfig(type) {
+  const cfg = {
+    name: '',
+    type,
+    active: true,
+    pin: '',
+    pwmFreq: 2000,
+    i2cAddress: '0x60',
+    scale: 1,
+    offset: 0
+  };
+  if (type === 'pwm010') {
+    cfg.pin = 'D2';
+    cfg.pwmFreq = 2000;
+  } else if (type === 'gpio') {
+    cfg.pin = 'D1';
+  } else if (type === 'disabled') {
+    cfg.active = false;
+  }
+  return cfg;
+}
+
+function cloneConfig(obj) {
+  return JSON.parse(JSON.stringify(obj));
+}
+
+function typeLabel(kind, value) {
+  const source = kind === 'input' ? INPUT_TYPES : OUTPUT_TYPES;
+  const found = source.find(o => o.value === value);
+  return found ? found.label : value;
+}
+
+function normaliseInput(data) {
+  const base = newInputConfig(data.type || 'disabled');
+  base.name = data.name || '';
+  base.type = data.type || 'disabled';
+  base.active = !!data.active;
+  base.pin = data.pin || base.pin;
+  const channel = parseInt(data.adsChannel, 10);
+  base.adsChannel = Number.isFinite(channel) ? channel : base.adsChannel;
+  base.remoteNode = data.remoteNode || '';
+  base.remoteName = data.remoteName || '';
+  base.scale = toNumber(data.scale, 1);
+  base.offset = toNumber(data.offset, 0);
+  base.unit = data.unit || '';
+  return base;
+}
+
+function normaliseOutput(data) {
+  const base = newOutputConfig(data.type || 'disabled');
+  base.name = data.name || '';
+  base.type = data.type || 'disabled';
+  base.active = !!data.active;
+  base.pin = data.pin || base.pin;
+  base.pwmFreq = Math.max(1, Math.round(toNumber(data.pwmFreq, base.pwmFreq)));
+  base.i2cAddress = data.i2cAddress || base.i2cAddress;
+  base.scale = toNumber(data.scale, 1);
+  base.offset = toNumber(data.offset, 0);
+  return base;
+}
+
+function updateIoCounters() {
+  const inCounter = document.getElementById('inputsCounter');
+  if (inCounter) inCounter.textContent = `${inputs.length} / ${MAX_INPUTS}`;
+  const outCounter = document.getElementById('outputsCounter');
+  if (outCounter) outCounter.textContent = `${outputs.length} / ${MAX_OUTPUTS}`;
+}
+
+function describeInput(item) {
+  const details = [];
+  if (['adc','div','zmpt','zmct'].includes(item.type) && item.pin) {
+    details.push(`Pin : ${item.pin}`);
+  }
+  if (item.type === 'ads1115') {
+    details.push(`Canal ADS1115 : A${item.adsChannel}`);
+  }
+  if (item.type === 'remote') {
+    if (item.remoteNode) details.push(`Nœud : ${item.remoteNode}`);
+    if (item.remoteName) details.push(`Nom distant : ${item.remoteName}`);
+  }
+  details.push(`Échelle : ${item.scale}`);
+  details.push(`Décalage : ${item.offset}`);
+  if (item.unit) details.push(`Unité : ${item.unit}`);
+  return details;
+}
+
+function describeOutput(item) {
+  const details = [];
+  if ((item.type === 'pwm010' || item.type === 'gpio') && item.pin) {
+    details.push(`Pin : ${item.pin}`);
+  }
+  if (item.type === 'pwm010') {
+    details.push(`Fréquence PWM : ${item.pwmFreq} Hz`);
+  }
+  if (item.type === 'mcp4725') {
+    details.push(`Adresse I²C : ${item.i2cAddress}`);
+  }
+  details.push(`Gain : ${item.scale}`);
+  details.push(`Décalage : ${item.offset}`);
+  return details;
+}
+
+function renderIoList(kind) {
+  const listEl = document.getElementById(kind === 'input' ? 'inputsList' : 'outputsList');
+  if (!listEl) return;
+  const source = kind === 'input' ? inputs : outputs;
+  listEl.innerHTML = '';
+  if (!source.length) {
+    const empty = document.createElement('div');
+    empty.className = 'io-empty';
+    empty.textContent = kind === 'input' ? 'Aucune entrée configurée.' : 'Aucune sortie configurée.';
+    listEl.appendChild(empty);
+    updateIoCounters();
+    return;
+  }
+  source.forEach((item, idx) => {
+    const card = document.createElement('div');
+    card.className = 'io-card';
+    const header = document.createElement('div');
+    header.className = 'io-card-header';
+    const title = document.createElement('h3');
+    title.textContent = item.name || (kind === 'input' ? `Entrée ${idx + 1}` : `Sortie ${idx + 1}`);
+    header.appendChild(title);
+    const controls = document.createElement('div');
+    const typeLabelEl = document.createElement('div');
+    typeLabelEl.className = 'io-type';
+    typeLabelEl.textContent = typeLabel(kind, item.type);
+    controls.appendChild(typeLabelEl);
+    const toggleLabel = document.createElement('label');
+    toggleLabel.className = 'toggle';
+    const toggle = document.createElement('input');
+    toggle.type = 'checkbox';
+    toggle.checked = !!item.active;
+    toggle.addEventListener('change', () => {
+      item.active = toggle.checked;
     });
-    paramCell.appendChild(document.createTextNode('Pin :'));
-    paramCell.appendChild(selPin);
-    if (type === 'pwm010') {
-      const freqInp = document.createElement('input'); freqInp.type='number'; freqInp.className='param-pwm-freq'; freqInp.value='2000'; freqInp.min='1'; freqInp.max='40000';
-      paramCell.appendChild(document.createElement('br'));
-      paramCell.appendChild(document.createTextNode('Fréq. Hz :'));
-      paramCell.appendChild(freqInp);
+    toggleLabel.appendChild(toggle);
+    toggleLabel.appendChild(document.createTextNode(' Actif'));
+    controls.appendChild(toggleLabel);
+    header.appendChild(controls);
+    card.appendChild(header);
+    const detailList = document.createElement('ul');
+    detailList.className = 'io-details';
+    const lines = kind === 'input' ? describeInput(item) : describeOutput(item);
+    lines.forEach(text => {
+      const li = document.createElement('li');
+      li.textContent = text;
+      detailList.appendChild(li);
+    });
+    card.appendChild(detailList);
+    const actions = document.createElement('div');
+    actions.className = 'io-actions';
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'secondary';
+    editBtn.textContent = 'Modifier';
+    editBtn.addEventListener('click', () => openIoModal(kind, idx));
+    actions.appendChild(editBtn);
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'danger';
+    delBtn.textContent = 'Supprimer';
+    delBtn.addEventListener('click', () => {
+      if (confirm('Supprimer cette configuration ?')) {
+        if (kind === 'input') {
+          inputs.splice(idx, 1);
+          renderIoList('input');
+        } else {
+          outputs.splice(idx, 1);
+          renderIoList('output');
+        }
+      }
+    });
+    actions.appendChild(delBtn);
+    card.appendChild(actions);
+    listEl.appendChild(card);
+  });
+  updateIoCounters();
+}
+
+function openIoModal(kind, index) {
+  const modal = document.getElementById('ioModal');
+  if (!modal) return;
+  let data;
+  if (index != null) {
+    const source = kind === 'input' ? inputs : outputs;
+    data = cloneConfig(source[index]);
+  } else {
+    const defaults = kind === 'input' ? newInputConfig(INPUT_TYPES[0].value) : newOutputConfig(OUTPUT_TYPES[0].value);
+    defaults.name = kind === 'input' ? `IN${inputs.length + 1}` : `OUT${outputs.length + 1}`;
+    data = defaults;
+  }
+  modalState = { kind, index, data };
+  renderModalForm();
+  modal.classList.remove('hidden');
+}
+
+function closeIoModal() {
+  const modal = document.getElementById('ioModal');
+  if (modal) {
+    modal.classList.add('hidden');
+  }
+  modalState = null;
+}
+
+function applyTypeChange(kind, newType) {
+  if (!modalState) return;
+  const old = modalState.data;
+  if (old.type === newType) return;
+  const defaults = kind === 'input' ? newInputConfig(newType) : newOutputConfig(newType);
+  defaults.name = old.name;
+  defaults.active = old.active;
+  if ('scale' in old) defaults.scale = old.scale;
+  if ('offset' in old) defaults.offset = old.offset;
+  if (kind === 'input') {
+    defaults.unit = old.unit;
+  }
+  modalState.data = defaults;
+}
+
+function renderTypeSpecificFields(data, kind) {
+  const container = document.getElementById('modalTypeFields');
+  if (!container) return;
+  container.innerHTML = '';
+  if (kind === 'input') {
+    if (['adc','div','zmpt','zmct'].includes(data.type)) {
+      const row = document.createElement('div');
+      row.className = 'modal-form-row';
+      const label = document.createElement('label');
+      label.textContent = 'Entrée analogique';
+      const select = document.createElement('select');
+      ANALOG_PINS.concat(DIGITAL_PINS).forEach(pin => {
+        const opt = document.createElement('option');
+        opt.value = pin;
+        opt.textContent = pin;
+        select.appendChild(opt);
+      });
+      if (!data.pin) data.pin = 'A0';
+      select.value = data.pin;
+      select.onchange = (ev) => {
+        modalState.data.pin = ev.target.value;
+      };
+      row.appendChild(label);
+      row.appendChild(select);
+      container.appendChild(row);
+    } else if (data.type === 'ads1115') {
+      const row = document.createElement('div');
+      row.className = 'modal-form-row';
+      const label = document.createElement('label');
+      label.textContent = 'Canal ADS1115';
+      const select = document.createElement('select');
+      [0,1,2,3].forEach(ch => {
+        const opt = document.createElement('option');
+        opt.value = ch;
+        opt.textContent = `A${ch}`;
+        select.appendChild(opt);
+      });
+      select.value = Number.isFinite(data.adsChannel) ? data.adsChannel : 0;
+      select.onchange = (ev) => {
+        modalState.data.adsChannel = parseInt(ev.target.value, 10);
+      };
+      row.appendChild(label);
+      row.appendChild(select);
+      container.appendChild(row);
+    } else if (data.type === 'remote') {
+      const rowNode = document.createElement('div');
+      rowNode.className = 'modal-form-row';
+      const labelNode = document.createElement('label');
+      labelNode.textContent = 'Nœud distant';
+      const inputNode = document.createElement('input');
+      inputNode.type = 'text';
+      inputNode.value = data.remoteNode || '';
+      inputNode.oninput = (ev) => {
+        modalState.data.remoteNode = ev.target.value.trim();
+      };
+      rowNode.appendChild(labelNode);
+      rowNode.appendChild(inputNode);
+      container.appendChild(rowNode);
+      const rowName = document.createElement('div');
+      rowName.className = 'modal-form-row';
+      const labelName = document.createElement('label');
+      labelName.textContent = "Nom de l'entrée distante";
+      const inputName = document.createElement('input');
+      inputName.type = 'text';
+      inputName.value = data.remoteName || '';
+      inputName.oninput = (ev) => {
+        modalState.data.remoteName = ev.target.value.trim();
+      };
+      rowName.appendChild(labelName);
+      rowName.appendChild(inputName);
+      container.appendChild(rowName);
+    }
+  } else {
+    if (['pwm010','gpio'].includes(data.type)) {
+      const row = document.createElement('div');
+      row.className = 'modal-form-row';
+      const label = document.createElement('label');
+      label.textContent = 'Pin de sortie';
+      const select = document.createElement('select');
+      DIGITAL_PINS.forEach(pin => {
+        const opt = document.createElement('option');
+        opt.value = pin;
+        opt.textContent = pin;
+        select.appendChild(opt);
+      });
+      if (!data.pin) data.pin = 'D2';
+      select.value = data.pin;
+      select.onchange = (ev) => {
+        modalState.data.pin = ev.target.value;
+      };
+      row.appendChild(label);
+      row.appendChild(select);
+      container.appendChild(row);
+    }
+    if (data.type === 'pwm010') {
+      const row = document.createElement('div');
+      row.className = 'modal-form-row';
+      const label = document.createElement('label');
+      label.textContent = 'Fréquence PWM (Hz)';
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.min = '1';
+      input.max = '40000';
+      input.value = data.pwmFreq || 2000;
+      input.oninput = (ev) => {
+        const value = parseInt(ev.target.value, 10);
+        modalState.data.pwmFreq = Number.isFinite(value) ? value : 2000;
+      };
+      row.appendChild(label);
+      row.appendChild(input);
+      container.appendChild(row);
+    }
+    if (data.type === 'mcp4725') {
+      const row = document.createElement('div');
+      row.className = 'modal-form-row';
+      const label = document.createElement('label');
+      label.textContent = 'Adresse I²C (ex. 0x60)';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = data.i2cAddress || '0x60';
+      input.oninput = (ev) => {
+        modalState.data.i2cAddress = ev.target.value.trim();
+      };
+      row.appendChild(label);
+      row.appendChild(input);
+      container.appendChild(row);
     }
   }
+}
+
+function renderModalForm() {
+  if (!modalState) return;
+  const { kind, index, data } = modalState;
+  const title = document.getElementById('modalTitle');
+  const description = document.getElementById('modalDescription');
+  const nameInput = document.getElementById('modalName');
+  const typeSelect = document.getElementById('modalType');
+  const activeCheckbox = document.getElementById('modalActive');
+  const scaleInput = document.getElementById('modalScale');
+  const offsetInput = document.getElementById('modalOffset');
+  const unitRow = document.getElementById('modalUnitRow');
+  const unitInput = document.getElementById('modalUnit');
+  if (!title || !description || !nameInput || !typeSelect || !activeCheckbox || !scaleInput || !offsetInput || !unitRow || !unitInput) {
+    return;
+  }
+  title.textContent = index != null ? (kind === 'input' ? 'Modifier une entrée' : 'Modifier une sortie')
+                                   : (kind === 'input' ? 'Ajouter une entrée' : 'Ajouter une sortie');
+  description.textContent = kind === 'input'
+    ? "Choisissez le type de mesure et ajustez l'échelle pour correspondre à vos capteurs."
+    : "Sélectionnez le type de sortie et configurez les paramètres électriques adaptés à l'actionneur.";
+  nameInput.value = data.name || '';
+  nameInput.oninput = (ev) => {
+    modalState.data.name = ev.target.value;
+  };
+  typeSelect.innerHTML = '';
+  const options = kind === 'input' ? INPUT_TYPES : OUTPUT_TYPES;
+  options.forEach(opt => {
+    const optionEl = document.createElement('option');
+    optionEl.value = opt.value;
+    optionEl.textContent = opt.label;
+    typeSelect.appendChild(optionEl);
+  });
+  if (!data.type) {
+    data.type = options[0].value;
+  }
+  typeSelect.value = data.type;
+  typeSelect.onchange = (ev) => {
+    applyTypeChange(kind, ev.target.value);
+    renderModalForm();
+  };
+  activeCheckbox.checked = !!data.active;
+  activeCheckbox.onchange = (ev) => {
+    modalState.data.active = ev.target.checked;
+  };
+  scaleInput.value = data.scale != null ? data.scale : 1;
+  scaleInput.oninput = (ev) => {
+    const value = parseFloat(ev.target.value);
+    modalState.data.scale = Number.isFinite(value) ? value : 1;
+  };
+  offsetInput.value = data.offset != null ? data.offset : 0;
+  offsetInput.oninput = (ev) => {
+    const value = parseFloat(ev.target.value);
+    modalState.data.offset = Number.isFinite(value) ? value : 0;
+  };
+  if (kind === 'input') {
+    unitRow.classList.remove('hidden');
+    unitInput.value = data.unit || '';
+    unitInput.oninput = (ev) => {
+      modalState.data.unit = ev.target.value;
+    };
+  } else {
+    unitRow.classList.add('hidden');
+  }
+  renderTypeSpecificFields(modalState.data, kind);
+}
+
+function handleModalSubmit(event) {
+  event.preventDefault();
+  if (!modalState) return;
+  const { kind, index, data } = modalState;
+  if (!data.name || !data.name.trim()) {
+    alert('Veuillez indiquer un nom.');
+    return;
+  }
+  data.name = data.name.trim();
+  if (kind === 'input') {
+    if (index != null) {
+      inputs[index] = data;
+    } else {
+      inputs.push(data);
+    }
+    renderIoList('input');
+  } else {
+    if (index != null) {
+      outputs[index] = data;
+    } else {
+      outputs.push(data);
+    }
+    renderIoList('output');
+  }
+  closeIoModal();
+}
+
+function addInput() {
+  if (inputs.length >= MAX_INPUTS) {
+    alert(`Nombre maximum d'entrées atteint (${MAX_INPUTS}).`);
+    return;
+  }
+  openIoModal('input', null);
+}
+
+function addOutput() {
+  if (outputs.length >= MAX_OUTPUTS) {
+    alert(`Nombre maximum de sorties atteint (${MAX_OUTPUTS}).`);
+    return;
+  }
+  openIoModal('output', null);
 }
 
 // Load config from server and populate form
@@ -273,60 +708,22 @@ async function loadConfig() {
     if (!resp.ok) throw new Error('Chargement impossible');
     const cfg = await resp.json();
     document.getElementById('nodeId').value = cfg.nodeId || '';
-    document.getElementById('wifiMode').value = cfg.wifi.mode || 'AP';
-    document.getElementById('ssid').value = cfg.wifi.ssid || '';
-    document.getElementById('pass').value = cfg.wifi.pass || '';
+    const wifi = cfg.wifi || {};
+    document.getElementById('wifiMode').value = wifi.mode || 'AP';
+    document.getElementById('ssid').value = wifi.ssid || '';
+    document.getElementById('pass').value = wifi.pass || '';
     document.getElementById('fwVersion').textContent = cfg.fwVersion || 'inconnue';
-    document.getElementById('modAds').checked = cfg.modules.ads1115;
-    document.getElementById('modPwm').checked = cfg.modules.pwm010;
-    document.getElementById('modZmpt').checked = cfg.modules.zmpt;
-    document.getElementById('modZmct').checked = cfg.modules.zmct;
-    document.getElementById('modDiv').checked = cfg.modules.div;
-    // Populate inputs
-    const inRows = document.querySelectorAll('#inputsTable tbody tr');
-    for (let i = 0; i < MAX_INPUTS; i++) {
-      const row = inRows[i];
-      const ic = cfg.inputs[i] || {};
-      row.querySelector('.in-active').checked = ic.active || false;
-      row.querySelector('.in-name').value = ic.name || '';
-      row.querySelector('.in-type').value = ic.type || 'disabled';
-      row.querySelector('.in-scale').value = ic.scale != null ? ic.scale : 1;
-      row.querySelector('.in-offset').value = ic.offset != null ? ic.offset : 0;
-      row.querySelector('.in-unit').value = ic.unit || '';
-      updateInputParam(row);
-      if (ic.type === 'adc' || ic.type === 'div' || ic.type === 'zmpt' || ic.type === 'zmct') {
-        const selPin = row.querySelector('.param-pin');
-        if (selPin) selPin.value = ic.pin != null ? ic.pin : '';
-      } else if (ic.type === 'ads1115') {
-        const selCh = row.querySelector('.param-ads');
-        if (selCh) selCh.value = ic.adsChannel != null ? ic.adsChannel : 0;
-      } else if (ic.type === 'remote') {
-        const inpNode = row.querySelector('.param-remote-node');
-        const inpName = row.querySelector('.param-remote-name');
-        if (inpNode) inpNode.value = ic.remoteNode || '';
-        if (inpName) inpName.value = ic.remoteName || '';
-      }
-    }
-    // Populate outputs
-    const outRows = document.querySelectorAll('#outputsTable tbody tr');
-    for (let i = 0; i < MAX_OUTPUTS; i++) {
-      const row = outRows[i];
-      const oc = cfg.outputs[i] || {};
-      row.querySelector('.out-active').checked = oc.active || false;
-      row.querySelector('.out-name').value = oc.name || '';
-      row.querySelector('.out-type').value = oc.type || 'disabled';
-      row.querySelector('.out-scale').value = oc.scale != null ? oc.scale : 1;
-      row.querySelector('.out-offset').value = oc.offset != null ? oc.offset : 0;
-      updateOutputParam(row);
-      if ((oc.type === 'pwm010' || oc.type === 'gpio')) {
-        const selPin = row.querySelector('.param-pin');
-        if (selPin) selPin.value = oc.pin != null ? oc.pin : '';
-      }
-      if (oc.type === 'pwm010') {
-        const freqInp = row.querySelector('.param-pwm-freq');
-        if (freqInp) freqInp.value = oc.pwmFreq != null ? oc.pwmFreq : 2000;
-      }
-    }
+    const modules = cfg.modules || {};
+    document.getElementById('modAds').checked = !!modules.ads1115;
+    document.getElementById('modPwm').checked = !!modules.pwm010;
+    document.getElementById('modDac').checked = !!modules.mcp4725;
+    document.getElementById('modZmpt').checked = !!modules.zmpt;
+    document.getElementById('modZmct').checked = !!modules.zmct;
+    document.getElementById('modDiv').checked = !!modules.div;
+    inputs = Array.isArray(cfg.inputs) ? cfg.inputs.slice(0, MAX_INPUTS).map(normaliseInput) : [];
+    outputs = Array.isArray(cfg.outputs) ? cfg.outputs.slice(0, MAX_OUTPUTS).map(normaliseOutput) : [];
+    renderIoList('input');
+    renderIoList('output');
     knownPeers.clear();
     if (Array.isArray(cfg.peers)) {
       cfg.peers.forEach(peer => {
@@ -355,57 +752,53 @@ async function saveConfig() {
   cfg.modules = {
     ads1115: document.getElementById('modAds').checked,
     pwm010:  document.getElementById('modPwm').checked,
+    mcp4725: document.getElementById('modDac').checked,
     zmpt:    document.getElementById('modZmpt').checked,
     zmct:    document.getElementById('modZmct').checked,
     div:     document.getElementById('modDiv').checked
   };
-  // Inputs
-  cfg.inputCount = MAX_INPUTS;
-  cfg.inputs = [];
-  const inRows = document.querySelectorAll('#inputsTable tbody tr');
-  inRows.forEach((row, idx) => {
-    const active = row.querySelector('.in-active').checked;
-    const name = row.querySelector('.in-name').value || ('IN'+(idx+1));
-    const type = row.querySelector('.in-type').value;
-    const scale = parseFloat(row.querySelector('.in-scale').value) || 1;
-    const offset = parseFloat(row.querySelector('.in-offset').value) || 0;
-    const unit = row.querySelector('.in-unit').value || '';
-    const obj = { name: name, type: type, scale: scale, offset: offset, unit: unit, active: active };
-    if (type === 'adc' || type === 'div' || type === 'zmpt' || type === 'zmct') {
-      const selPin = row.querySelector('.param-pin');
-      obj.pin = selPin ? selPin.value : '';
-    } else if (type === 'ads1115') {
-      const selCh = row.querySelector('.param-ads');
-      obj.adsChannel = selCh ? parseInt(selCh.value) : 0;
-    } else if (type === 'remote') {
-      const inpNode = row.querySelector('.param-remote-node');
-      const inpName = row.querySelector('.param-remote-name');
-      obj.remoteNode = inpNode ? inpNode.value : '';
-      obj.remoteName = inpName ? inpName.value : '';
+  cfg.inputs = inputs.slice(0, MAX_INPUTS).map((item, idx) => {
+    const obj = {
+      name: item.name || `IN${idx + 1}`,
+      type: item.type,
+      scale: Number.isFinite(item.scale) ? item.scale : 1,
+      offset: Number.isFinite(item.offset) ? item.offset : 0,
+      unit: item.unit || '',
+      active: !!item.active
+    };
+    if (['adc','div','zmpt','zmct'].includes(item.type)) {
+      obj.pin = item.pin || '';
     }
-    cfg.inputs.push(obj);
+    if (item.type === 'ads1115') {
+      obj.adsChannel = Number.isFinite(item.adsChannel) ? parseInt(item.adsChannel, 10) : 0;
+    }
+    if (item.type === 'remote') {
+      obj.remoteNode = item.remoteNode || '';
+      obj.remoteName = item.remoteName || '';
+    }
+    return obj;
   });
-  // Outputs
-  cfg.outputCount = MAX_OUTPUTS;
-  cfg.outputs = [];
-  const outRows = document.querySelectorAll('#outputsTable tbody tr');
-  outRows.forEach((row, idx) => {
-    const active = row.querySelector('.out-active').checked;
-    const name = row.querySelector('.out-name').value || ('OUT'+(idx+1));
-    const type = row.querySelector('.out-type').value;
-    const scale = parseFloat(row.querySelector('.out-scale').value) || 1;
-    const offset = parseFloat(row.querySelector('.out-offset').value) || 0;
-    const obj = { name: name, type: type, scale: scale, offset: offset, active: active };
-    if (type === 'pwm010' || type === 'gpio') {
-      const selPin = row.querySelector('.param-pin');
-      obj.pin = selPin ? selPin.value : '';
+  cfg.inputCount = cfg.inputs.length;
+  cfg.outputs = outputs.slice(0, MAX_OUTPUTS).map((item, idx) => {
+    const obj = {
+      name: item.name || `OUT${idx + 1}`,
+      type: item.type,
+      scale: Number.isFinite(item.scale) ? item.scale : 1,
+      offset: Number.isFinite(item.offset) ? item.offset : 0,
+      active: !!item.active
+    };
+    if (['pwm010','gpio'].includes(item.type)) {
+      obj.pin = item.pin || '';
     }
-    if (type === 'pwm010') {
-      const freqInp = row.querySelector('.param-pwm-freq');
-      obj.pwmFreq = freqInp ? parseInt(freqInp.value) : 2000;
+    if (item.type === 'pwm010') {
+      obj.pwmFreq = Number.isFinite(item.pwmFreq) ? Math.max(1, Math.round(item.pwmFreq)) : 2000;
     }
-    cfg.outputs.push(obj);
+    if (item.type === 'mcp4725') {
+      obj.i2cAddress = item.i2cAddress && item.i2cAddress.length ? item.i2cAddress : '0x60';
+    }
+    return obj;
   });
+  cfg.outputCount = cfg.outputs.length;
   cfg.peers = [];
   knownPeers.forEach((pin, nodeId) => {
     if (!nodeId) return;
@@ -548,7 +941,6 @@ async function refreshDiscovery() {
 
 // Event listeners
 window.addEventListener('DOMContentLoaded', () => {
-  buildTables();
   discoveryTableBody = document.querySelector('#discoveryTable tbody');
   discoveryStatusEl = document.getElementById('discoveryStatus');
   const scanBtn = document.getElementById('scanBtn');
@@ -557,7 +949,39 @@ window.addEventListener('DOMContentLoaded', () => {
       refreshDiscovery();
     });
   }
+  const addInputBtn = document.getElementById('addInputBtn');
+  if (addInputBtn) {
+    addInputBtn.addEventListener('click', addInput);
+  }
+  const addOutputBtn = document.getElementById('addOutputBtn');
+  if (addOutputBtn) {
+    addOutputBtn.addEventListener('click', addOutput);
+  }
+  const modalForm = document.getElementById('modalForm');
+  if (modalForm) {
+    modalForm.addEventListener('submit', handleModalSubmit);
+  }
+  const modalCancel = document.getElementById('modalCancel');
+  if (modalCancel) {
+    modalCancel.addEventListener('click', closeIoModal);
+  }
+  const modal = document.getElementById('ioModal');
+  if (modal) {
+    modal.addEventListener('click', (ev) => {
+      if (ev.target === modal) {
+        closeIoModal();
+      }
+    });
+  }
+  window.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && modalState) {
+      closeIoModal();
+    }
+  });
+  renderIoList('input');
+  renderIoList('output');
   renderDiscoveryRows();
+  showHideWifi();
   ensureSession()
     .then(() => {
       loadConfig();
@@ -571,19 +995,6 @@ window.addEventListener('DOMContentLoaded', () => {
         discoveryStatusEl.textContent = 'Session requise pour scanner le réseau.';
       }
     });
-  // Update input param cells when type changes
-  document.querySelector('#inputsTable').addEventListener('change', (e) => {
-    if (e.target.classList.contains('in-type')) {
-      const row = e.target.closest('tr');
-      updateInputParam(row);
-    }
-  });
-  document.querySelector('#outputsTable').addEventListener('change', (e) => {
-    if (e.target.classList.contains('out-type')) {
-      const row = e.target.closest('tr');
-      updateOutputParam(row);
-    }
-  });
   document.getElementById('wifiMode').addEventListener('change', showHideWifi);
   document.getElementById('saveBtn').addEventListener('click', () => {
     document.getElementById('status').textContent = 'Sauvegarde...';
