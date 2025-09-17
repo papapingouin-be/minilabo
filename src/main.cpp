@@ -31,6 +31,7 @@
 #include "build_version.h"
 
 static void logPrintf(const char *fmt, ...);
+static void logMessage(const String &msg);
 
 static const uint8_t FIRMWARE_VERSION_MAJOR = 1;
 static const uint8_t FIRMWARE_VERSION_MINOR = 0;
@@ -85,7 +86,6 @@ static const char *getFirmwareVersion() {
 // ---------------------------------------------------------------------------
 static const char *LOG_PATH = "/log.txt";
 static const char *USER_FILES_DIR = "/private";
-static const char *SAMPLE_FILE_NAME = "sample.html";
 static const char *SAMPLE_FILE_PATH = "/private/sample.html";
 static const char *CONFIG_FILE_PATH = "/private/io_config.json";
 static const char *CONFIG_BACKUP_FILE_PATH = "/private/io_config.bak";
