@@ -597,13 +597,31 @@ window.addEventListener('DOMContentLoaded', () => {
     const file = document.getElementById('fwFile').files[0];
     const st = document.getElementById('fwStatus');
     if (!file) { st.textContent = 'Choisir un fichier'; return; }
+    const formData = new FormData();
+    formData.append('firmware', file, file.name);
     st.textContent = 'Téléversement...';
     try {
-      const resp = await authFetch('/api/ota', {method: 'POST', body: file});
+      const resp = await authFetch('/api/ota', {method: 'POST', body: formData});
       if (resp.ok) {
         st.textContent = 'Mise à jour envoyée, redémarrage...';
       } else {
-        st.textContent = 'Échec de la mise à jour';
+        let message = 'Échec de la mise à jour';
+        try {
+          const data = await resp.clone().json();
+          if (data && data.error) {
+            message = `Échec de la mise à jour (${data.error})`;
+          }
+        } catch (jsonErr) {
+          try {
+            const text = await resp.text();
+            if (text) {
+              message = `Échec de la mise à jour (${text})`;
+            }
+          } catch (_) {
+            // Ignore text parsing errors
+          }
+        }
+        st.textContent = message;
       }
     } catch (err) {
       st.textContent = 'Erreur de mise à jour';
