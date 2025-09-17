@@ -88,7 +88,11 @@ static const char *USER_FILES_DIR = "/private";
 static const char *SAMPLE_FILE_NAME = "sample.html";
 static const char *SAMPLE_FILE_PATH = "/private/sample.html";
 static const char *CONFIG_FILE_PATH = "/private/io_config.json";
+static const char *CONFIG_BACKUP_FILE_PATH = "/private/io_config.bak";
+static const char *CONFIG_TEMP_FILE_PATH = "/private/io_config.tmp";
+static const char *CONFIG_BACKUP_STAGING_PATH = "/private/io_config.bak.tmp";
 static const char *LEGACY_CONFIG_FILE_PATH = "/config.json";
+static const size_t CONFIG_JSON_CAPACITY = 9216;
 static const char SAMPLE_FILE_CONTENT[] = R"rawliteral(
 <!DOCTYPE html>
 <html lang="fr">
@@ -747,6 +751,123 @@ static String formatI2cAddress(uint8_t address) {
   return String(buf);
 }
 
+static void logConfigSummary(const char *prefix) {
+  logPrintf(
+      "%s config summary: nodeId=%s, wifi.mode=%s, ssid=%s, inputs=%u, outputs=%u, peers=%u",
+      prefix, config.nodeId.c_str(), config.wifi.mode.c_str(),
+      config.wifi.ssid.c_str(), static_cast<unsigned>(config.inputCount),
+      static_cast<unsigned>(config.outputCount),
+      static_cast<unsigned>(config.peerCount));
+}
+
+static void logConfigJson(const char *context, JsonDocument &doc) {
+  JsonObject wifiObj = doc["wifi"].as<JsonObject>();
+  bool hadPass = false;
+  String passCopy;
+  if (!wifiObj.isNull() && wifiObj.containsKey("pass")) {
+    passCopy = wifiObj["pass"].as<String>();
+    wifiObj["pass"] = "***";
+    hadPass = true;
+  }
+  String payload;
+  serializeJson(doc, payload);
+  logPrintf("%s config JSON: %s", context, payload.c_str());
+  if (hadPass) {
+    wifiObj["pass"] = passCopy;
+  }
+}
+
+static void populateConfigJson(JsonDocument &doc,
+                               bool includeRuntimeFields = false) {
+  doc.clear();
+  doc["nodeId"] = config.nodeId;
+  if (includeRuntimeFields) {
+    doc["fwVersion"] = getFirmwareVersion();
+  }
+  JsonObject wifiObj = doc.createNestedObject("wifi");
+  wifiObj["mode"] = config.wifi.mode;
+  wifiObj["ssid"] = config.wifi.ssid;
+  wifiObj["pass"] = config.wifi.pass;
+  JsonObject modObj = doc.createNestedObject("modules");
+  modObj["ads1115"] = config.modules.ads1115;
+  modObj["pwm010"] = config.modules.pwm010;
+  modObj["zmpt"] = config.modules.zmpt;
+  modObj["zmct"] = config.modules.zmct;
+  modObj["div"] = config.modules.div;
+  modObj["mcp4725"] = config.modules.mcp4725;
+  doc["inputCount"] = config.inputCount;
+  JsonArray inputsArr = doc.createNestedArray("inputs");
+  for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
+    JsonObject o = inputsArr.createNestedObject();
+    const InputConfig &ic = config.inputs[i];
+    o["name"] = ic.name;
+    o["type"] = inputTypeToString(ic.type);
+    o["pin"] = pinToString(ic.pin);
+    o["adsChannel"] = ic.adsChannel;
+    o["remoteNode"] = ic.remoteNode;
+    o["remoteName"] = ic.remoteName;
+    o["scale"] = ic.scale;
+    o["offset"] = ic.offset;
+    o["unit"] = ic.unit;
+    o["active"] = ic.active;
+  }
+  doc["outputCount"] = config.outputCount;
+  JsonArray outputsArr = doc.createNestedArray("outputs");
+  for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
+    JsonObject o = outputsArr.createNestedObject();
+    const OutputConfig &oc = config.outputs[i];
+    o["name"] = oc.name;
+    o["type"] = outputTypeToString(oc.type);
+    o["pin"] = pinToString(oc.pin);
+    o["pwmFreq"] = oc.pwmFreq;
+    o["i2cAddress"] = formatI2cAddress(oc.i2cAddress);
+    o["scale"] = oc.scale;
+    o["offset"] = oc.offset;
+    o["active"] = oc.active;
+    o["value"] = oc.value;
+  }
+  doc["peerCount"] = config.peerCount;
+  JsonArray peersArr = doc.createNestedArray("peers");
+  for (uint8_t i = 0; i < config.peerCount && i < MAX_PEERS; i++) {
+    JsonObject o = peersArr.createNestedObject();
+    o["nodeId"] = config.peers[i].nodeId;
+    o["pin"] = config.peers[i].pin;
+  }
+}
+
+static bool loadConfigFromPath(const char *path, const char *label) {
+  File f = LittleFS.open(path, "r");
+  if (!f) {
+    logPrintf("Failed to open %s config file: %s", label, path);
+    return false;
+  }
+  size_t size = f.size();
+  std::unique_ptr<char[]> buf(new char[size + 1]);
+  size_t read = f.readBytes(buf.get(), size);
+  f.close();
+  if (read > size) {
+    read = size;
+  }
+  buf[read] = '\0';
+  logPrintf("Reading configuration from %s (%u/%u bytes)", path,
+            static_cast<unsigned>(read), static_cast<unsigned>(size));
+  if (read != size) {
+    logPrintf("Warning: short read on %s (expected %u bytes, got %u)", path,
+              static_cast<unsigned>(size), static_cast<unsigned>(read));
+  }
+  DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
+  DeserializationError err = deserializeJson(doc, buf.get(), read);
+  if (err) {
+    logPrintf("Failed to parse %s config JSON: %s", label, err.c_str());
+    return false;
+  }
+  parseConfigFromJson(doc);
+  logConfigSummary(label);
+  logConfigJson(label, doc);
+  logMessage(String("Configuration loaded from ") + path);
+  return true;
+}
+
 // Default configuration used when no config file is present.  The
 // default Node ID is derived from the MAC address.  The system starts
 // in access point mode to allow initial configuration via the web UI.
@@ -805,132 +926,145 @@ void loadConfig() {
     setDefaultConfig();
     return;
   }
-  if (!LittleFS.exists(CONFIG_FILE_PATH)) {
-    if (LittleFS.exists(LEGACY_CONFIG_FILE_PATH)) {
-      logMessage("Migrating legacy configuration from /config.json");
-      File legacy = LittleFS.open(LEGACY_CONFIG_FILE_PATH, "r");
-      if (legacy) {
-        size_t size = legacy.size();
-        std::unique_ptr<char[]> buf(new char[size + 1]);
-        legacy.readBytes(buf.get(), size);
-        buf[size] = '\0';
-        legacy.close();
-        DynamicJsonDocument doc(6144);
-        auto err = deserializeJson(doc, buf.get());
-        if (!err) {
-          parseConfigFromJson(doc);
-          if (saveConfig()) {
-            LittleFS.remove(LEGACY_CONFIG_FILE_PATH);
-            logMessage("Legacy configuration migrated to /private/io_config.json");
-            return;
-          }
-        } else {
-          logMessage("Legacy config parse failed, applying defaults");
-        }
-      }
+  bool loaded = false;
+  if (LittleFS.exists(CONFIG_FILE_PATH)) {
+    if (loadConfigFromPath(CONFIG_FILE_PATH, "primary")) {
+      loaded = true;
+    } else {
+      logMessage("Primary configuration load failed");
     }
-    logMessage("No config file found, applying defaults");
-    setDefaultConfig();
-    saveConfig();
-    return;
   }
-  File f = LittleFS.open(CONFIG_FILE_PATH, "r");
-  if (!f) {
-    logMessage("Failed to open config file, applying defaults");
-    setDefaultConfig();
-    saveConfig();
-    return;
+  if (!loaded && LittleFS.exists(CONFIG_BACKUP_FILE_PATH)) {
+    logMessage("Attempting to load configuration from backup");
+    if (loadConfigFromPath(CONFIG_BACKUP_FILE_PATH, "backup")) {
+      loaded = true;
+      if (!saveConfig()) {
+        logMessage("Failed to rewrite configuration after restoring backup");
+      }
+    } else {
+      logMessage("Backup configuration load failed");
+    }
   }
-  size_t size = f.size();
-  std::unique_ptr<char[]> buf(new char[size + 1]);
-  f.readBytes(buf.get(), size);
-  buf[size] = '\0';
-  DynamicJsonDocument doc(6144);
-  auto err = deserializeJson(doc, buf.get());
-  if (err) {
-    logMessage("Failed to parse config JSON, applying defaults");
-    setDefaultConfig();
-    saveConfig();
-    return;
+  if (!loaded && LittleFS.exists(LEGACY_CONFIG_FILE_PATH)) {
+    logMessage("Migrating legacy configuration from /config.json");
+    if (loadConfigFromPath(LEGACY_CONFIG_FILE_PATH, "legacy")) {
+      loaded = true;
+      if (saveConfig()) {
+        LittleFS.remove(LEGACY_CONFIG_FILE_PATH);
+        logMessage("Legacy configuration migrated to /private/io_config.json");
+      } else {
+        logMessage("Failed to save migrated configuration");
+      }
+    } else {
+      logMessage("Legacy config parse failed, applying defaults");
+    }
   }
-  parseConfigFromJson(doc);
-  f.close();
-  logMessage("Configuration loaded");
+  if (!loaded) {
+    logMessage("No valid configuration found, applying defaults");
+    setDefaultConfig();
+    if (!saveConfig()) {
+      logMessage("Failed to save default configuration");
+    }
+  }
 }
 
 // Save the current configuration to LittleFS.  If writing fails the
 // operation is silently ignored.  Always call saveConfig() after
 // modifying the global config.  Returns true on success.
 bool saveConfig() {
-  DynamicJsonDocument doc(6144);
-  // Populate JSON document
-  doc["nodeId"] = config.nodeId;
-  JsonObject wifiObj = doc.createNestedObject("wifi");
-  wifiObj["mode"] = config.wifi.mode;
-  wifiObj["ssid"] = config.wifi.ssid;
-  wifiObj["pass"] = config.wifi.pass;
-  JsonObject modObj = doc.createNestedObject("modules");
-  modObj["ads1115"] = config.modules.ads1115;
-  modObj["pwm010"]  = config.modules.pwm010;
-  modObj["zmpt"]    = config.modules.zmpt;
-  modObj["zmct"]    = config.modules.zmct;
-  modObj["div"]     = config.modules.div;
-  modObj["mcp4725"] = config.modules.mcp4725;
-  doc["inputCount"]  = config.inputCount;
-  JsonArray inputsArr = doc.createNestedArray("inputs");
-  for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
-    JsonObject o = inputsArr.createNestedObject();
-    const InputConfig &ic = config.inputs[i];
-    o["name"]       = ic.name;
-    o["type"]       = inputTypeToString(ic.type);
-    o["pin"]        = pinToString(ic.pin);
-    o["adsChannel"] = ic.adsChannel;
-    o["remoteNode"] = ic.remoteNode;
-    o["remoteName"] = ic.remoteName;
-    o["scale"]      = ic.scale;
-    o["offset"]     = ic.offset;
-    o["unit"]       = ic.unit;
-    o["active"]     = ic.active;
+  DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
+  populateConfigJson(doc);
+  logConfigSummary("Saving");
+  logConfigJson("Saving", doc);
+  String payload;
+  if (serializeJson(doc, payload) == 0) {
+    logMessage("Failed to encode config JSON");
+    return false;
   }
-  doc["outputCount"] = config.outputCount;
-  JsonArray outputsArr = doc.createNestedArray("outputs");
-  for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
-    JsonObject o = outputsArr.createNestedObject();
-    const OutputConfig &oc = config.outputs[i];
-    o["name"]   = oc.name;
-    o["type"]   = outputTypeToString(oc.type);
-    o["pin"]    = pinToString(oc.pin);
-    o["pwmFreq"] = oc.pwmFreq;
-    o["i2cAddress"] = formatI2cAddress(oc.i2cAddress);
-    o["scale"]  = oc.scale;
-    o["offset"] = oc.offset;
-    o["active"] = oc.active;
-    o["value"]  = oc.value;
-  }
-  doc["peerCount"] = config.peerCount;
-  JsonArray peerArr = doc.createNestedArray("peers");
-  for (uint8_t i = 0; i < config.peerCount && i < MAX_PEERS; i++) {
-    JsonObject o = peerArr.createNestedObject();
-    const PeerAuth &pa = config.peers[i];
-    o["nodeId"] = pa.nodeId;
-    o["pin"] = pa.pin;
-  }
-  // Write file
   if (!ensureUserDirectory()) {
     logMessage("Failed to ensure private directory for config");
     return false;
   }
-  File f = LittleFS.open(CONFIG_FILE_PATH, "w");
-  if (!f) {
-    logMessage("Failed to open config for writing");
+  if (LittleFS.exists(CONFIG_TEMP_FILE_PATH)) {
+    LittleFS.remove(CONFIG_TEMP_FILE_PATH);
+  }
+  File tmp = LittleFS.open(CONFIG_TEMP_FILE_PATH, "w");
+  if (!tmp) {
+    logMessage("Failed to open temporary config for writing");
     return false;
   }
-  if (serializeJson(doc, f) == 0) {
-    logMessage("Failed to write config JSON");
-    f.close();
+  size_t written = tmp.print(payload);
+  tmp.flush();
+  tmp.close();
+  if (written != payload.length()) {
+    logPrintf("Short write when saving config: expected %u bytes, wrote %u",
+              static_cast<unsigned>(payload.length()),
+              static_cast<unsigned>(written));
+    LittleFS.remove(CONFIG_TEMP_FILE_PATH);
     return false;
   }
-  f.close();
+  if (LittleFS.exists(CONFIG_BACKUP_STAGING_PATH)) {
+    LittleFS.remove(CONFIG_BACKUP_STAGING_PATH);
+  }
+  bool hadPreviousBackup = false;
+  if (LittleFS.exists(CONFIG_BACKUP_FILE_PATH)) {
+    if (!LittleFS.rename(CONFIG_BACKUP_FILE_PATH, CONFIG_BACKUP_STAGING_PATH)) {
+      logPrintf("Failed to stage existing backup %s", CONFIG_BACKUP_FILE_PATH);
+      LittleFS.remove(CONFIG_TEMP_FILE_PATH);
+      return false;
+    }
+    hadPreviousBackup = true;
+  }
+  bool primaryRenamed = false;
+  if (LittleFS.exists(CONFIG_FILE_PATH)) {
+    if (!LittleFS.rename(CONFIG_FILE_PATH, CONFIG_BACKUP_FILE_PATH)) {
+      logPrintf("Failed to create backup copy of %s", CONFIG_FILE_PATH);
+      if (hadPreviousBackup) {
+        LittleFS.rename(CONFIG_BACKUP_STAGING_PATH, CONFIG_BACKUP_FILE_PATH);
+      }
+      LittleFS.remove(CONFIG_TEMP_FILE_PATH);
+      return false;
+    }
+    primaryRenamed = true;
+  }
+  if (!LittleFS.rename(CONFIG_TEMP_FILE_PATH, CONFIG_FILE_PATH)) {
+    logPrintf("Failed to commit configuration file %s", CONFIG_FILE_PATH);
+    LittleFS.remove(CONFIG_TEMP_FILE_PATH);
+    if (primaryRenamed) {
+      LittleFS.rename(CONFIG_BACKUP_FILE_PATH, CONFIG_FILE_PATH);
+    }
+    if (hadPreviousBackup) {
+      LittleFS.rename(CONFIG_BACKUP_STAGING_PATH, CONFIG_BACKUP_FILE_PATH);
+    }
+    return false;
+  }
+  // Refresh the backup copy with the new payload
+  File backup = LittleFS.open(CONFIG_BACKUP_FILE_PATH, "w");
+  if (!backup) {
+    logPrintf("Failed to open backup config file %s", CONFIG_BACKUP_FILE_PATH);
+    if (hadPreviousBackup) {
+      LittleFS.rename(CONFIG_BACKUP_STAGING_PATH, CONFIG_BACKUP_FILE_PATH);
+    }
+    return false;
+  }
+  size_t backupWritten = backup.print(payload);
+  backup.flush();
+  backup.close();
+  if (backupWritten != payload.length()) {
+    logPrintf("Short write when saving backup config: expected %u bytes, wrote %u",
+              static_cast<unsigned>(payload.length()),
+              static_cast<unsigned>(backupWritten));
+    LittleFS.remove(CONFIG_BACKUP_FILE_PATH);
+    if (hadPreviousBackup) {
+      LittleFS.rename(CONFIG_BACKUP_STAGING_PATH, CONFIG_BACKUP_FILE_PATH);
+    }
+    return false;
+  }
+  if (hadPreviousBackup) {
+    LittleFS.remove(CONFIG_BACKUP_STAGING_PATH);
+  }
+  logPrintf("Configuration saved to %s (%u bytes)", CONFIG_FILE_PATH,
+            static_cast<unsigned>(payload.length()));
   logMessage("Configuration saved");
   return true;
 }
@@ -1650,58 +1784,8 @@ void registerRoutes(ServerT &server) {
   server.on("/api/config/get", HTTP_GET, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    DynamicJsonDocument doc(4096);
-    doc["nodeId"] = config.nodeId;
-    doc["fwVersion"] = getFirmwareVersion();
-    JsonObject wifiObj = doc.createNestedObject("wifi");
-    wifiObj["mode"] = config.wifi.mode;
-    wifiObj["ssid"] = config.wifi.ssid;
-    wifiObj["pass"] = config.wifi.pass;
-    JsonObject modObj = doc.createNestedObject("modules");
-    modObj["ads1115"] = config.modules.ads1115;
-    modObj["pwm010"] = config.modules.pwm010;
-    modObj["zmpt"] = config.modules.zmpt;
-    modObj["zmct"] = config.modules.zmct;
-    modObj["div"] = config.modules.div;
-    modObj["mcp4725"] = config.modules.mcp4725;
-    doc["inputCount"] = config.inputCount;
-    JsonArray inArr = doc.createNestedArray("inputs");
-    for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
-      JsonObject o = inArr.createNestedObject();
-      const InputConfig &ic = config.inputs[i];
-      o["name"] = ic.name;
-      o["type"] = inputTypeToString(ic.type);
-      o["pin"] = pinToString(ic.pin);
-      o["adsChannel"] = ic.adsChannel;
-      o["remoteNode"] = ic.remoteNode;
-      o["remoteName"] = ic.remoteName;
-      o["scale"] = ic.scale;
-      o["offset"] = ic.offset;
-      o["unit"] = ic.unit;
-      o["active"] = ic.active;
-    }
-    doc["outputCount"] = config.outputCount;
-    JsonArray outArr = doc.createNestedArray("outputs");
-    for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
-      JsonObject o = outArr.createNestedObject();
-      const OutputConfig &oc = config.outputs[i];
-      o["name"] = oc.name;
-      o["type"] = outputTypeToString(oc.type);
-      o["pin"] = pinToString(oc.pin);
-      o["pwmFreq"] = oc.pwmFreq;
-      o["i2cAddress"] = formatI2cAddress(oc.i2cAddress);
-      o["scale"] = oc.scale;
-      o["offset"] = oc.offset;
-      o["active"] = oc.active;
-      o["value"] = oc.value;
-    }
-    doc["peerCount"] = config.peerCount;
-    JsonArray peerArr = doc.createNestedArray("peers");
-    for (uint8_t i = 0; i < config.peerCount && i < MAX_PEERS; i++) {
-      JsonObject o = peerArr.createNestedObject();
-      o["nodeId"] = config.peers[i].nodeId;
-      o["pin"] = config.peers[i].pin;
-    }
+    DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
+    populateConfigJson(doc, true);
     String payload;
     serializeJson(doc, payload);
     srv->send(200, "application/json", payload);
@@ -1715,7 +1799,7 @@ void registerRoutes(ServerT &server) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
     }
-    DynamicJsonDocument doc(8192);
+    DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
     if (deserializeJson(doc, body)) {
       srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
       return;
