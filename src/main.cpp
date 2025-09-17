@@ -1102,12 +1102,17 @@ void parseConfigFromJson(const JsonDocument &doc) {
   config.inputCount = 0;
   if (doc.containsKey("inputs") && doc["inputs"].is<JsonArray>()) {
     JsonArrayConst arr = doc["inputs"].as<JsonArrayConst>();
-    for (JsonObjectConst o : arr) {
-      if (config.inputCount >= MAX_INPUTS) break;
+    uint8_t desired = min((uint8_t)arr.size(), MAX_INPUTS);
+    for (uint8_t idx = 0; idx < desired; ++idx) {
+      JsonVariantConst entry = arr[idx];
+      if (!entry.is<JsonObject>()) {
+        continue;
+      }
+      JsonObjectConst o = entry.as<JsonObjectConst>();
       InputConfig &ic = config.inputs[config.inputCount];
       if (o.containsKey("name")) ic.name = o["name"].as<String>();
       if (o.containsKey("type")) ic.type = parseInputType(o["type"].as<String>());
-      if (o.containsKey("pin"))  ic.pin = parsePin(o["pin"].as<String>());
+      if (o.containsKey("pin")) ic.pin = parsePin(o["pin"].as<String>());
       if (o.containsKey("adsChannel")) ic.adsChannel = o["adsChannel"].as<int>();
       if (o.containsKey("remoteNode")) ic.remoteNode = o["remoteNode"].as<String>();
       if (o.containsKey("remoteName")) ic.remoteName = o["remoteName"].as<String>();
@@ -1125,12 +1130,17 @@ void parseConfigFromJson(const JsonDocument &doc) {
   config.outputCount = 0;
   if (doc.containsKey("outputs") && doc["outputs"].is<JsonArray>()) {
     JsonArrayConst arr = doc["outputs"].as<JsonArrayConst>();
-    for (JsonObjectConst o : arr) {
-      if (config.outputCount >= MAX_OUTPUTS) break;
+    uint8_t desired = min((uint8_t)arr.size(), MAX_OUTPUTS);
+    for (uint8_t idx = 0; idx < desired; ++idx) {
+      JsonVariantConst entry = arr[idx];
+      if (!entry.is<JsonObject>()) {
+        continue;
+      }
+      JsonObjectConst o = entry.as<JsonObjectConst>();
       OutputConfig &oc = config.outputs[config.outputCount];
       if (o.containsKey("name")) oc.name = o["name"].as<String>();
       if (o.containsKey("type")) oc.type = parseOutputType(o["type"].as<String>());
-      if (o.containsKey("pin"))  oc.pin = parsePin(o["pin"].as<String>());
+      if (o.containsKey("pin")) oc.pin = parsePin(o["pin"].as<String>());
       if (o.containsKey("pwmFreq")) oc.pwmFreq = o["pwmFreq"].as<int>();
       if (o.containsKey("i2cAddress")) oc.i2cAddress = parseI2cAddress(o["i2cAddress"].as<String>());
       if (o.containsKey("scale")) oc.scale = o["scale"].as<float>();
