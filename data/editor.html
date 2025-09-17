@@ -4,34 +4,40 @@
   <meta charset="utf-8">
   <title>Éditeur de fichiers</title>
   <style>
-    body { margin:0; display:flex; height:100vh; font-family: Arial, sans-serif; }
-    #fileList { width:240px; border-right:1px solid #ccc; padding:0.75em; overflow-y:auto; background:#fafafa; }
-    #fileList h2 { margin:0 0 0.2em 0; font-size:1.1em; }
-    #fileList .hint { font-size:0.85em; color:#666; margin:0 0 0.8em 0; }
-    #fileList a { display:block; padding:4px 2px; color:#0066cc; text-decoration:none; border-radius:4px; }
-    #fileList a:hover { background:#e6f0ff; }
-    #fileList a.active { font-weight:bold; color:#202020; background:#dbe8ff; }
-    #fileList .empty { font-size:0.9em; color:#888; }
-    #main { flex:1; display:flex; flex-direction:column; }
-    #toolbar { padding:0.6em; border-bottom:1px solid #ccc; display:flex; align-items:center; flex-wrap:wrap; gap:0.5em; }
-    #toolbar button { padding:0.4em 0.9em; }
-    #currentFile { margin-left:auto; font-weight:bold; }
-    #message { font-size:0.9em; }
-    #message.error { color:#c0392b; }
-    #message.success { color:#1e8449; }
-    #editor { flex:1; }
+    body { margin: 0; display: flex; height: 100vh; font-family: Arial, sans-serif; }
+    #fileList { width: 260px; border-right: 1px solid #ccc; padding: 0.75em; overflow-y: auto; background: #fafafa; box-sizing: border-box; }
+    #fileList h2 { margin: 0 0 0.2em 0; font-size: 1.1em; }
+    #fileList .hint { font-size: 0.85em; color: #666; margin: 0 0 0.8em 0; }
+    #fileList a { display: flex; justify-content: space-between; align-items: center; padding: 4px 6px; color: #0066cc; text-decoration: none; border-radius: 4px; gap: 0.5em; }
+    #fileList a:hover { background: #e6f0ff; }
+    #fileList a.active { font-weight: bold; color: #202020; background: #dbe8ff; }
+    #fileList a .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #fileList a .size { font-size: 0.8em; color: #666; }
+    #fileList .empty { font-size: 0.9em; color: #888; }
+    #main { flex: 1; display: flex; flex-direction: column; }
+    #toolbar { padding: 0.6em; border-bottom: 1px solid #ccc; display: flex; align-items: center; flex-wrap: wrap; gap: 0.5em; }
+    #toolbar button { padding: 0.4em 0.9em; }
+    #toolbar button:disabled { opacity: 0.6; cursor: default; }
+    #message { font-size: 0.9em; min-height: 1.2em; flex: 1; }
+    #message.error { color: #c0392b; }
+    #message.success { color: #1e8449; }
+    #currentFile { margin-left: auto; font-weight: bold; }
+    #editor { flex: 1; }
   </style>
 </head>
 <body>
   <div id="fileList">
     <h2>Fichiers privés</h2>
-    <p class="hint">Répertoire : <code>/private</code></p>
-    <p class="hint">Seul le fichier <code>sample.html</code> est disponible pour modification.</p>
+    <p class="hint">Répertoire&nbsp;: <code>/private</code></p>
+    <p class="hint">Tous les fichiers disponibles sont listés ci-dessous.</p>
     <div id="fileListContent"></div>
   </div>
   <div id="main">
     <div id="toolbar">
-      <button id="saveBtn" disabled>Enregistrer</button>
+      <button id="newBtn" type="button">Nouveau fichier</button>
+      <button id="renameBtn" type="button" disabled>Renommer</button>
+      <button id="deleteBtn" type="button" disabled>Supprimer</button>
+      <button id="saveBtn" type="button" disabled>Enregistrer</button>
       <span id="message"></span>
       <span id="currentFile">Aucun fichier ouvert</span>
     </div>
@@ -59,7 +65,11 @@
       const currentFileLabel = document.getElementById('currentFile');
       const messageLabel = document.getElementById('message');
       const saveBtn = document.getElementById('saveBtn');
+      const newBtn = document.getElementById('newBtn');
+      const renameBtn = document.getElementById('renameBtn');
+      const deleteBtn = document.getElementById('deleteBtn');
       const DEFAULT_FILE = 'sample.html';
+      const FILE_NAME_REGEX = /^(?!\.)[A-Za-z0-9._-]{1,64}$/;
       const ERROR_MESSAGES = {
         exists: 'Un fichier portant ce nom existe déjà.',
         'not found': 'Fichier introuvable.',
@@ -69,6 +79,8 @@
         'open failed': 'Impossible d\'ouvrir le fichier sur le module.',
         'delete failed': 'Suppression impossible.',
         'rename failed': 'Impossible de renommer le fichier.',
+        'create failed': 'Impossible de créer le fichier.',
+        'missing path': 'Chemin de fichier manquant.',
         'No body': 'Requête invalide.',
         'Invalid JSON': 'JSON invalide.',
         forbidden: 'Opération non autorisée.'
@@ -97,6 +109,8 @@
 
       function updateToolbar() {
         saveBtn.disabled = !currentPath || !isDirty;
+        renameBtn.disabled = !currentPath;
+        deleteBtn.disabled = !currentPath;
         currentFileLabel.textContent = currentPath
           ? `Fichier : ${currentPath}${isDirty ? ' *' : ''}`
           : 'Aucun fichier ouvert';
@@ -160,6 +174,23 @@
         return 'ace/mode/html';
       }
 
+      function formatFileSize(bytes) {
+        if (typeof bytes !== 'number' || Number.isNaN(bytes)) {
+          return '';
+        }
+        if (bytes >= 1024 * 1024) {
+          return `${(bytes / (1024 * 1024)).toFixed(1)} Mo`;
+        }
+        if (bytes >= 1024) {
+          return `${(bytes / 1024).toFixed(1)} Ko`;
+        }
+        return `${bytes} o`;
+      }
+
+      function isValidFileName(name) {
+        return FILE_NAME_REGEX.test(name);
+      }
+
       async function loadFileList() {
         try {
           const resp = await authFetch('/api/files/list');
@@ -168,35 +199,63 @@
             throw new Error(extractErrorMessage(text, 'Erreur lors du chargement.'));
           }
           const data = await resp.json();
-          const files = Array.isArray(data)
-            ? data.filter(name => name === DEFAULT_FILE)
-            : [];
+          const rawFiles = Array.isArray(data.files)
+            ? data.files
+            : (Array.isArray(data) ? data : []);
+          const files = rawFiles
+            .map(item => {
+              if (typeof item === 'string') {
+                return { name: item, size: 0 };
+              }
+              if (item && typeof item.name === 'string') {
+                const sizeValue = typeof item.size === 'number'
+                  ? item.size
+                  : parseInt(item.size, 10);
+                return {
+                  name: item.name,
+                  size: Number.isFinite(sizeValue) ? sizeValue : 0
+                };
+              }
+              return null;
+            })
+            .filter(Boolean)
+            .sort((a, b) => a.name.localeCompare(b.name, 'fr', { sensitivity: 'base' }));
           fileListContainer.innerHTML = '';
           if (files.length === 0) {
             const empty = document.createElement('p');
             empty.className = 'empty';
-            empty.textContent = 'Fichier sample.html introuvable.';
+            empty.textContent = 'Aucun fichier disponible. Utilisez « Nouveau fichier » pour en créer un.';
             fileListContainer.appendChild(empty);
             selectFileLink('');
-            return [];
+            updateToolbar();
+            return files;
           }
-          files.forEach(name => {
+          files.forEach(file => {
             const link = document.createElement('a');
             link.href = '#';
-            link.dataset.path = name;
-            link.textContent = name;
+            link.dataset.path = file.name;
+            const nameSpan = document.createElement('span');
+            nameSpan.className = 'name';
+            nameSpan.textContent = file.name;
+            const sizeSpan = document.createElement('span');
+            sizeSpan.className = 'size';
+            sizeSpan.textContent = formatFileSize(file.size);
+            link.appendChild(nameSpan);
+            link.appendChild(sizeSpan);
             link.addEventListener('click', evt => {
               evt.preventDefault();
-              openFile(name);
+              openFile(file.name);
             });
             fileListContainer.appendChild(link);
           });
           selectFileLink(currentPath);
+          updateToolbar();
           return files;
         } catch (err) {
           fileListContainer.innerHTML = '<p class="empty">Impossible de charger la liste.</p>';
           setMessage(err.message || 'Erreur de lecture du répertoire privé.', 'error');
           console.error(err);
+          updateToolbar();
           return [];
         }
       }
@@ -255,7 +314,123 @@
         }
       }
 
+      async function createNewFile() {
+        const input = prompt('Nom du nouveau fichier :');
+        if (input === null) return;
+        const name = input.trim();
+        if (name.length === 0) {
+          setMessage('Le nom du fichier ne peut pas être vide.', 'error');
+          return;
+        }
+        if (!isValidFileName(name)) {
+          setMessage('Nom de fichier invalide. Utilisez uniquement lettres, chiffres, ".", "_" ou "-".', 'error');
+          return;
+        }
+        try {
+          const resp = await authFetch('/api/files/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: name, content: '' })
+          });
+          const payload = await resp.text();
+          if (!resp.ok) {
+            throw new Error(extractErrorMessage(payload, 'Échec de la création du fichier.'));
+          }
+          const files = await loadFileList();
+          const exists = files.some(file => file.name === name);
+          if (exists) {
+            await openFile(name);
+          }
+          setMessage(`Fichier "${name}" créé.`, 'success');
+        } catch (err) {
+          setMessage(err.message, 'error');
+          console.error(err);
+        }
+      }
+
+      async function renameCurrentFile() {
+        if (!currentPath) return;
+        const input = prompt('Nouveau nom du fichier :', currentPath);
+        if (input === null) return;
+        const name = input.trim();
+        if (name.length === 0) {
+          setMessage('Le nom du fichier ne peut pas être vide.', 'error');
+          return;
+        }
+        if (name === currentPath) {
+          return;
+        }
+        if (!isValidFileName(name)) {
+          setMessage('Nom de fichier invalide. Utilisez uniquement lettres, chiffres, ".", "_" ou "-".', 'error');
+          return;
+        }
+        try {
+          const resp = await authFetch('/api/files/rename', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ from: currentPath, to: name })
+          });
+          const payload = await resp.text();
+          if (!resp.ok) {
+            throw new Error(extractErrorMessage(payload, 'Échec du renommage.'));
+          }
+          currentPath = name;
+          await loadFileList();
+          selectFileLink(currentPath);
+          updateToolbar();
+          setMessage(`Fichier renommé en "${name}".`, 'success');
+        } catch (err) {
+          setMessage(err.message, 'error');
+          console.error(err);
+        }
+      }
+
+      async function deleteCurrentFile() {
+        if (!currentPath) return;
+        const confirmationMessage = isDirty
+          ? 'Ce fichier contient des modifications non enregistrées. Supprimer malgré tout ?'
+          : `Supprimer définitivement le fichier "${currentPath}" ?`;
+        if (!confirm(confirmationMessage)) {
+          return;
+        }
+        const deletedName = currentPath;
+        try {
+          const resp = await authFetch('/api/files/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: deletedName })
+          });
+          const payload = await resp.text();
+          if (!resp.ok) {
+            throw new Error(extractErrorMessage(payload, 'Échec de la suppression.'));
+          }
+          suppressDirtyEvents = true;
+          editor.setValue('', -1);
+          if (editor.session && editor.session.getUndoManager) {
+            editor.session.getUndoManager().reset();
+          }
+          suppressDirtyEvents = false;
+          currentPath = '';
+          setDirty(false);
+          const files = await loadFileList();
+          if (files.length > 0) {
+            const defaultEntry = files.find(file => file.name === DEFAULT_FILE);
+            const next = defaultEntry ? defaultEntry.name : files[0].name;
+            await openFile(next);
+            setMessage(`Fichier "${deletedName}" supprimé.`, 'success');
+          } else {
+            setMessage(`Fichier "${deletedName}" supprimé.`, 'success');
+          }
+        } catch (err) {
+          setMessage(err.message, 'error');
+          console.error(err);
+        }
+      }
+
       saveBtn.addEventListener('click', saveCurrentFile);
+      newBtn.addEventListener('click', createNewFile);
+      renameBtn.addEventListener('click', renameCurrentFile);
+      deleteBtn.addEventListener('click', deleteCurrentFile);
 
       if (editor.session && typeof editor.session.on === 'function') {
         editor.session.on('change', () => {
@@ -269,8 +444,10 @@
       ensureSession()
         .then(async () => {
           const files = await loadFileList();
-          if (Array.isArray(files) && files.includes(DEFAULT_FILE)) {
-            await openFile(DEFAULT_FILE);
+          if (files.length > 0) {
+            const defaultEntry = files.find(file => file.name === DEFAULT_FILE);
+            const target = defaultEntry ? defaultEntry.name : files[0].name;
+            await openFile(target);
           }
         })
         .catch(err => {
