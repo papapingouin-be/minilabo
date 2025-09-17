@@ -660,6 +660,57 @@ void updateRemoteValue(const String &nodeId, const String &inputName, float val)
 float getRemoteValue(const String &nodeId, const String &inputName);
 int parsePin(const String &p);
 String pinToString(int pin);
+static const InputConfig *findInputByName(const Config &cfg, const String &name);
+static const OutputConfig *findOutputByName(const Config &cfg, const String &name);
+static String describePinValue(int pin);
+static String describeOptionalInt(int value);
+static String diffInputConfig(const InputConfig &before, const InputConfig &after);
+static String diffOutputConfig(const OutputConfig &before, const OutputConfig &after);
+static uint8_t parseI2cAddress(const String &s);
+static String formatI2cAddress(uint8_t address);
+static const char *describeJsonType(const JsonVariantConst &value);
+
+template <typename ArrayHandler, typename ObjectHandler>
+static bool parseJsonContainerString(const String &rawValue,
+                                     ArrayHandler &&handleArray,
+                                     ObjectHandler &&handleObject,
+                                     const char *contextLabel) {
+  if (rawValue.length() == 0) {
+    return false;
+  }
+  String toParse = rawValue;
+  for (uint8_t depth = 0; depth < 3; ++depth) {
+    String trimmed = toParse;
+    trimmed.trim();
+    if (trimmed.length() == 0) {
+      return false;
+    }
+    DynamicJsonDocument nested(CONFIG_JSON_CAPACITY);
+    DeserializationError err = deserializeJson(nested, trimmed);
+    if (err) {
+      logPrintf("Failed to parse %s JSON string: %s", contextLabel,
+                err.c_str());
+      return false;
+    }
+    JsonArrayConst arr = nested.as<JsonArrayConst>();
+    if (!arr.isNull()) {
+      handleArray(arr);
+      return true;
+    }
+    JsonObjectConst obj = nested.as<JsonObjectConst>();
+    if (!obj.isNull()) {
+      handleObject(obj);
+      return true;
+    }
+    if (nested.is<const char *>()) {
+      toParse = nested.as<String>();
+      continue;
+    }
+    break;
+  }
+  return false;
+}
+
 void parseConfigFromJson(const JsonDocument &doc,
                          Config &target,
                          const Config *previous,
@@ -1183,6 +1234,10 @@ void parseConfigFromJson(const JsonDocument &doc,
   }
 }
 
+void parseConfigFromJson(const JsonDocument &doc, Config &target) {
+  parseConfigFromJson(doc, target, nullptr, false);
+}
+
 
 
 // Utility to convert a numeric pin back to a string.  Only common
@@ -1245,47 +1300,6 @@ static const char *describeJsonType(const JsonVariantConst &value) {
   if (value.is<long>() || value.is<int>()) return "integer";
   if (value.is<unsigned long>() || value.is<unsigned int>()) return "unsigned";
   return "unknown";
-}
-
-template <typename ArrayHandler, typename ObjectHandler>
-static bool parseJsonContainerString(const String &rawValue,
-                                     ArrayHandler &&handleArray,
-                                     ObjectHandler &&handleObject,
-                                     const char *contextLabel) {
-  if (rawValue.length() == 0) {
-    return false;
-  }
-  String toParse = rawValue;
-  for (uint8_t depth = 0; depth < 3; ++depth) {
-    String trimmed = toParse;
-    trimmed.trim();
-    if (trimmed.length() == 0) {
-      return false;
-    }
-    DynamicJsonDocument nested(CONFIG_JSON_CAPACITY);
-    DeserializationError err = deserializeJson(nested, trimmed);
-    if (err) {
-      logPrintf("Failed to parse %s JSON string: %s", contextLabel,
-                err.c_str());
-      return false;
-    }
-    JsonArrayConst arr = nested.as<JsonArrayConst>();
-    if (!arr.isNull()) {
-      handleArray(arr);
-      return true;
-    }
-    JsonObjectConst obj = nested.as<JsonObjectConst>();
-    if (!obj.isNull()) {
-      handleObject(obj);
-      return true;
-    }
-    if (nested.is<const char *>()) {
-      toParse = nested.as<String>();
-      continue;
-    }
-    break;
-  }
-  return false;
 }
 
 static void logConfigSummary(const char *prefix) {
