@@ -28,13 +28,15 @@
 #include <memory>
 #include <cstdlib>
 
+#include "build_version.h"
+
 static void logPrintf(const char *fmt, ...);
 
 static const uint8_t FIRMWARE_VERSION_MAJOR = 1;
 static const uint8_t FIRMWARE_VERSION_MINOR = 0;
-static const char *VERSION_COUNTER_PATH = "/fw_version.dat";
 static bool logStorageReady = false;
-static String firmwareVersion = "1.0.0";
+static bool littleFsFormatAttempted = false;
+static String firmwareVersion = "0.0.0";
 
 static String formatFirmwareVersion(uint32_t patch) {
   char buf[24];
@@ -44,40 +46,31 @@ static String formatFirmwareVersion(uint32_t patch) {
   return String(buf);
 }
 
-static void loadAndIncrementFirmwareVersion() {
-  if (!logStorageReady && !LittleFS.begin()) {
-    Serial.println("LittleFS unavailable, firmware version counter disabled");
-    return;
+static bool ensureLittleFsReady(bool allowFormat = false) {
+  if (logStorageReady) {
+    return true;
   }
-  if (!logStorageReady) {
+  if (LittleFS.begin()) {
     logStorageReady = true;
+    return true;
   }
-
-  uint32_t storedPatch = 0;
-  bool hadStoredValue = false;
-  if (LittleFS.exists(VERSION_COUNTER_PATH)) {
-    File f = LittleFS.open(VERSION_COUNTER_PATH, "r");
-    if (f) {
-      String contents = f.readStringUntil('\n');
-      storedPatch = static_cast<uint32_t>(contents.toInt());
-      hadStoredValue = true;
-      f.close();
+  if (allowFormat && !littleFsFormatAttempted) {
+    Serial.println("LittleFS mount failed, formatting...");
+    LittleFS.format();
+    littleFsFormatAttempted = true;
+    if (LittleFS.begin()) {
+      logStorageReady = true;
+      return true;
     }
   }
+  return false;
+}
 
-  uint32_t patchNumber = hadStoredValue ? storedPatch + 1 : 0;
-  firmwareVersion = formatFirmwareVersion(patchNumber);
-
-  File f = LittleFS.open(VERSION_COUNTER_PATH, "w");
-  if (f) {
-    f.println(static_cast<unsigned long>(patchNumber));
-    f.close();
-  } else {
-    Serial.println("Failed to persist firmware version counter");
-  }
-
+static void initFirmwareVersion() {
+  firmwareVersion = formatFirmwareVersion(BuildInfo::kFirmwarePatch);
   logPrintf("Firmware version initialised to %s (build %lu)",
-            firmwareVersion.c_str(), static_cast<unsigned long>(patchNumber));
+            firmwareVersion.c_str(),
+            static_cast<unsigned long>(BuildInfo::kFirmwarePatch));
 }
 
 static const char *getFirmwareVersion() {
@@ -112,6 +105,10 @@ static const char SAMPLE_FILE_CONTENT[] = R"rawliteral(
 )rawliteral";
 
 static bool ensureUserDirectory() {
+  if (!ensureLittleFsReady(false)) {
+    Serial.println("LittleFS unavailable, cannot ensure private directory");
+    return false;
+  }
   if (LittleFS.exists(USER_FILES_DIR)) {
     return true;
   }
@@ -379,13 +376,7 @@ static void oledLog(const String &msg) {
 static const size_t MAX_LOG_FILE_SIZE = 16 * 1024;  // 16 KB
 
 static void initLogging() {
-  logStorageReady = LittleFS.begin();
-  if (!logStorageReady) {
-    Serial.println("LittleFS mount failed, formatting...");
-    LittleFS.format();
-    logStorageReady = LittleFS.begin();
-  }
-  if (!logStorageReady) {
+  if (!ensureLittleFsReady(true)) {
     Serial.println("LittleFS unavailable, file logging disabled");
     return;
   }
@@ -402,11 +393,9 @@ static void initLogging() {
 
 static void logMessage(const String &msg) {
   Serial.println(msg);
-  if (!logStorageReady) {
-    logStorageReady = LittleFS.begin();
-    if (!logStorageReady) {
-      return;
-    }
+  if (!ensureLittleFsReady(false)) {
+    oledLog(msg);
+    return;
   }
   File f = LittleFS.open(LOG_PATH, "a");
   if (!f) {
@@ -806,12 +795,16 @@ void setDefaultConfig() {
 // error) the default configuration is applied and saved back to
 // LittleFS.  JSON fields missing from the file fall back to defaults.
 void loadConfig() {
-  if (!LittleFS.begin()) {
-    logMessage("LittleFS mount failed, formatting...");
-    LittleFS.format();
-    LittleFS.begin();
+  if (!ensureLittleFsReady(false)) {
+    logMessage("LittleFS unavailable, applying defaults");
+    setDefaultConfig();
+    return;
   }
-  ensureUserDirectory();
+  if (!ensureUserDirectory()) {
+    logMessage("Failed to ensure private directory for config");
+    setDefaultConfig();
+    return;
+  }
   if (!LittleFS.exists(CONFIG_FILE_PATH)) {
     if (LittleFS.exists(LEGACY_CONFIG_FILE_PATH)) {
       logMessage("Migrating legacy configuration from /config.json");
@@ -2268,7 +2261,7 @@ void setup() {
   Serial.println();
   bool oledOk = initOled();
   initLogging();
-  loadAndIncrementFirmwareVersion();
+  initFirmwareVersion();
   randomSeed(analogRead(A0) ^ micros() ^ ESP.getCycleCount());
   initialiseSecurity();
   if (!ensureUserDirectory()) {
