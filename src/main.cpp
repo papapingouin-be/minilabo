@@ -25,7 +25,62 @@
 #include <U8g2lib.h>
 #include <Updater.h>
 #include <memory>
-static const char *FIRMWARE_VERSION = "1.0.0";
+
+static void logPrintf(const char *fmt, ...);
+
+static const uint8_t FIRMWARE_VERSION_MAJOR = 1;
+static const uint8_t FIRMWARE_VERSION_MINOR = 0;
+static const char *VERSION_COUNTER_PATH = "/fw_version.dat";
+static bool logStorageReady = false;
+static String firmwareVersion = "1.0.0";
+
+static String formatFirmwareVersion(uint32_t patch) {
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%u.%u.%lu", static_cast<unsigned>(FIRMWARE_VERSION_MAJOR),
+           static_cast<unsigned>(FIRMWARE_VERSION_MINOR),
+           static_cast<unsigned long>(patch));
+  return String(buf);
+}
+
+static void loadAndIncrementFirmwareVersion() {
+  if (!logStorageReady && !LittleFS.begin()) {
+    Serial.println("LittleFS unavailable, firmware version counter disabled");
+    return;
+  }
+  if (!logStorageReady) {
+    logStorageReady = true;
+  }
+
+  uint32_t storedPatch = 0;
+  bool hadStoredValue = false;
+  if (LittleFS.exists(VERSION_COUNTER_PATH)) {
+    File f = LittleFS.open(VERSION_COUNTER_PATH, "r");
+    if (f) {
+      String contents = f.readStringUntil('\n');
+      storedPatch = static_cast<uint32_t>(contents.toInt());
+      hadStoredValue = true;
+      f.close();
+    }
+  }
+
+  uint32_t patchNumber = hadStoredValue ? storedPatch + 1 : 0;
+  firmwareVersion = formatFirmwareVersion(patchNumber);
+
+  File f = LittleFS.open(VERSION_COUNTER_PATH, "w");
+  if (f) {
+    f.println(static_cast<unsigned long>(patchNumber));
+    f.close();
+  } else {
+    Serial.println("Failed to persist firmware version counter");
+  }
+
+  logPrintf("Firmware version initialised to %s (build %lu)",
+            firmwareVersion.c_str(), static_cast<unsigned long>(patchNumber));
+}
+
+static const char *getFirmwareVersion() {
+  return firmwareVersion.c_str();
+}
 
 // ---------------------------------------------------------------------------
 // Simple logging facility.  Log messages are written to Serial and appended
@@ -34,7 +89,6 @@ static const char *FIRMWARE_VERSION = "1.0.0";
 // HTTP for display in the UI.
 // ---------------------------------------------------------------------------
 static const char *LOG_PATH = "/log.txt";
-static bool logStorageReady = false;
 static const char *USER_FILES_DIR = "/private";
 static const char *SAMPLE_FILE_NAME = "sample.html";
 static const char *SAMPLE_FILE_PATH = "/private/sample.html";
@@ -169,11 +223,11 @@ static U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(
     U8G2_R0, /* reset=*/ U8X8_PIN_NONE, /* clock=*/ 14, /* data=*/ 12);
 static bool oledLogging = true;
 static const size_t OLED_STATUS_LINE_COUNT = 3;
-static const size_t OLED_LOG_LINE_COUNT = 1;
+static const size_t OLED_LOG_LINE_COUNT = 3;
 static const size_t OLED_MAX_LINE_CHARS = 21;
-static const uint8_t OLED_STATUS_TOP_MARGIN = 14;
-static const uint8_t OLED_STATUS_LINE_HEIGHT = 16;
-static const uint8_t OLED_LOG_LINE_HEIGHT = 9;
+static const uint8_t OLED_STATUS_TOP_MARGIN = 12;
+static const uint8_t OLED_STATUS_LINE_HEIGHT = 14;
+static const uint8_t OLED_LOG_LINE_HEIGHT = 8;
 static const uint8_t OLED_LOG_BOTTOM_MARGIN = 2;
 static String oledStatusLines[OLED_STATUS_LINE_COUNT];
 static String oledLogBuffer[OLED_LOG_LINE_COUNT];
@@ -1076,7 +1130,7 @@ void sendDiscoveryResponse(const IPAddress &ip, uint16_t port) {
   doc["node"] = config.nodeId;
   IPAddress localIp = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
   doc["ip"] = localIp.toString();
-  doc["fw"] = FIRMWARE_VERSION;
+  doc["fw"] = getFirmwareVersion();
   String payload;
   serializeJson(doc, payload);
   udp.beginPacket(ip, port);
@@ -1500,7 +1554,7 @@ void registerRoutes(ServerT &server) {
     if (!requireAuth(srv)) return;
     DynamicJsonDocument doc(4096);
     doc["nodeId"] = config.nodeId;
-    doc["fwVersion"] = FIRMWARE_VERSION;
+    doc["fwVersion"] = getFirmwareVersion();
     JsonObject wifiObj = doc.createNestedObject("wifi");
     wifiObj["mode"] = config.wifi.mode;
     wifiObj["ssid"] = config.wifi.ssid;
@@ -2107,6 +2161,7 @@ void setup() {
   Serial.println();
   bool oledOk = initOled();
   initLogging();
+  loadAndIncrementFirmwareVersion();
   randomSeed(analogRead(A0) ^ micros() ^ ESP.getCycleCount());
   initialiseSecurity();
   if (!ensureUserDirectory()) {
@@ -2114,7 +2169,7 @@ void setup() {
   } else if (!ensureUserStorageReady()) {
     logMessage("Failed to initialise /private/sample.html");
   }
-  logMessage("MiniLabBox v2 starting...");
+  logPrintf("MiniLabBox v2 starting (FW %s)", getFirmwareVersion());
   if (!oledOk) {
     logMessage("OLED not detected (check wiring on GPIO12/GPIO14)");
   }
