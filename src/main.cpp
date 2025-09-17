@@ -763,6 +763,47 @@ static const char *describeJsonType(const JsonVariantConst &value) {
   return "unknown";
 }
 
+template <typename ArrayHandler, typename ObjectHandler>
+static bool parseJsonContainerString(const String &rawValue,
+                                     ArrayHandler &&handleArray,
+                                     ObjectHandler &&handleObject,
+                                     const char *contextLabel) {
+  if (rawValue.length() == 0) {
+    return false;
+  }
+  String toParse = rawValue;
+  for (uint8_t depth = 0; depth < 3; ++depth) {
+    String trimmed = toParse;
+    trimmed.trim();
+    if (trimmed.length() == 0) {
+      return false;
+    }
+    DynamicJsonDocument nested(CONFIG_JSON_CAPACITY);
+    DeserializationError err = deserializeJson(nested, trimmed);
+    if (err) {
+      logPrintf("Failed to parse %s JSON string: %s", contextLabel,
+                err.c_str());
+      return false;
+    }
+    JsonArrayConst arr = nested.as<JsonArrayConst>();
+    if (!arr.isNull()) {
+      handleArray(arr);
+      return true;
+    }
+    JsonObjectConst obj = nested.as<JsonObjectConst>();
+    if (!obj.isNull()) {
+      handleObject(obj);
+      return true;
+    }
+    if (nested.is<const char *>()) {
+      toParse = nested.as<String>();
+      continue;
+    }
+    break;
+  }
+  return false;
+}
+
 static void logConfigSummary(const char *prefix) {
   logPrintf(
       "%s config summary: nodeId=%s, wifi.mode=%s, ssid=%s, inputs=%u, outputs=%u, peers=%u",
@@ -1186,8 +1227,7 @@ void parseConfigFromJson(const JsonDocument &doc) {
     if (o.containsKey("active")) ic.active = o["active"].as<bool>();
     config.inputCount++;
   };
-  if (doc.containsKey("inputs") && inputsVar.is<JsonArray>()) {
-    JsonArrayConst arr = inputsVar.as<JsonArrayConst>();
+  auto handleInputArray = [&](JsonArrayConst arr) {
     size_t totalInputs = arr.size();
     if (totalInputs > MAX_INPUTS) {
       logPrintf(
@@ -1208,8 +1248,8 @@ void parseConfigFromJson(const JsonDocument &doc) {
       }
       parseInputEntry(entry.as<JsonObjectConst>(), String(), idx);
     }
-  } else if (doc.containsKey("inputs") && inputsVar.is<JsonObject>()) {
-    JsonObjectConst obj = inputsVar.as<JsonObjectConst>();
+  };
+  auto handleInputObject = [&](JsonObjectConst obj) {
     size_t totalInputs = obj.size();
     if (totalInputs > MAX_INPUTS) {
       logPrintf(
@@ -1224,7 +1264,8 @@ void parseConfigFromJson(const JsonDocument &doc) {
       }
       JsonVariantConst value = kv.value();
       if (!value.is<JsonObject>()) {
-        logPrintf("Input entry '%s' is not an object; skipping", kv.key().c_str());
+        logPrintf("Input entry '%s' is not an object; skipping",
+                  kv.key().c_str());
         continue;
       }
       parseInputEntry(value.as<JsonObjectConst>(), String(kv.key().c_str()), -1);
@@ -1233,10 +1274,43 @@ void parseConfigFromJson(const JsonDocument &doc) {
     if (processed == 0) {
       logMessage("Input configuration object contained no usable entries");
     }
-  } else if (doc.containsKey("inputs")) {
-    logPrintf("Input configuration malformed: expected array but found %s",
-              describeJsonType(inputsVar));
-    logMessage("Input configuration malformed: expected array");
+  };
+  if (doc.containsKey("inputs")) {
+    bool parsedInputs = false;
+    JsonArrayConst arr = inputsVar.as<JsonArrayConst>();
+    if (!arr.isNull()) {
+      handleInputArray(arr);
+      parsedInputs = true;
+    } else {
+      JsonObjectConst obj = inputsVar.as<JsonObjectConst>();
+      if (!obj.isNull()) {
+        handleInputObject(obj);
+        parsedInputs = true;
+      }
+    }
+    if (!parsedInputs) {
+      bool parsedFromString = false;
+      if (inputsVar.is<const char *>()) {
+        parsedFromString =
+            parseJsonContainerString(inputsVar.as<String>(), handleInputArray,
+                                     handleInputObject, "input configuration");
+      }
+      if (!parsedFromString) {
+        String serialized;
+        serializeJson(inputsVar, serialized);
+        if (serialized.length() > 0) {
+          parsedFromString = parseJsonContainerString(
+              serialized, handleInputArray, handleInputObject,
+              "input configuration");
+        }
+      }
+      parsedInputs = parsedFromString;
+    }
+    if (!parsedInputs) {
+      logPrintf("Input configuration malformed: expected array but found %s",
+                describeJsonType(inputsVar));
+      logMessage("Input configuration malformed: expected array");
+    }
   }
   // outputs
   for (uint8_t i = 0; i < MAX_OUTPUTS; i++) {
@@ -1310,8 +1384,7 @@ void parseConfigFromJson(const JsonDocument &doc) {
     }
     config.outputCount++;
   };
-  if (doc.containsKey("outputs") && outputsVar.is<JsonArray>()) {
-    JsonArrayConst arr = outputsVar.as<JsonArrayConst>();
+  auto handleOutputArray = [&](JsonArrayConst arr) {
     size_t totalOutputs = arr.size();
     if (totalOutputs > MAX_OUTPUTS) {
       logPrintf(
@@ -1332,8 +1405,8 @@ void parseConfigFromJson(const JsonDocument &doc) {
       }
       parseOutputEntry(entry.as<JsonObjectConst>(), String(), idx);
     }
-  } else if (doc.containsKey("outputs") && outputsVar.is<JsonObject>()) {
-    JsonObjectConst obj = outputsVar.as<JsonObjectConst>();
+  };
+  auto handleOutputObject = [&](JsonObjectConst obj) {
     size_t totalOutputs = obj.size();
     if (totalOutputs > MAX_OUTPUTS) {
       logPrintf(
@@ -1348,7 +1421,8 @@ void parseConfigFromJson(const JsonDocument &doc) {
       }
       JsonVariantConst value = kv.value();
       if (!value.is<JsonObject>()) {
-        logPrintf("Output entry '%s' is not an object; skipping", kv.key().c_str());
+        logPrintf("Output entry '%s' is not an object; skipping",
+                  kv.key().c_str());
         continue;
       }
       parseOutputEntry(value.as<JsonObjectConst>(), String(kv.key().c_str()), -1);
@@ -1357,13 +1431,89 @@ void parseConfigFromJson(const JsonDocument &doc) {
     if (processed == 0) {
       logMessage("Output configuration object contained no usable entries");
     }
-  } else if (doc.containsKey("outputs")) {
-    logPrintf("Output configuration malformed: expected array but found %s",
-              describeJsonType(outputsVar));
-    logMessage("Output configuration malformed: expected array");
+  };
+  if (doc.containsKey("outputs")) {
+    bool parsedOutputs = false;
+    JsonArrayConst arr = outputsVar.as<JsonArrayConst>();
+    if (!arr.isNull()) {
+      handleOutputArray(arr);
+      parsedOutputs = true;
+    } else {
+      JsonObjectConst obj = outputsVar.as<JsonObjectConst>();
+      if (!obj.isNull()) {
+        handleOutputObject(obj);
+        parsedOutputs = true;
+      }
+    }
+    if (!parsedOutputs) {
+      bool parsedFromString = false;
+      if (outputsVar.is<const char *>()) {
+        parsedFromString = parseJsonContainerString(outputsVar.as<String>(),
+                                                   handleOutputArray,
+                                                   handleOutputObject,
+                                                   "output configuration");
+      }
+      if (!parsedFromString) {
+        String serialized;
+        serializeJson(outputsVar, serialized);
+        if (serialized.length() > 0) {
+          parsedFromString = parseJsonContainerString(
+              serialized, handleOutputArray, handleOutputObject,
+              "output configuration");
+        }
+      }
+      parsedOutputs = parsedFromString;
+    }
+    if (!parsedOutputs) {
+      logPrintf("Output configuration malformed: expected array but found %s",
+                describeJsonType(outputsVar));
+      logMessage("Output configuration malformed: expected array");
+    }
   }
-  if (doc.containsKey("peers") && doc["peers"].is<JsonArray>()) {
-    JsonArrayConst arr = doc["peers"].as<JsonArrayConst>();
+  JsonVariantConst peersVar = doc["peers"];
+  auto parsePeerEntry = [&](JsonObjectConst o, const String &entryLabel,
+                            int indexForLog) {
+    if (config.peerCount >= MAX_PEERS) {
+      return;
+    }
+    PeerAuth &pa = config.peers[config.peerCount];
+    if (o.containsKey("nodeId")) {
+      pa.nodeId = o["nodeId"].as<String>();
+    } else if (entryLabel.length() > 0) {
+      pa.nodeId = entryLabel;
+    } else {
+      pa.nodeId = "";
+    }
+    if (pa.nodeId.length() == 0) {
+      if (entryLabel.length() > 0) {
+        logPrintf("Peer entry '%s' missing nodeId", entryLabel.c_str());
+      } else if (indexForLog >= 0) {
+        logPrintf("Peer entry %u missing nodeId",
+                  static_cast<unsigned>(indexForLog));
+      } else {
+        logPrintf("Peer entry #%u missing nodeId",
+                  static_cast<unsigned>(config.peerCount));
+      }
+    }
+    if (o.containsKey("pin")) {
+      pa.pin = o["pin"].as<String>();
+    } else {
+      pa.pin = "";
+    }
+    if (pa.pin.length() == 0) {
+      if (entryLabel.length() > 0) {
+        logPrintf("Peer entry '%s' missing pin", entryLabel.c_str());
+      } else if (indexForLog >= 0) {
+        logPrintf("Peer entry %u missing pin",
+                  static_cast<unsigned>(indexForLog));
+      } else {
+        logPrintf("Peer entry #%u missing pin",
+                  static_cast<unsigned>(config.peerCount));
+      }
+    }
+    config.peerCount++;
+  };
+  auto handlePeerArray = [&](JsonArrayConst arr) {
     size_t totalPeers = arr.size();
     if (totalPeers > MAX_PEERS) {
       logPrintf(
@@ -1371,33 +1521,19 @@ void parseConfigFromJson(const JsonDocument &doc) {
           static_cast<unsigned>(totalPeers),
           static_cast<unsigned>(MAX_PEERS));
     }
-    uint8_t stored = 0;
-    for (size_t idx = 0; idx < totalPeers && stored < MAX_PEERS; ++idx) {
+    uint8_t desired = static_cast<uint8_t>(totalPeers);
+    if (desired > MAX_PEERS) desired = MAX_PEERS;
+    for (uint8_t idx = 0; idx < desired; ++idx) {
       JsonVariantConst entry = arr[idx];
       if (!entry.is<JsonObject>()) {
         logPrintf("Peer entry %u is not an object; skipping",
                   static_cast<unsigned>(idx));
         continue;
       }
-      JsonObjectConst o = entry.as<JsonObjectConst>();
-      PeerAuth &pa = config.peers[stored];
-      pa.nodeId = o.containsKey("nodeId") ? o["nodeId"].as<String>() : "";
-      if (pa.nodeId.length() == 0) {
-        logPrintf("Peer entry %u missing nodeId", static_cast<unsigned>(idx));
-      }
-      pa.pin = o.containsKey("pin") ? o["pin"].as<String>() : "";
-      if (pa.pin.length() == 0) {
-        logPrintf("Peer entry %u missing pin", static_cast<unsigned>(idx));
-      }
-      stored++;
+      parsePeerEntry(entry.as<JsonObjectConst>(), String(), idx);
     }
-    config.peerCount = stored;
-    for (uint8_t i = config.peerCount; i < MAX_PEERS; i++) {
-      config.peers[i].nodeId = "";
-      config.peers[i].pin = "";
-    }
-  } else if (doc.containsKey("peers") && doc["peers"].is<JsonObject>()) {
-    JsonObjectConst obj = doc["peers"].as<JsonObjectConst>();
+  };
+  auto handlePeerObject = [&](JsonObjectConst obj) {
     size_t totalPeers = obj.size();
     if (totalPeers > MAX_PEERS) {
       logPrintf(
@@ -1405,49 +1541,61 @@ void parseConfigFromJson(const JsonDocument &doc) {
           static_cast<unsigned>(totalPeers),
           static_cast<unsigned>(MAX_PEERS));
     }
-    uint8_t stored = 0;
     for (JsonPairConst kv : obj) {
-      if (stored >= MAX_PEERS) {
+      if (config.peerCount >= MAX_PEERS) {
         break;
       }
       JsonVariantConst value = kv.value();
       if (!value.is<JsonObject>()) {
-        logPrintf("Peer entry '%s' is not an object; skipping", kv.key().c_str());
+        logPrintf("Peer entry '%s' is not an object; skipping",
+                  kv.key().c_str());
         continue;
       }
-      JsonObjectConst o = value.as<JsonObjectConst>();
-      PeerAuth &pa = config.peers[stored];
-      pa.nodeId = o.containsKey("nodeId") ? o["nodeId"].as<String>() : String(kv.key().c_str());
-      if (pa.nodeId.length() == 0) {
-        logPrintf("Peer entry '%s' missing nodeId", kv.key().c_str());
+      parsePeerEntry(value.as<JsonObjectConst>(), String(kv.key().c_str()), -1);
+    }
+  };
+  if (doc.containsKey("peers")) {
+    bool parsedPeers = false;
+    JsonArrayConst arr = peersVar.as<JsonArrayConst>();
+    if (!arr.isNull()) {
+      handlePeerArray(arr);
+      parsedPeers = true;
+    } else {
+      JsonObjectConst obj = peersVar.as<JsonObjectConst>();
+      if (!obj.isNull()) {
+        handlePeerObject(obj);
+        parsedPeers = true;
       }
-      pa.pin = o.containsKey("pin") ? o["pin"].as<String>() : "";
-      if (pa.pin.length() == 0) {
-        logPrintf("Peer entry '%s' missing pin", kv.key().c_str());
+    }
+    if (!parsedPeers) {
+      bool parsedFromString = false;
+      if (peersVar.is<const char *>()) {
+        parsedFromString = parseJsonContainerString(peersVar.as<String>(),
+                                                   handlePeerArray,
+                                                   handlePeerObject,
+                                                   "peer configuration");
       }
-      stored++;
+      if (!parsedFromString) {
+        String serialized;
+        serializeJson(peersVar, serialized);
+        if (serialized.length() > 0) {
+          parsedFromString = parseJsonContainerString(
+              serialized, handlePeerArray, handlePeerObject,
+              "peer configuration");
+        }
+      }
+      parsedPeers = parsedFromString;
     }
-    config.peerCount = stored;
-    for (uint8_t i = config.peerCount; i < MAX_PEERS; i++) {
-      config.peers[i].nodeId = "";
-      config.peers[i].pin = "";
+    if (!parsedPeers) {
+      logPrintf("Peer configuration malformed: expected array but found %s",
+                describeJsonType(peersVar));
+      logMessage("Peer configuration malformed: expected array");
+      config.peerCount = 0;
     }
-  } else if (doc.containsKey("peers")) {
-    JsonVariantConst peersVar = doc["peers"];
-    logPrintf("Peer configuration malformed: expected array but found %s",
-              describeJsonType(peersVar));
-    logMessage("Peer configuration malformed: expected array");
-    config.peerCount = 0;
-    for (uint8_t i = 0; i < MAX_PEERS; i++) {
-      config.peers[i].nodeId = "";
-      config.peers[i].pin = "";
-    }
-  } else {
-    config.peerCount = 0;
-    for (uint8_t i = 0; i < MAX_PEERS; i++) {
-      config.peers[i].nodeId = "";
-      config.peers[i].pin = "";
-    }
+  }
+  for (uint8_t i = config.peerCount; i < MAX_PEERS; i++) {
+    config.peers[i].nodeId = "";
+    config.peers[i].pin = "";
   }
 }
 
