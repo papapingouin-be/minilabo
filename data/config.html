@@ -34,6 +34,14 @@
     .io-empty { font-style: italic; color: #666; }
     .toggle { font-size: 0.85em; color: #333; }
     .toggle input { margin-right: 0.35em; }
+    .io-status { display: inline-flex; align-items: center; gap: 0.3em; font-size: 0.8em; color: #666; margin-top: 0.2em; }
+    .io-status::before { content: ''; display: inline-block; width: 0.55em; height: 0.55em; border-radius: 50%; background: #bbb; }
+    .io-status.synced { color: #256029; }
+    .io-status.synced::before { background: #27ae60; }
+    .io-status.pending { color: #8a6d3b; }
+    .io-status.pending::before { background: #f1c40f; }
+    .io-status.error { color: #c0392b; }
+    .io-status.error::before { background: #c0392b; }
     .io-actions { margin-top: auto; display: flex; gap: 0.5em; justify-content: flex-end; }
     button.secondary { background: #f3f3f3; border: 1px solid #bbb; color: #333; }
     button.danger { background: #c0392b; border: none; color: #fff; }
@@ -201,6 +209,145 @@ let discoveryTimer = null;
 const knownPeers = new Map();
 let discoveryData = [];
 let modalState = null;
+
+const STATUS_SYNCED = 'synced';
+const STATUS_PENDING = 'pending';
+let lastAppliedInputs = new Map();
+let lastAppliedOutputs = new Map();
+
+function getSnapshotMap(kind) {
+  return kind === 'input' ? lastAppliedInputs : lastAppliedOutputs;
+}
+
+function snapshotInput(item, idx) {
+  const name = item.name && item.name.trim().length ? item.name.trim() : `IN${idx + 1}`;
+  const snapshot = {
+    name,
+    type: item.type || 'disabled',
+    active: !!item.active,
+    scale: Number.isFinite(item.scale) ? item.scale : 1,
+    offset: Number.isFinite(item.offset) ? item.offset : 0,
+    unit: item.unit || ''
+  };
+  if (['adc', 'div', 'zmpt', 'zmct'].includes(snapshot.type)) {
+    snapshot.pin = item.pin || '';
+  }
+  if (snapshot.type === 'ads1115') {
+    const channel = Number.isFinite(item.adsChannel) ? parseInt(item.adsChannel, 10) : 0;
+    snapshot.adsChannel = channel;
+  }
+  if (snapshot.type === 'remote') {
+    snapshot.remoteNode = item.remoteNode || '';
+    snapshot.remoteName = item.remoteName || '';
+  }
+  return snapshot;
+}
+
+function snapshotOutput(item, idx) {
+  const name = item.name && item.name.trim().length ? item.name.trim() : `OUT${idx + 1}`;
+  const snapshot = {
+    name,
+    type: item.type || 'disabled',
+    active: !!item.active,
+    scale: Number.isFinite(item.scale) ? item.scale : 1,
+    offset: Number.isFinite(item.offset) ? item.offset : 0
+  };
+  if (['pwm010', 'gpio'].includes(snapshot.type)) {
+    snapshot.pin = item.pin || '';
+  }
+  if (snapshot.type === 'pwm010') {
+    snapshot.pwmFreq = Number.isFinite(item.pwmFreq) ? Math.max(1, Math.round(item.pwmFreq)) : 2000;
+  }
+  if (snapshot.type === 'mcp4725') {
+    snapshot.i2cAddress = item.i2cAddress && item.i2cAddress.length ? item.i2cAddress : '0x60';
+  }
+  return snapshot;
+}
+
+function snapshotSignature(snapshot) {
+  return JSON.stringify(snapshot);
+}
+
+function recordSyncedSnapshot(kind, snapshot) {
+  const map = getSnapshotMap(kind);
+  const signature = snapshotSignature(snapshot);
+  map.set(snapshot.name, { state: STATUS_SYNCED, signature, saved: signature });
+}
+
+function recordPendingSnapshot(kind, snapshot, previousKey) {
+  const map = getSnapshotMap(kind);
+  let savedSignature = null;
+  if (previousKey && previousKey !== snapshot.name) {
+    const previousEntry = map.get(previousKey);
+    if (previousEntry && typeof previousEntry.saved === 'string') {
+      savedSignature = previousEntry.saved;
+    }
+    map.delete(previousKey);
+  }
+  const signature = snapshotSignature(snapshot);
+  const existing = map.get(snapshot.name);
+  if (existing) {
+    if (existing.state === STATUS_SYNCED && existing.signature === signature) {
+      map.set(snapshot.name, { state: STATUS_SYNCED, signature, saved: existing.saved || signature });
+      return;
+    }
+    if (typeof existing.saved === 'string') {
+      savedSignature = existing.saved;
+    }
+  }
+  if (savedSignature !== null && savedSignature === signature) {
+    map.set(snapshot.name, { state: STATUS_SYNCED, signature, saved: signature });
+  } else {
+    map.set(snapshot.name, { state: STATUS_PENDING, signature, saved: savedSignature });
+  }
+}
+
+function removeSnapshot(kind, key) {
+  const map = getSnapshotMap(kind);
+  map.delete(key);
+}
+
+function resetSnapshotsFromConfig(kind, list) {
+  const map = getSnapshotMap(kind);
+  map.clear();
+  list.forEach((item, idx) => {
+    const snapshot = kind === 'input' ? snapshotInput(item, idx) : snapshotOutput(item, idx);
+    recordSyncedSnapshot(kind, snapshot);
+  });
+}
+
+function applyServerSnapshots(kind, entries) {
+  const map = getSnapshotMap(kind);
+  map.clear();
+  if (!Array.isArray(entries)) return;
+  entries.forEach(entry => {
+    if (!entry || !entry.name) return;
+    const signature = JSON.stringify(entry);
+    map.set(entry.name, { state: STATUS_SYNCED, signature, saved: signature });
+  });
+}
+
+function statusForSnapshot(kind, item, idx) {
+  const snapshot = kind === 'input' ? snapshotInput(item, idx) : snapshotOutput(item, idx);
+  const map = getSnapshotMap(kind);
+  const entry = map.get(snapshot.name);
+  const signature = snapshotSignature(snapshot);
+  if (entry) {
+    if (typeof entry.saved === 'string' && entry.saved === signature) {
+      if (entry.state !== STATUS_SYNCED || entry.signature !== signature) {
+        recordSyncedSnapshot(kind, snapshot);
+      }
+      return { className: 'synced', text: 'Synchronisé' };
+    }
+    if (entry.state === STATUS_PENDING) {
+      return { className: 'pending', text: 'À enregistrer' };
+    }
+    if (entry.state === STATUS_SYNCED) {
+      return { className: 'synced', text: 'Synchronisé' };
+    }
+  }
+  return { className: 'pending', text: 'À enregistrer' };
+}
 
 function toNumber(value, fallback) {
   if (value === null || value === undefined) {
@@ -377,10 +524,25 @@ function renderIoList(kind) {
     toggle.checked = !!item.active;
     toggle.addEventListener('change', () => {
       item.active = toggle.checked;
+      const snapshot = kind === 'input' ? snapshotInput(item, idx) : snapshotOutput(item, idx);
+      const signature = snapshotSignature(snapshot);
+      const map = getSnapshotMap(kind);
+      const entry = map.get(snapshot.name);
+      if (entry && entry.state === STATUS_SYNCED && entry.signature === signature) {
+        recordSyncedSnapshot(kind, snapshot);
+      } else {
+        recordPendingSnapshot(kind, snapshot);
+      }
+      renderIoList(kind);
     });
     toggleLabel.appendChild(toggle);
     toggleLabel.appendChild(document.createTextNode(' Actif'));
     controls.appendChild(toggleLabel);
+    const statusInfo = statusForSnapshot(kind, item, idx);
+    const statusEl = document.createElement('span');
+    statusEl.className = `io-status ${statusInfo.className}`;
+    statusEl.textContent = statusInfo.text;
+    controls.appendChild(statusEl);
     header.appendChild(controls);
     card.appendChild(header);
     const detailList = document.createElement('ul');
@@ -407,10 +569,18 @@ function renderIoList(kind) {
     delBtn.addEventListener('click', () => {
       if (confirm('Supprimer cette configuration ?')) {
         if (kind === 'input') {
-          inputs.splice(idx, 1);
+          const removed = inputs.splice(idx, 1)[0];
+          if (removed) {
+            const snap = snapshotInput(removed, idx);
+            removeSnapshot('input', snap.name);
+          }
           renderIoList('input');
         } else {
-          outputs.splice(idx, 1);
+          const removed = outputs.splice(idx, 1)[0];
+          if (removed) {
+            const snap = snapshotOutput(removed, idx);
+            removeSnapshot('output', snap.name);
+          }
           renderIoList('output');
         }
       }
@@ -669,16 +839,46 @@ function handleModalSubmit(event) {
   data.name = data.name.trim();
   if (kind === 'input') {
     if (index != null) {
+      const previous = inputs[index];
+      const previousSnapshot = snapshotInput(previous, index);
       inputs[index] = data;
+      const updatedSnapshot = snapshotInput(inputs[index], index);
+      const prevKey = previousSnapshot.name;
+      const newKey = updatedSnapshot.name;
+      const newSignature = snapshotSignature(updatedSnapshot);
+      const mapEntry = lastAppliedInputs.get(prevKey);
+      if (prevKey === newKey && mapEntry && mapEntry.state === STATUS_SYNCED && mapEntry.signature === newSignature && snapshotSignature(previousSnapshot) === newSignature) {
+        recordSyncedSnapshot('input', updatedSnapshot);
+      } else {
+        recordPendingSnapshot('input', updatedSnapshot, prevKey === newKey ? undefined : prevKey);
+      }
     } else {
       inputs.push(data);
+      const newIndex = inputs.length - 1;
+      const snapshot = snapshotInput(inputs[newIndex], newIndex);
+      recordPendingSnapshot('input', snapshot);
     }
     renderIoList('input');
   } else {
     if (index != null) {
+      const previous = outputs[index];
+      const previousSnapshot = snapshotOutput(previous, index);
       outputs[index] = data;
+      const updatedSnapshot = snapshotOutput(outputs[index], index);
+      const prevKey = previousSnapshot.name;
+      const newKey = updatedSnapshot.name;
+      const newSignature = snapshotSignature(updatedSnapshot);
+      const mapEntry = lastAppliedOutputs.get(prevKey);
+      if (prevKey === newKey && mapEntry && mapEntry.state === STATUS_SYNCED && mapEntry.signature === newSignature && snapshotSignature(previousSnapshot) === newSignature) {
+        recordSyncedSnapshot('output', updatedSnapshot);
+      } else {
+        recordPendingSnapshot('output', updatedSnapshot, prevKey === newKey ? undefined : prevKey);
+      }
     } else {
       outputs.push(data);
+      const newIndex = outputs.length - 1;
+      const snapshot = snapshotOutput(outputs[newIndex], newIndex);
+      recordPendingSnapshot('output', snapshot);
     }
     renderIoList('output');
   }
@@ -722,6 +922,8 @@ async function loadConfig() {
     document.getElementById('modDiv').checked = !!modules.div;
     inputs = Array.isArray(cfg.inputs) ? cfg.inputs.slice(0, MAX_INPUTS).map(normaliseInput) : [];
     outputs = Array.isArray(cfg.outputs) ? cfg.outputs.slice(0, MAX_OUTPUTS).map(normaliseOutput) : [];
+    resetSnapshotsFromConfig('input', inputs);
+    resetSnapshotsFromConfig('output', outputs);
     renderIoList('input');
     renderIoList('output');
     knownPeers.clear();
@@ -807,6 +1009,7 @@ async function saveConfig() {
   cfg.peerCount = cfg.peers.length;
 
   // Post config
+  const statusEl = document.getElementById('status');
   try {
     const resp = await authFetch('/api/config/set', {
       method: 'POST',
@@ -816,14 +1019,50 @@ async function saveConfig() {
       headers: { 'Content-Type': 'text/plain' },
       body: JSON.stringify(cfg)
     });
+    let raw = '';
+    try {
+      raw = await resp.text();
+    } catch (_) {
+      raw = '';
+    }
+    let parsed = null;
+    if (raw && raw.length) {
+      try {
+        parsed = JSON.parse(raw);
+      } catch (_) {
+        parsed = null;
+      }
+    }
     if (resp.ok) {
-      document.getElementById('status').textContent = 'Sauvegarde réussie, redémarrage...';
+      if (parsed && parsed.applied) {
+        applyServerSnapshots('input', parsed.applied.inputs || []);
+        applyServerSnapshots('output', parsed.applied.outputs || []);
+        renderIoList('input');
+        renderIoList('output');
+      }
+      if (statusEl) {
+        statusEl.textContent = 'Sauvegarde vérifiée, redémarrage...';
+      }
     } else {
-      document.getElementById('status').textContent = 'Erreur lors de la sauvegarde';
+      let message = 'Erreur lors de la sauvegarde';
+      if (parsed && parsed.error) {
+        if (parsed.detail) {
+          message = `Erreur lors de la sauvegarde (${parsed.error}: ${parsed.detail})`;
+        } else {
+          message = `Erreur lors de la sauvegarde (${parsed.error})`;
+        }
+      } else if (raw && raw.length) {
+        message = `Erreur lors de la sauvegarde (${raw})`;
+      }
+      if (statusEl) {
+        statusEl.textContent = message;
+      }
     }
   } catch (err) {
     console.error(err);
-    document.getElementById('status').textContent = 'Erreur lors de la sauvegarde';
+    if (statusEl) {
+      statusEl.textContent = 'Erreur lors de la sauvegarde';
+    }
   }
 }
 
