@@ -1,0 +1,303 @@
+:root {
+  --primary: #0a6dd8;
+  --primary-dark: #06488f;
+  --accent: #45d1ff;
+  --background: #0f172a;
+  --surface: rgba(15, 23, 42, 0.88);
+  --surface-light: rgba(255, 255, 255, 0.04);
+  --text: #f8fafc;
+  --text-muted: #94a3b8;
+  --divider: rgba(148, 163, 184, 0.3);
+  font-family: 'Segoe UI', Roboto, Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(circle at top, rgba(69, 209, 255, 0.16), transparent 60%),
+              linear-gradient(135deg, #050816 0%, #0f172a 55%, #020617 100%);
+  color: var(--text);
+}
+
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 3.5rem 1.5rem 4rem;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 3rem;
+}
+
+header a {
+  color: var(--text-muted);
+  text-decoration: none;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  transition: color 0.2s ease;
+}
+
+header a:hover {
+  color: var(--accent);
+}
+
+.hero {
+  background: var(--surface);
+  border: 1px solid var(--divider);
+  border-radius: 24px;
+  padding: 2rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1.5rem;
+  box-shadow: 0 25px 50px -12px rgba(15, 23, 42, 0.55);
+}
+
+.hero-visual {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.hero-visual img {
+  width: min(220px, 100%);
+  height: auto;
+  filter: drop-shadow(0 18px 28px rgba(4, 12, 40, 0.45));
+}
+
+.hero-content h1 {
+  font-size: clamp(2rem, 4vw, 2.9rem);
+  margin: 0 0 1rem;
+}
+
+.hero-content p {
+  margin: 0 0 1.5rem;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.hero-content .cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.75rem 1.4rem;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+  color: #0b1120;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.85rem;
+  text-decoration: none;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.hero-content .cta:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 18px 28px rgba(69, 209, 255, 0.25);
+}
+
+.section-title {
+  margin: 3rem 0 1rem;
+  font-size: 1.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+}
+
+.instrument-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1.5rem;
+}
+
+.instrument-card {
+  background: var(--surface);
+  border: 1px solid var(--divider);
+  border-radius: 20px;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.instrument-card h3 {
+  font-size: 1.2rem;
+  margin: 0;
+}
+
+.instrument-card p {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.instrument-display {
+  background: var(--surface-light);
+  border: 1px solid var(--divider);
+  border-radius: 16px;
+  padding: 1rem;
+  min-height: 160px;
+  position: relative;
+  overflow: hidden;
+}
+
+.instrument-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.instrument-controls label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  gap: 0.4rem;
+}
+
+.instrument-controls select,
+.instrument-controls input {
+  background: rgba(15, 23, 42, 0.65);
+  color: var(--text);
+  border: 1px solid var(--divider);
+  border-radius: 999px;
+  padding: 0.45rem 0.8rem;
+  min-width: 120px;
+  font-size: 0.9rem;
+}
+
+.instrument-controls progress {
+  width: 180px;
+  height: 12px;
+  -webkit-appearance: none;
+  appearance: none;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid var(--divider);
+}
+
+.instrument-controls progress::-webkit-progress-bar {
+  background: transparent;
+}
+
+.instrument-controls progress::-webkit-progress-value {
+  background: linear-gradient(135deg, var(--accent), var(--primary));
+}
+
+.instrument-controls progress::-moz-progress-bar {
+  background: linear-gradient(135deg, var(--accent), var(--primary));
+}
+
+.math-zone {
+  background: linear-gradient(145deg, rgba(10, 109, 216, 0.22), rgba(69, 209, 255, 0.08));
+  border-radius: 20px;
+  padding: 1.5rem;
+  border: 1px solid rgba(69, 209, 255, 0.28);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.math-zone h3 {
+  margin: 0;
+  font-size: 1.3rem;
+}
+
+.math-input {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.math-input input {
+  flex: 1;
+  min-width: 220px;
+  border-radius: 999px;
+  border: 1px solid rgba(69, 209, 255, 0.32);
+  background: rgba(15, 23, 42, 0.65);
+  color: var(--text);
+  padding: 0.6rem 1rem;
+  font-size: 1rem;
+}
+
+.math-input button {
+  border: none;
+  border-radius: 999px;
+  padding: 0.6rem 1.5rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  background: linear-gradient(135deg, var(--accent), var(--primary));
+  color: #0b1120;
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.math-input button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 15px 25px rgba(69, 209, 255, 0.22);
+}
+
+.math-result {
+  font-size: 1.1rem;
+  color: var(--accent);
+  min-height: 1.4em;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  background: rgba(69, 209, 255, 0.08);
+  border: 1px solid rgba(69, 209, 255, 0.32);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+}
+
+canvas.oscilloscope-display {
+  width: 100%;
+  height: 100%;
+}
+
+.measurement-value {
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+.measurement-unit {
+  color: var(--text-muted);
+}
+
+@media (max-width: 640px) {
+  .page {
+    padding: 2.5rem 1.1rem 3rem;
+  }
+
+  header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+
+  .hero {
+    padding: 1.5rem;
+  }
+}
