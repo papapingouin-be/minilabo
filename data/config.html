@@ -62,6 +62,15 @@
     .modal-info h3 { margin: 0 0 0.35em; font-size: 1em; }
     .modal-info ul { margin: 0.4em 0 0 1.2em; padding: 0; }
     .modal-info li { margin-bottom: 0.3em; }
+    .meter-list .io-card { gap: 0.8em; }
+    .meter-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.6em; }
+    .meter-field { display: flex; flex-direction: column; gap: 0.25em; font-size: 0.9em; }
+    .meter-field label { font-weight: 600; color: #333; }
+    .meter-field input[type="text"],
+    .meter-field input[type="number"],
+    .meter-field select { width: 100%; box-sizing: border-box; }
+    .meter-field input[type="number"] { max-width: 100%; }
+    .meter-card .io-actions { margin-top: 0.5em; }
   </style>
   <script src="auth.js"></script>
 </head>
@@ -119,6 +128,16 @@
       <span class="counter" id="outputsCounter">0 / 2</span>
     </div>
     <div id="outputsList" class="io-list"></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Multimètre virtuel</legend>
+    <p class="hint">Associez chaque canal du multimètre à une entrée et ajustez l'échelle, le décalage ainsi que la plage et la résolution binaire.</p>
+    <div class="io-header">
+      <button type="button" id="addMeterBtn">Ajouter un canal</button>
+      <span class="counter" id="meterCounter">0 / 6</span>
+    </div>
+    <div id="meterList" class="io-list meter-list"></div>
   </fieldset>
 
   <fieldset>
@@ -188,6 +207,9 @@
 <script>
 const MAX_INPUTS = 4;
 const MAX_OUTPUTS = 2;
+const MAX_METER_CHANNELS = 6;
+const MIN_METER_BITS = 1;
+const MAX_METER_BITS = 32;
 const ANALOG_PINS = ['A0'];
 const DIGITAL_PINS = ['D0','D1','D2','D3','D4','D5','D6','D7','D8'];
 const ANALOG_TYPES = new Set(['adc','div','zmpt','zmct']);
@@ -400,6 +422,7 @@ function getIoExplanation(kind, data, fallbackName, indexHint) {
 
 let inputs = [];
 let outputs = [];
+let meterChannels = [];
 const moduleState = {
   ads1115: false,
   pwm010: false,
@@ -815,6 +838,85 @@ function updateIoCounters() {
   if (outCounter) outCounter.textContent = `${outputs.length} / ${MAX_OUTPUTS}`;
 }
 
+function updateMeterCounter() {
+  const counter = document.getElementById('meterCounter');
+  if (counter) counter.textContent = `${meterChannels.length} / ${MAX_METER_CHANNELS}`;
+}
+
+function clampMeterBits(value) {
+  const numeric = Number.isFinite(value) ? value : Number(value);
+  if (!Number.isFinite(numeric)) {
+    return 10;
+  }
+  const rounded = Math.round(numeric);
+  if (rounded < MIN_METER_BITS) return MIN_METER_BITS;
+  if (rounded > MAX_METER_BITS) return MAX_METER_BITS;
+  return rounded;
+}
+
+function defaultMeterChannel(index) {
+  const baseIndex = Number.isFinite(index) ? index : meterChannels.length;
+  const suffix = baseIndex + 1;
+  const defaultId = `meter${suffix}`;
+  const activeInputs = inputs.filter(item => item && item.active !== false);
+  const preferredInput = activeInputs.length ? activeInputs[0] : (inputs.length ? inputs[0] : null);
+  return {
+    id: defaultId,
+    name: defaultId,
+    label: `Canal ${suffix}`,
+    input: preferredInput ? preferredInput.name : '',
+    unit: preferredInput && preferredInput.unit ? preferredInput.unit : '',
+    symbol: '',
+    enabled: true,
+    scale: 1,
+    offset: 0,
+    rangeMin: null,
+    rangeMax: null,
+    bits: 10
+  };
+}
+
+function normaliseMeterChannelConfig(data, index) {
+  const fallback = defaultMeterChannel(Number.isFinite(index) ? index : 0);
+  if (!data || typeof data !== 'object') {
+    return fallback;
+  }
+  const idValue = typeof data.id === 'string' && data.id.trim().length
+    ? data.id.trim()
+    : typeof data.name === 'string' && data.name.trim().length
+      ? data.name.trim()
+      : fallback.id;
+  const nameValue = typeof data.name === 'string' && data.name.trim().length
+    ? data.name.trim()
+    : idValue;
+  const labelValue = typeof data.label === 'string' && data.label.trim().length
+    ? data.label.trim()
+    : nameValue;
+  const inputValue = typeof data.input === 'string' ? data.input.trim() : fallback.input;
+  const symbolValue = typeof data.symbol === 'string' ? data.symbol.trim() : '';
+  const unitValue = typeof data.unit === 'string' ? data.unit.trim() : '';
+  const scaleValue = toNumber(data.scale, 1);
+  const offsetValue = toNumber(data.offset, 0);
+  const rangeMinValue = toNumber(data.rangeMin, null);
+  const rangeMaxValue = toNumber(data.rangeMax, null);
+  const bitsValue = clampMeterBits(toNumber(data.bits, 10));
+  const enabledValue = data.enabled === false ? false : true;
+  return {
+    id: idValue,
+    name: nameValue,
+    label: labelValue,
+    input: inputValue,
+    symbol: symbolValue,
+    unit: unitValue,
+    enabled: enabledValue,
+    scale: Number.isFinite(scaleValue) ? scaleValue : 1,
+    offset: Number.isFinite(offsetValue) ? offsetValue : 0,
+    rangeMin: Number.isFinite(rangeMinValue) ? rangeMinValue : null,
+    rangeMax: Number.isFinite(rangeMaxValue) ? rangeMaxValue : null,
+    bits: bitsValue
+  };
+}
+
 function describeInput(item, index) {
   const fallbackName = item && item.name && item.name.trim()
     ? item.name.trim()
@@ -867,6 +969,277 @@ function describeOutput(item, index) {
   return details;
 }
 
+function renderMeterList() {
+  const listEl = document.getElementById('meterList');
+  if (!listEl) return;
+  listEl.innerHTML = '';
+  if (!meterChannels.length) {
+    const empty = document.createElement('div');
+    empty.className = 'io-empty';
+    empty.textContent = 'Aucun canal configuré pour le multimètre.';
+    listEl.appendChild(empty);
+    updateMeterCounter();
+    return;
+  }
+  meterChannels.forEach((channel, idx) => {
+    const card = document.createElement('div');
+    card.className = 'io-card meter-card';
+
+    const header = document.createElement('div');
+    header.className = 'io-card-header';
+    const title = document.createElement('h3');
+    const computeTitle = () => {
+      if (channel.label && channel.label.trim().length) {
+        return channel.label.trim();
+      }
+      if (channel.name && channel.name.trim().length) {
+        return channel.name.trim();
+      }
+      return `Canal ${idx + 1}`;
+    };
+    title.textContent = computeTitle();
+    header.appendChild(title);
+
+    const controls = document.createElement('div');
+    controls.style.display = 'flex';
+    controls.style.flexDirection = 'column';
+    controls.style.alignItems = 'flex-end';
+    controls.style.gap = '0.35em';
+
+    const toggleLabel = document.createElement('label');
+    toggleLabel.className = 'toggle';
+    const toggle = document.createElement('input');
+    toggle.type = 'checkbox';
+    toggle.checked = channel.enabled !== false;
+    toggle.addEventListener('change', () => {
+      channel.enabled = toggle.checked;
+    });
+    toggleLabel.appendChild(toggle);
+    toggleLabel.appendChild(document.createTextNode(' Actif'));
+    controls.appendChild(toggleLabel);
+
+    const status = document.createElement('span');
+    const updateStatus = () => {
+      const hasInput = channel.input && channel.input.trim().length;
+      status.className = `io-status ${hasInput ? 'synced' : 'pending'}`;
+      status.textContent = hasInput ? `Source : ${channel.input}` : 'Entrée à sélectionner';
+    };
+    updateStatus();
+    controls.appendChild(status);
+
+    header.appendChild(controls);
+    card.appendChild(header);
+
+    const fields = document.createElement('div');
+    fields.className = 'meter-fields';
+
+    const addField = (labelText, controlFactory) => {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'meter-field';
+      const label = document.createElement('label');
+      label.textContent = labelText;
+      wrapper.appendChild(label);
+      const control = controlFactory();
+      wrapper.appendChild(control);
+      fields.appendChild(wrapper);
+      return control;
+    };
+
+    addField('Identifiant JSON', () => {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = channel.id || '';
+      input.placeholder = `meter${idx + 1}`;
+      input.oninput = (ev) => {
+        const value = ev.target.value.trim();
+        channel.id = value;
+        channel.name = value || `meter${idx + 1}`;
+        if (!channel.label || !channel.label.trim().length) {
+          title.textContent = computeTitle();
+        }
+      };
+      return input;
+    });
+
+    addField('Libellé (affichage)', () => {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = channel.label || '';
+      input.placeholder = `Canal ${idx + 1}`;
+      input.oninput = (ev) => {
+        channel.label = ev.target.value;
+        title.textContent = computeTitle();
+      };
+      return input;
+    });
+
+    let unitInputRef = null;
+
+    addField('Entrée associée', () => {
+      const select = document.createElement('select');
+      const activeInputs = inputs.filter(item => item && item.active !== false);
+      if (!activeInputs.length) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = 'Aucune entrée disponible';
+        select.appendChild(opt);
+        select.disabled = true;
+      } else {
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = 'Choisir…';
+        select.appendChild(placeholder);
+        activeInputs.forEach(info => {
+          const opt = document.createElement('option');
+          opt.value = info.name;
+          opt.textContent = info.name;
+          select.appendChild(opt);
+        });
+        if (channel.input && activeInputs.some(info => info.name === channel.input)) {
+          select.value = channel.input;
+        } else {
+          select.value = '';
+        }
+      }
+      select.addEventListener('change', (ev) => {
+        channel.input = ev.target.value;
+        updateStatus();
+        const matching = inputs.find(item => item && item.name === channel.input);
+        if (matching && matching.unit && (!channel.unit || !channel.unit.trim().length)) {
+          channel.unit = matching.unit;
+          if (unitInputRef) {
+            unitInputRef.value = channel.unit;
+          }
+        }
+      });
+      return select;
+    });
+
+    addField('Symbole', () => {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = channel.symbol || '';
+      input.placeholder = 'U, I, R…';
+      input.oninput = (ev) => {
+        channel.symbol = ev.target.value;
+      };
+      return input;
+    });
+
+    unitInputRef = addField('Unité', () => {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = channel.unit || '';
+      input.placeholder = 'V, A, Ω…';
+      input.oninput = (ev) => {
+        channel.unit = ev.target.value;
+      };
+      return input;
+    });
+
+    addField('Échelle', () => {
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.step = 'any';
+      input.value = channel.scale != null ? channel.scale : 1;
+      input.oninput = (ev) => {
+        const value = parseFloat(ev.target.value);
+        channel.scale = Number.isFinite(value) ? value : 1;
+      };
+      return input;
+    });
+
+    addField('Décalage', () => {
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.step = 'any';
+      input.value = channel.offset != null ? channel.offset : 0;
+      input.oninput = (ev) => {
+        const value = parseFloat(ev.target.value);
+        channel.offset = Number.isFinite(value) ? value : 0;
+      };
+      return input;
+    });
+
+    addField('Plage min.', () => {
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.step = 'any';
+      input.value = channel.rangeMin != null ? channel.rangeMin : '';
+      input.oninput = (ev) => {
+        const value = ev.target.value.trim();
+        if (value.length === 0) {
+          channel.rangeMin = null;
+        } else {
+          const num = parseFloat(value);
+          channel.rangeMin = Number.isFinite(num) ? num : null;
+        }
+      };
+      return input;
+    });
+
+    addField('Plage max.', () => {
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.step = 'any';
+      input.value = channel.rangeMax != null ? channel.rangeMax : '';
+      input.oninput = (ev) => {
+        const value = ev.target.value.trim();
+        if (value.length === 0) {
+          channel.rangeMax = null;
+        } else {
+          const num = parseFloat(value);
+          channel.rangeMax = Number.isFinite(num) ? num : null;
+        }
+      };
+      return input;
+    });
+
+    addField('Résolution (bits)', () => {
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.min = `${MIN_METER_BITS}`;
+      input.max = `${MAX_METER_BITS}`;
+      input.step = '1';
+      input.value = channel.bits != null ? channel.bits : 10;
+      input.addEventListener('change', (ev) => {
+        const value = parseFloat(ev.target.value);
+        channel.bits = clampMeterBits(value);
+        input.value = channel.bits;
+      });
+      return input;
+    });
+
+    card.appendChild(fields);
+
+    const actions = document.createElement('div');
+    actions.className = 'io-actions';
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'danger';
+    removeBtn.textContent = 'Supprimer';
+    removeBtn.addEventListener('click', () => {
+      meterChannels.splice(idx, 1);
+      renderMeterList();
+    });
+    actions.appendChild(removeBtn);
+    card.appendChild(actions);
+
+    listEl.appendChild(card);
+  });
+  updateMeterCounter();
+}
+
+function addMeterChannel() {
+  if (meterChannels.length >= MAX_METER_CHANNELS) {
+    alert(`Nombre maximum de canaux atteint (${MAX_METER_CHANNELS}).`);
+    return;
+  }
+  const channel = defaultMeterChannel(meterChannels.length);
+  meterChannels.push(channel);
+  renderMeterList();
+}
+
 function renderIoList(kind) {
   const listEl = document.getElementById(kind === 'input' ? 'inputsList' : 'outputsList');
   if (!listEl) return;
@@ -878,6 +1251,9 @@ function renderIoList(kind) {
     empty.textContent = kind === 'input' ? 'Aucune entrée configurée.' : 'Aucune sortie configurée.';
     listEl.appendChild(empty);
     updateIoCounters();
+    if (kind === 'input') {
+      renderMeterList();
+    }
     return;
   }
   source.forEach((item, idx) => {
@@ -966,6 +1342,9 @@ function renderIoList(kind) {
     listEl.appendChild(card);
   });
   updateIoCounters();
+  if (kind === 'input') {
+    renderMeterList();
+  }
 }
 
 function openIoModal(kind, index) {
@@ -1372,6 +1751,15 @@ async function loadConfig() {
     ensureTypeAvailability('output');
     resetSnapshotsFromConfig('input', inputs);
     resetSnapshotsFromConfig('output', outputs);
+    if (cfg.virtualMultimeter && Array.isArray(cfg.virtualMultimeter.channels)) {
+      meterChannels = cfg.virtualMultimeter.channels
+        .slice(0, MAX_METER_CHANNELS)
+        .map((entry, index) => normaliseMeterChannelConfig(entry, index));
+    } else {
+      meterChannels = [];
+    }
+    updateMeterCounter();
+    renderMeterList();
     renderIoList('input');
     renderIoList('output');
     logIoStep('Configuration appliquée', { inputs: inputs.length, outputs: outputs.length });
@@ -1453,6 +1841,36 @@ async function saveConfig() {
     return obj;
   });
   cfg.outputCount = cfg.outputs.length;
+  const meterList = [];
+  meterChannels.slice(0, MAX_METER_CHANNELS).forEach((channel, idx) => {
+    const trimmedId = channel.id && channel.id.trim().length ? channel.id.trim() : `meter${idx + 1}`;
+    const trimmedName = channel.name && channel.name.trim().length ? channel.name.trim() : trimmedId;
+    const trimmedLabel = channel.label && channel.label.trim().length ? channel.label.trim() : trimmedName;
+    const inputName = channel.input && typeof channel.input === 'string' ? channel.input.trim() : '';
+    const symbol = channel.symbol && typeof channel.symbol === 'string' ? channel.symbol.trim() : '';
+    const unit = channel.unit && typeof channel.unit === 'string' ? channel.unit.trim() : '';
+    const scaleValue = toNumber(channel.scale, 1);
+    const offsetValue = toNumber(channel.offset, 0);
+    const rangeMinValue = toNumber(channel.rangeMin, null);
+    const rangeMaxValue = toNumber(channel.rangeMax, null);
+    const bitsValue = clampMeterBits(toNumber(channel.bits, 10));
+    const entry = {
+      id: trimmedId,
+      name: trimmedName,
+      label: trimmedLabel,
+      input: inputName,
+      symbol,
+      unit,
+      enabled: channel.enabled !== false,
+      scale: Number.isFinite(scaleValue) ? scaleValue : 1,
+      offset: Number.isFinite(offsetValue) ? offsetValue : 0,
+      rangeMin: Number.isFinite(rangeMinValue) ? rangeMinValue : null,
+      rangeMax: Number.isFinite(rangeMaxValue) ? rangeMaxValue : null,
+      bits: bitsValue
+    };
+    meterList.push(entry);
+  });
+  cfg.virtualMultimeter = { channelCount: meterList.length, channels: meterList };
   cfg.peers = [];
   knownPeers.forEach((pin, nodeId) => {
     if (!nodeId) return;
@@ -1462,6 +1880,7 @@ async function saveConfig() {
   logIoStep('Configuration assemblée avant envoi', {
     inputs: cfg.inputs.length,
     outputs: cfg.outputs.length,
+    meters: cfg.virtualMultimeter.channelCount,
     peers: cfg.peerCount
   });
 
@@ -1656,6 +2075,10 @@ window.addEventListener('DOMContentLoaded', () => {
   const addOutputBtn = document.getElementById('addOutputBtn');
   if (addOutputBtn) {
     addOutputBtn.addEventListener('click', addOutput);
+  }
+  const addMeterBtn = document.getElementById('addMeterBtn');
+  if (addMeterBtn) {
+    addMeterBtn.addEventListener('click', addMeterChannel);
   }
   ['modAds','modPwm','modDac','modZmpt','modZmct','modDiv'].forEach(id => {
     const checkbox = document.getElementById(id);

@@ -199,7 +199,7 @@ static const char *CONFIG_BACKUP_FILE_PATH = "/private/io_config.bak";
 static const char *CONFIG_TEMP_FILE_PATH = "/private/io_config.tmp";
 static const char *CONFIG_BACKUP_STAGING_PATH = "/private/io_config.bak.tmp";
 static const char *LEGACY_CONFIG_FILE_PATH = "/config.json";
-static const size_t CONFIG_JSON_CAPACITY = 9216;
+static const size_t CONFIG_JSON_CAPACITY = 12288;
 static const char SAMPLE_FILE_CONTENT[] = R"rawliteral(
 <!DOCTYPE html>
 <html lang="fr">
@@ -549,6 +549,7 @@ static String otaErrorMessage() {
 // application.  Keeping these small reduces memory usage on the ESP8266.
 static const uint8_t MAX_INPUTS  = 4;
 static const uint8_t MAX_OUTPUTS = 2;
+static const uint8_t MAX_METER_CHANNELS = 6;
 
 // UDP broadcast port for exchanging measurements between nodes.  All
 // MiniLabBox nodes should listen and transmit on this port.
@@ -689,6 +690,28 @@ struct ModulesConfig {
   bool mcp4725;
 };
 
+struct MeterChannelConfig {
+  String id;
+  String name;
+  String label;
+  String input;
+  String unit;
+  String symbol;
+  bool enabled;
+  float scale;
+  float offset;
+  bool hasRangeMin;
+  float rangeMin;
+  bool hasRangeMax;
+  float rangeMax;
+  uint8_t bits;
+};
+
+struct VirtualMultimeterConfig {
+  uint8_t channelCount;
+  MeterChannelConfig channels[MAX_METER_CHANNELS];
+};
+
 // Top level configuration.  This object is loaded from and saved to
 // LittleFS.  Changing any of these values via the web UI and saving
 // triggers a reboot so the new configuration can be applied.
@@ -700,6 +723,7 @@ struct Config {
   InputConfig   inputs[MAX_INPUTS];
   uint8_t       outputCount; // Number of configured outputs
   OutputConfig  outputs[MAX_OUTPUTS];
+  VirtualMultimeterConfig virtualMultimeter;
   uint8_t       peerCount;   // Number of stored peer PINs
   PeerAuth      peers[MAX_PEERS];
 };
@@ -1216,6 +1240,141 @@ void parseConfigFromJson(const JsonDocument &doc,
       }
     }
   }
+  for (uint8_t i = 0; i < MAX_METER_CHANNELS; ++i) {
+    target.virtualMultimeter.channels[i] = {"", "", "", "", "", "", false, 1.0f, 0.0f, false, 0.0f, false, 0.0f, 10};
+  }
+  target.virtualMultimeter.channelCount = 0;
+  JsonVariantConst meterVar = doc["virtualMultimeter"];
+  auto parseMeterChannelEntry = [&](JsonObjectConst o, int indexHint,
+                                    const String &entryLabel) {
+    if (target.virtualMultimeter.channelCount >= MAX_METER_CHANNELS) {
+      return;
+    }
+    MeterChannelConfig &mc =
+        target.virtualMultimeter.channels[target.virtualMultimeter.channelCount];
+    mc = {"", "", "", "", "", "", true, 1.0f, 0.0f, false, 0.0f, false, 0.0f, 10};
+    auto fallbackId = [&](void) {
+      if (entryLabel.length() > 0) {
+        return entryLabel;
+      }
+      if (indexHint >= 0) {
+        return String("meter") + String(indexHint + 1);
+      }
+      return String("meter") + String(target.virtualMultimeter.channelCount + 1);
+    };
+    if (o.containsKey("id")) {
+      mc.id = o["id"].as<String>();
+      mc.id.trim();
+    }
+    if (mc.id.length() == 0) {
+      mc.id = fallbackId();
+    }
+    if (o.containsKey("name")) {
+      mc.name = o["name"].as<String>();
+      mc.name.trim();
+    }
+    if (mc.name.length() == 0) {
+      mc.name = mc.id;
+    }
+    if (o.containsKey("label")) {
+      mc.label = o["label"].as<String>();
+      mc.label.trim();
+    }
+    if (mc.label.length() == 0) {
+      mc.label = mc.name;
+    }
+    if (o.containsKey("input")) {
+      mc.input = o["input"].as<String>();
+      mc.input.trim();
+    }
+    if (o.containsKey("unit")) {
+      mc.unit = o["unit"].as<String>();
+      mc.unit.trim();
+    }
+    if (o.containsKey("symbol")) {
+      mc.symbol = o["symbol"].as<String>();
+      mc.symbol.trim();
+    }
+    mc.enabled = o.containsKey("enabled") ? o["enabled"].as<bool>() : true;
+    mc.scale = o.containsKey("scale") ? o["scale"].as<float>() : 1.0f;
+    if (isnan(mc.scale)) mc.scale = 1.0f;
+    mc.offset = o.containsKey("offset") ? o["offset"].as<float>() : 0.0f;
+    if (isnan(mc.offset)) mc.offset = 0.0f;
+    if (o.containsKey("rangeMin") && !o["rangeMin"].isNull()) {
+      float value = o["rangeMin"].as<float>();
+      if (isnan(value)) {
+        mc.hasRangeMin = false;
+        mc.rangeMin = 0.0f;
+      } else {
+        mc.hasRangeMin = true;
+        mc.rangeMin = value;
+      }
+    } else {
+      mc.hasRangeMin = false;
+      mc.rangeMin = 0.0f;
+    }
+    if (o.containsKey("rangeMax") && !o["rangeMax"].isNull()) {
+      float value = o["rangeMax"].as<float>();
+      if (isnan(value)) {
+        mc.hasRangeMax = false;
+        mc.rangeMax = 0.0f;
+      } else {
+        mc.hasRangeMax = true;
+        mc.rangeMax = value;
+      }
+    } else {
+      mc.hasRangeMax = false;
+      mc.rangeMax = 0.0f;
+    }
+    int bitsValue = o.containsKey("bits") ? o["bits"].as<int>() : 10;
+    if (bitsValue < 1) bitsValue = 1;
+    if (bitsValue > 32) bitsValue = 32;
+    mc.bits = static_cast<uint8_t>(bitsValue);
+    target.virtualMultimeter.channelCount++;
+  };
+  auto parseMeterChannelArray = [&](JsonArrayConst arr) {
+    uint8_t index = 0;
+    for (JsonVariantConst entry : arr) {
+      JsonObjectConst obj = entry.as<JsonObjectConst>();
+      if (obj.isNull()) {
+        index++;
+        continue;
+      }
+      parseMeterChannelEntry(obj, index, String());
+      index++;
+    }
+  };
+  if (!meterVar.isNull()) {
+    JsonArrayConst arr = meterVar.as<JsonArrayConst>();
+    if (!arr.isNull()) {
+      parseMeterChannelArray(arr);
+    } else {
+      JsonObjectConst meterObj = meterVar.as<JsonObjectConst>();
+      if (!meterObj.isNull()) {
+        JsonArrayConst channelsArr = meterObj["channels"].as<JsonArrayConst>();
+        if (!channelsArr.isNull()) {
+          parseMeterChannelArray(channelsArr);
+        } else {
+          JsonObjectConst channelsObj = meterObj["channels"].as<JsonObjectConst>();
+          if (!channelsObj.isNull()) {
+            int index = 0;
+            for (JsonPairConst kv : channelsObj) {
+              if (target.virtualMultimeter.channelCount >= MAX_METER_CHANNELS) {
+                break;
+              }
+              JsonObjectConst entryObj = kv.value().as<JsonObjectConst>();
+              if (entryObj.isNull()) {
+                index++;
+                continue;
+              }
+              parseMeterChannelEntry(entryObj, index, String(kv.key().c_str()));
+              index++;
+            }
+          }
+        }
+      }
+    }
+  }
   target.peerCount = 0;
   JsonVariantConst peersVar = doc["peers"];
   auto parsePeerEntry = [&](JsonObjectConst o, const String &entryLabel,
@@ -1538,6 +1697,34 @@ static void populateConfigJson(JsonDocument &doc,
     o["active"] = oc.active;
     o["value"] = oc.value;
   }
+  JsonObject meterObj = doc.createNestedObject("virtualMultimeter");
+  meterObj["channelCount"] = config.virtualMultimeter.channelCount;
+  JsonArray meterArr = meterObj.createNestedArray("channels");
+  for (uint8_t i = 0;
+       i < config.virtualMultimeter.channelCount && i < MAX_METER_CHANNELS; ++i) {
+    const MeterChannelConfig &mc = config.virtualMultimeter.channels[i];
+    JsonObject entry = meterArr.createNestedObject();
+    entry["id"] = mc.id;
+    entry["name"] = mc.name;
+    entry["label"] = mc.label;
+    entry["input"] = mc.input;
+    entry["unit"] = mc.unit;
+    entry["symbol"] = mc.symbol;
+    entry["enabled"] = mc.enabled;
+    entry["scale"] = mc.scale;
+    entry["offset"] = mc.offset;
+    if (mc.hasRangeMin) {
+      entry["rangeMin"] = mc.rangeMin;
+    } else {
+      entry["rangeMin"] = nullptr;
+    }
+    if (mc.hasRangeMax) {
+      entry["rangeMax"] = mc.rangeMax;
+    } else {
+      entry["rangeMax"] = nullptr;
+    }
+    entry["bits"] = mc.bits;
+  }
   doc["peerCount"] = config.peerCount;
   JsonArray peersArr = doc.createNestedArray("peers");
   for (uint8_t i = 0; i < config.peerCount && i < MAX_PEERS; i++) {
@@ -1616,6 +1803,11 @@ void setDefaultConfig() {
   config.outputCount = 0;
   for (uint8_t i = 0; i < MAX_OUTPUTS; i++) {
     config.outputs[i] = {String("OUT") + String(i + 1), OUTPUT_DISABLED, -1, 2000, 0x60, 1.0f, 0.0f, false, 0.0f};
+  }
+
+  config.virtualMultimeter.channelCount = 0;
+  for (uint8_t i = 0; i < MAX_METER_CHANNELS; ++i) {
+    config.virtualMultimeter.channels[i] = {"", "", "", "", "", "", false, 1.0f, 0.0f, false, 0.0f, false, 0.0f, 10};
   }
 
   config.peerCount = 0;
