@@ -28,8 +28,10 @@
 #include <memory>
 #include <cstdlib>
 #include <math.h>
+#include <vector>
 
 #include "build_version.h"
+#include "virtual_lab/VirtualWorkspace.h"
 
 static void logPrintf(const char *fmt, ...);
 static void logMessage(const String &msg);
@@ -86,6 +88,97 @@ static void initFirmwareVersion() {
 
 static const char *getFirmwareVersion() {
   return firmwareVersion.c_str();
+}
+
+static bool decodeWaveformShape(const String &name,
+                                virtual_lab::WaveformShape &shape) {
+  String value = name;
+  value.toLowerCase();
+  if (value == "dc" || value == "constant") {
+    shape = virtual_lab::WaveformShape::DC;
+    return true;
+  }
+  if (value == "sine" || value == "sin" || value == "sinus") {
+    shape = virtual_lab::WaveformShape::Sine;
+    return true;
+  }
+  if (value == "square" || value == "carre" || value == "rect") {
+    shape = virtual_lab::WaveformShape::Square;
+    return true;
+  }
+  if (value == "triangle") {
+    shape = virtual_lab::WaveformShape::Triangle;
+    return true;
+  }
+  if (value == "saw" || value == "sawtooth" || value == "dent") {
+    shape = virtual_lab::WaveformShape::Sawtooth;
+    return true;
+  }
+  if (value == "noise") {
+    shape = virtual_lab::WaveformShape::Noise;
+    return true;
+  }
+  return false;
+}
+
+static bool decodeMultimeterMode(const String &name,
+                                 virtual_lab::MultimeterMode &mode) {
+  String value = name;
+  value.toLowerCase();
+  if (value == "dc" || value == "volt" || value == "tension") {
+    mode = virtual_lab::MultimeterMode::DC;
+    return true;
+  }
+  if (value == "ac" || value == "rms") {
+    mode = virtual_lab::MultimeterMode::AC_RMS;
+    return true;
+  }
+  if (value == "min") {
+    mode = virtual_lab::MultimeterMode::MIN;
+    return true;
+  }
+  if (value == "max") {
+    mode = virtual_lab::MultimeterMode::MAX;
+    return true;
+  }
+  if (value == "avg" || value == "average" || value == "moyenne") {
+    mode = virtual_lab::MultimeterMode::AVERAGE;
+    return true;
+  }
+  if (value == "pp" || value == "peak" || value == "peak_to_peak") {
+    mode = virtual_lab::MultimeterMode::PEAK_TO_PEAK;
+    return true;
+  }
+  return false;
+}
+
+static bool parseVariableBindings(JsonVariantConst variant,
+                                  std::vector<virtual_lab::VariableBinding> &out,
+                                  String &error) {
+  out.clear();
+  if (variant.isNull()) {
+    return true;
+  }
+  if (!variant.is<JsonArrayConst>()) {
+    error = "bindings_not_array";
+    return false;
+  }
+  for (JsonObjectConst binding : variant.as<JsonArrayConst>()) {
+    String variable = binding["variable"].as<String>();
+    if (variable.length() == 0) {
+      error = "binding_missing_variable";
+      return false;
+    }
+    String signalId = binding["signal"].as<String>();
+    if (signalId.length() == 0) {
+      signalId = variable;
+    }
+    virtual_lab::VariableBinding vb;
+    vb.variable = variable;
+    vb.signalId = signalId;
+    out.push_back(vb);
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -3238,6 +3331,362 @@ void registerRoutes(ServerT &server) {
     srv->send(200, "application/json", R"({"status":"ok"})");
   });
 
+  server.on("/api/virtual/workspace", HTTP_GET, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    DynamicJsonDocument doc(8192);
+    virtual_lab::VirtualWorkspace::Instance().populateSummaryJson(doc);
+    String payload;
+    serializeJson(doc, payload);
+    srv->send(200, "application/json", payload);
+  });
+
+  server.on("/api/virtual/function-generator/output", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", R"({"error":"No body"})");
+      return;
+    }
+    DynamicJsonDocument doc(1024);
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+      return;
+    }
+    virtual_lab::FunctionGeneratorOutputConfig config;
+    config.id = doc["id"].as<String>();
+    config.name = doc["name"].as<String>();
+    config.units = doc["units"].as<String>();
+    config.enabled = doc.containsKey("enabled") ? doc["enabled"].as<bool>() : true;
+    virtual_lab::WaveformSettings settings;
+    settings.amplitude = doc.containsKey("amplitude") ? doc["amplitude"].as<float>() : 1.0f;
+    settings.offset = doc.containsKey("offset") ? doc["offset"].as<float>() : 0.0f;
+    settings.frequency = doc.containsKey("frequency") ? doc["frequency"].as<float>() : 1.0f;
+    settings.phase = doc.containsKey("phase") ? doc["phase"].as<float>() : 0.0f;
+    settings.dutyCycle = doc.containsKey("dutyCycle") ? doc["dutyCycle"].as<float>() : 0.5f;
+    String shape = doc["shape"].as<String>();
+    if (shape.length() > 0) {
+      if (!decodeWaveformShape(shape, settings.shape)) {
+        srv->send(400, "application/json", R"({"error":"invalid_shape"})");
+        return;
+      }
+    }
+    config.settings = settings;
+    String error;
+    if (!virtual_lab::VirtualWorkspace::Instance().functionGenerator().configureOutput(
+            config, error)) {
+      DynamicJsonDocument resp(256);
+      resp["error"] = error;
+      String payload;
+      serializeJson(resp, payload);
+      srv->send(400, "application/json", payload);
+      return;
+    }
+    srv->send(200, "application/json", R"({"status":"ok"})");
+  });
+
+  server.on("/api/virtual/function-generator/output/remove", HTTP_POST,
+            [&server]() {
+              auto *srv = &server;
+              if (!requireAuth(srv)) return;
+              String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+              if (body.length() == 0) {
+                srv->send(400, "application/json", R"({"error":"No body"})");
+                return;
+              }
+              DynamicJsonDocument doc(256);
+              if (deserializeJson(doc, body)) {
+                srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+                return;
+              }
+              String id = doc["id"].as<String>();
+              if (!virtual_lab::VirtualWorkspace::Instance().functionGenerator().removeOutput(id)) {
+                srv->send(404, "application/json", R"({"error":"not found"})");
+                return;
+              }
+              srv->send(200, "application/json", R"({"status":"ok"})");
+            });
+
+  server.on("/api/virtual/oscilloscope/trace", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", R"({"error":"No body"})");
+      return;
+    }
+    DynamicJsonDocument doc(512);
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+      return;
+    }
+    virtual_lab::OscilloscopeTraceConfig config;
+    config.id = doc["id"].as<String>();
+    config.signalId = doc["signalId"].as<String>();
+    config.label = doc.containsKey("label") ? doc["label"].as<String>() : config.id;
+    config.enabled = doc.containsKey("enabled") ? doc["enabled"].as<bool>() : true;
+    if (!virtual_lab::VirtualWorkspace::Instance().oscilloscope().configureTrace(config)) {
+      srv->send(400, "application/json", R"({"error":"invalid_trace"})");
+      return;
+    }
+    srv->send(200, "application/json", R"({"status":"ok"})");
+  });
+
+  server.on("/api/virtual/oscilloscope/trace/remove", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", R"({"error":"No body"})");
+      return;
+    }
+    DynamicJsonDocument doc(256);
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+      return;
+    }
+    String id = doc["id"].as<String>();
+    if (!virtual_lab::VirtualWorkspace::Instance().oscilloscope().removeTrace(id)) {
+      srv->send(404, "application/json", R"({"error":"not found"})");
+      return;
+    }
+    srv->send(200, "application/json", R"({"status":"ok"})");
+  });
+
+  server.on("/api/virtual/oscilloscope/capture", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", R"({"error":"No body"})");
+      return;
+    }
+    DynamicJsonDocument doc(512);
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+      return;
+    }
+    virtual_lab::OscilloscopeCaptureRequest request;
+    request.startTime = doc.containsKey("startTime") ? doc["startTime"].as<float>() : 0.0f;
+    request.sampleRate = doc.containsKey("sampleRate") ? doc["sampleRate"].as<float>() : 1000.0f;
+    request.sampleCount = doc.containsKey("sampleCount") ? doc["sampleCount"].as<uint32_t>() : 512U;
+    virtual_lab::OscilloscopeCaptureResult capture;
+    String error;
+    if (!virtual_lab::VirtualWorkspace::Instance().oscilloscope().capture(request, capture, error)) {
+      DynamicJsonDocument resp(256);
+      resp["error"] = error;
+      String payload;
+      serializeJson(resp, payload);
+      srv->send(400, "application/json", payload);
+      return;
+    }
+    DynamicJsonDocument resp(16384);
+    JsonObject root = resp.to<JsonObject>();
+    root["sampleRate"] = capture.sampleRate;
+    JsonArray traces = root.createNestedArray("traces");
+    for (const auto &trace : capture.traces) {
+      JsonObject traceObj = traces.createNestedObject();
+      traceObj["id"] = trace.id;
+      traceObj["label"] = trace.label;
+      traceObj["enabled"] = trace.enabled;
+      JsonArray samples = traceObj.createNestedArray("samples");
+      for (float value : trace.samples) {
+        samples.add(value);
+      }
+    }
+    String payload;
+    serializeJson(resp, payload);
+    srv->send(200, "application/json", payload);
+  });
+
+  server.on("/api/virtual/multimeter/input", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", R"({"error":"No body"})");
+      return;
+    }
+    DynamicJsonDocument doc(512);
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+      return;
+    }
+    virtual_lab::MultimeterInputConfig config;
+    config.id = doc["id"].as<String>();
+    config.signalId = doc["signalId"].as<String>();
+    config.label = doc.containsKey("label") ? doc["label"].as<String>() : config.id;
+    config.enabled = doc.containsKey("enabled") ? doc["enabled"].as<bool>() : true;
+    if (!virtual_lab::VirtualWorkspace::Instance().multimeter().configureInput(config)) {
+      srv->send(400, "application/json", R"({"error":"invalid_input"})");
+      return;
+    }
+    srv->send(200, "application/json", R"({"status":"ok"})");
+  });
+
+  server.on("/api/virtual/multimeter/input/remove", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", R"({"error":"No body"})");
+      return;
+    }
+    DynamicJsonDocument doc(256);
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+      return;
+    }
+    String id = doc["id"].as<String>();
+    if (!virtual_lab::VirtualWorkspace::Instance().multimeter().removeInput(id)) {
+      srv->send(404, "application/json", R"({"error":"not found"})");
+      return;
+    }
+    srv->send(200, "application/json", R"({"status":"ok"})");
+  });
+
+  server.on("/api/virtual/multimeter/measure", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", R"({"error":"No body"})");
+      return;
+    }
+    DynamicJsonDocument doc(512);
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+      return;
+    }
+    virtual_lab::MultimeterMeasurementRequest request;
+    request.inputId = doc["inputId"].as<String>();
+    if (doc.containsKey("mode")) {
+      String mode = doc["mode"].as<String>();
+      if (!decodeMultimeterMode(mode, request.mode)) {
+        srv->send(400, "application/json", R"({"error":"invalid_mode"})");
+        return;
+      }
+    }
+    request.startTime = doc.containsKey("startTime") ? doc["startTime"].as<float>() : 0.0f;
+    request.sampleRate = doc.containsKey("sampleRate") ? doc["sampleRate"].as<float>() : 500.0f;
+    request.sampleCount = doc.containsKey("sampleCount") ? doc["sampleCount"].as<uint32_t>() : 128U;
+    virtual_lab::MultimeterMeasurementResult result;
+    String error;
+    if (!virtual_lab::VirtualWorkspace::Instance().multimeter().measure(request, result, error)) {
+      DynamicJsonDocument resp(256);
+      resp["error"] = error;
+      String payload;
+      serializeJson(resp, payload);
+      srv->send(400, "application/json", payload);
+      return;
+    }
+    DynamicJsonDocument resp(512);
+    JsonObject root = resp.to<JsonObject>();
+    root["inputId"] = result.inputId;
+    switch (result.mode) {
+      case virtual_lab::MultimeterMode::DC:
+        root["mode"] = "dc";
+        break;
+      case virtual_lab::MultimeterMode::AC_RMS:
+        root["mode"] = "ac_rms";
+        break;
+      case virtual_lab::MultimeterMode::MIN:
+        root["mode"] = "min";
+        break;
+      case virtual_lab::MultimeterMode::MAX:
+        root["mode"] = "max";
+        break;
+      case virtual_lab::MultimeterMode::AVERAGE:
+        root["mode"] = "average";
+        break;
+      case virtual_lab::MultimeterMode::PEAK_TO_PEAK:
+        root["mode"] = "peak_to_peak";
+        break;
+    }
+    root["value"] = result.value;
+    root["min"] = result.minValue;
+    root["max"] = result.maxValue;
+    String payload;
+    serializeJson(resp, payload);
+    srv->send(200, "application/json", payload);
+  });
+
+  server.on("/api/virtual/math/expression", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", R"({"error":"No body"})");
+      return;
+    }
+    DynamicJsonDocument doc(1536);
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+      return;
+    }
+    virtual_lab::MathExpressionConfig config;
+    config.id = doc["id"].as<String>();
+    config.name = doc.containsKey("name") ? doc["name"].as<String>() : config.id;
+    config.expression = doc["expression"].as<String>();
+    config.units = doc.containsKey("units") ? doc["units"].as<String>() : String();
+    String error;
+    if (!parseVariableBindings(doc["bindings"], config.bindings, error)) {
+      DynamicJsonDocument resp(256);
+      resp["error"] = error;
+      String payload;
+      serializeJson(resp, payload);
+      srv->send(400, "application/json", payload);
+      return;
+    }
+    if (!virtual_lab::VirtualWorkspace::Instance().mathZone().defineExpression(config, error)) {
+      DynamicJsonDocument resp(256);
+      resp["error"] = error;
+      String payload;
+      serializeJson(resp, payload);
+      srv->send(400, "application/json", payload);
+      return;
+    }
+    srv->send(200, "application/json", R"({"status":"ok"})");
+  });
+
+  server.on("/api/virtual/math/remove", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", R"({"error":"No body"})");
+      return;
+    }
+    DynamicJsonDocument doc(256);
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+      return;
+    }
+    String id = doc["id"].as<String>();
+    if (!virtual_lab::VirtualWorkspace::Instance().mathZone().removeExpression(id)) {
+      srv->send(404, "application/json", R"({"error":"not found"})");
+      return;
+    }
+    srv->send(200, "application/json", R"({"status":"ok"})");
+  });
+
+  server.on("/api/virtual/help", HTTP_GET, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    DynamicJsonDocument doc(4096);
+    JsonArray entries = doc.createNestedArray("entries");
+    for (const auto &entry : virtual_lab::VirtualWorkspace::Instance().helpMenu().entries()) {
+      JsonObject obj = entries.createNestedObject();
+      obj["key"] = entry.key;
+      obj["title"] = entry.title;
+      obj["text"] = entry.text;
+    }
+    String payload;
+    serializeJson(doc, payload);
+    srv->send(200, "application/json", payload);
+  });
+
   server.serveStatic("/", LittleFS, "/");
   server.onNotFound([&server]() {
     server.send(404, "text/plain", "Not found");
@@ -3288,6 +3737,21 @@ void setup() {
   udp.begin(BROADCAST_PORT);
   setupSensors();
   setupServer();
+  {
+    auto &workspace = virtual_lab::VirtualWorkspace::Instance();
+    auto ref5 = std::make_shared<virtual_lab::ConstantSignal>(
+        "REF5", String("Référence 5 V"), 5.0f);
+    ref5->setUnits("V");
+    workspace.registerSignal(ref5);
+    auto ref12 = std::make_shared<virtual_lab::ConstantSignal>(
+        "REF12", String("Référence 12 V"), 12.0f);
+    ref12->setUnits("V");
+    workspace.registerSignal(ref12);
+    auto gnd = std::make_shared<virtual_lab::ConstantSignal>(
+        "GND", String("Masse virtuelle"), 0.0f);
+    gnd->setUnits("V");
+    workspace.registerSignal(gnd);
+  }
   diagnosticHttp();
   triggerDiscovery();
   // After network and services are up, show basic status on the OLED
