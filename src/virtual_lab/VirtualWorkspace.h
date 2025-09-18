@@ -1,13 +1,12 @@
 #pragma once
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <memory>
 #include <vector>
 
 #include "virtual_lab/DidacticMenu.h"
 #include "virtual_lab/VirtualSignal.h"
-
-class JsonDocument;
 
 namespace virtual_lab {
 
