@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>Exemple – Pont diviseur DC</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 1em; max-width: 780px; }
+    h1 { margin-top: 0; }
+    .controls { display: flex; gap: 0.5em; align-items: center; flex-wrap: wrap; margin-bottom: 1em; }
+    select { padding: 0.3em; }
+    .panel { border: 1px solid #d0d7e2; border-radius: 8px; padding: 1em; background: #fdfefe; margin-bottom: 1em; }
+    .panel h2 { margin-top: 0; font-size: 1.05em; }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75em; }
+    .metric { background: #f3f7ff; border-radius: 6px; padding: 0.75em; }
+    .metric span { display: block; font-size: 0.85em; color: #4b5874; }
+    .metric strong { font-size: 1.4em; }
+    code { background: #eef2f8; padding: 0.2em 0.4em; border-radius: 4px; }
+    .hint { font-size: 0.95em; color: #34495e; }
+    .status { color: #c0392b; font-size: 0.9em; }
+  </style>
+  <script src="../auth.js"></script>
+  <script src="utils.js"></script>
+</head>
+<body>
+<h1>Exemple – Pont diviseur DC</h1>
+<p class="hint">Le mode <strong>Diviseur DC</strong> lit 32 échantillons de l'ADC 10 bits et en calcule la moyenne. Utilisez l'échelle pour retrouver la tension réelle avant division.</p>
+
+<div class="controls">
+  <label for="inputSelect">Entrée Diviseur&nbsp;:</label>
+  <select id="inputSelect"></select>
+  <span class="status" id="status"></span>
+</div>
+
+<div class="panel">
+  <h2>Détails de l'entrée</h2>
+  <p class="hint">Tag JSON&nbsp;: <code id="tagName">—</code> | Tag brut suggéré&nbsp;: <code id="tagRaw">—</code></p>
+  <p class="hint">Plage brute&nbsp;: 0–1023 bits | Plage physique dépend du rapport du pont</p>
+  <p class="hint">Broche mesurée&nbsp;: <span id="pinInfo">—</span></p>
+</div>
+
+<div class="panel">
+  <h2>Mesure instantanée</h2>
+  <div class="metrics">
+    <div class="metric">
+      <span>Tension calculée</span>
+      <strong id="value">—</strong>
+      <span id="unit">—</span>
+    </div>
+    <div class="metric">
+      <span>Bits moyens</span>
+      <strong id="rawBits">—</strong>
+      <span>0 à 1023</span>
+    </div>
+    <div class="metric">
+      <span>Échelle / Décalage</span>
+      <strong id="scaleInfo">—</strong>
+      <span>gain | offset</span>
+    </div>
+  </div>
+</div>
+
+<p class="hint">Astuce : mesurez la tension réelle à l'entrée du pont et ajustez l'échelle selon le rapport R1/R2 pour obtenir la valeur en volts.</p>
+
+<script>
+(function() {
+  let state = {
+    entries: [],
+    selected: null,
+    timer: null,
+    values: {}
+  };
+
+  const selectEl = document.getElementById('inputSelect');
+  const valueEl = document.getElementById('value');
+  const unitEl = document.getElementById('unit');
+  const rawEl = document.getElementById('rawBits');
+  const tagEl = document.getElementById('tagName');
+  const tagRawEl = document.getElementById('tagRaw');
+  const scaleEl = document.getElementById('scaleInfo');
+  const pinEl = document.getElementById('pinInfo');
+  const statusEl = document.getElementById('status');
+
+  function stopTimer() {
+    if (state.timer) {
+      clearInterval(state.timer);
+      state.timer = null;
+    }
+  }
+
+  function updateInfo(entry) {
+    if (!entry) {
+      tagEl.textContent = '—';
+      tagRawEl.textContent = '—';
+      unitEl.textContent = '—';
+      scaleEl.textContent = '—';
+      pinEl.textContent = '—';
+      return;
+    }
+    tagEl.textContent = entry.name;
+    const slug = ExampleUtils.slugFromName(entry.name);
+    tagRawEl.textContent = slug ? `${slug}_bits` : '—';
+    unitEl.textContent = entry.unit || '—';
+    const gain = ExampleUtils.normaliseNumber(entry.scale);
+    const offset = ExampleUtils.normaliseNumber(entry.offset) ?? 0;
+    scaleEl.textContent = `${gain ?? '—'} / ${offset}`;
+    pinEl.textContent = entry.pin || 'A0';
+  }
+
+  function updateDisplay() {
+    if (!state.selected) {
+      valueEl.textContent = '—';
+      rawEl.textContent = '—';
+      return;
+    }
+    const entry = state.entries.find(e => e.name === state.selected);
+    if (!entry) return;
+    const current = state.values[state.selected];
+    valueEl.textContent = ExampleUtils.formatNumber(current);
+    const raw = ExampleUtils.computeRawValue(current, entry.scale, entry.offset);
+    rawEl.textContent = raw === null ? '—' : raw.toFixed(0);
+  }
+
+  async function refreshValues() {
+    try {
+      const map = await ExampleUtils.fetchInputsValues();
+      state.values = map;
+      updateDisplay();
+      statusEl.textContent = '';
+    } catch (err) {
+      statusEl.textContent = err.message || 'Erreur de lecture';
+    }
+  }
+
+  function handleSelectChange() {
+    state.selected = selectEl.value || null;
+    const entry = state.entries.find(e => e.name === state.selected);
+    updateInfo(entry);
+    updateDisplay();
+  }
+
+  async function init() {
+    const cfg = await ExampleUtils.loadConfig();
+    state.entries = ExampleUtils.inputsByType(cfg, 'div');
+    selectEl.innerHTML = '';
+    if (!state.entries.length) {
+      const opt = document.createElement('option');
+      opt.textContent = 'Aucun diviseur actif';
+      opt.value = '';
+      selectEl.appendChild(opt);
+      selectEl.disabled = true;
+      statusEl.textContent = 'Activez le module Diviseur et assignez une broche.';
+      return;
+    }
+    state.entries.forEach(entry => {
+      const opt = document.createElement('option');
+      opt.value = entry.name;
+      const label = entry.pin ? `${entry.name} (${entry.pin})` : entry.name;
+      opt.textContent = label;
+      selectEl.appendChild(opt);
+    });
+    selectEl.disabled = false;
+    state.selected = state.entries[0].name;
+    selectEl.value = state.selected;
+    updateInfo(state.entries[0]);
+    await refreshValues();
+    stopTimer();
+    state.timer = setInterval(refreshValues, 1000);
+  }
+
+  selectEl.addEventListener('change', handleSelectChange);
+  window.addEventListener('beforeunload', stopTimer);
+
+  ensureSession()
+    .then(init)
+    .catch(err => {
+      statusEl.textContent = err.message || 'Authentification requise';
+    });
+})();
+</script>
+</body>
+</html>

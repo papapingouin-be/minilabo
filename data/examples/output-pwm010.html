@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>Exemple – Sortie PWM → 0–10 V</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 1em; max-width: 780px; }
+    h1 { margin-top: 0; }
+    .controls { display: flex; gap: 0.5em; align-items: center; flex-wrap: wrap; margin-bottom: 1em; }
+    select { padding: 0.3em; }
+    .panel { border: 1px solid #d0d7e2; border-radius: 8px; padding: 1em; background: #fdfefe; margin-bottom: 1em; }
+    .panel h2 { margin-top: 0; font-size: 1.05em; }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75em; }
+    .metric { background: #f3f7ff; border-radius: 6px; padding: 0.75em; }
+    .metric span { display: block; font-size: 0.85em; color: #4b5874; }
+    .metric strong { font-size: 1.4em; }
+    code { background: #eef2f8; padding: 0.2em 0.4em; border-radius: 4px; }
+    .hint { font-size: 0.95em; color: #34495e; }
+    .status { font-size: 0.9em; min-height: 1.2em; }
+    .status.ok { color: #2c3e50; }
+    .status:not(.ok) { color: #c0392b; }
+    .range-control { display: flex; align-items: center; gap: 0.75em; flex-wrap: wrap; }
+    .range-control input[type="range"] { flex: 1 1 240px; }
+    .range-control input[type="number"] { width: 100px; }
+    .badge { display: inline-flex; align-items: center; gap: 0.3em; font-size: 0.85em; padding: 0.2em 0.5em; border-radius: 999px; background: #ecf0f6; color: #34495e; }
+    .badge.active { background: #e8f8f0; color: #2f7a40; }
+    .actions { display: flex; gap: 0.5em; }
+    button { padding: 0.4em 0.9em; font-size: 1em; }
+  </style>
+  <script src="../auth.js"></script>
+  <script src="utils.js"></script>
+</head>
+<body>
+<h1>Exemple – Sortie PWM → 0–10 V</h1>
+<p class="hint">Cette page pilote une sortie configurée en <strong>PWM → 0–10 V</strong>. Le MiniLabBox convertit votre consigne (en volts ou autre unité) en un rapport cyclique 10 bits (0–1023) pour le convertisseur analogique.</p>
+
+<div class="controls">
+  <label for="outputSelect">Sortie PWM&nbsp;:</label>
+  <select id="outputSelect"></select>
+  <span class="status" id="status"></span>
+</div>
+
+<div class="panel">
+  <h2>Détails de la sortie</h2>
+  <p class="hint">Tag JSON&nbsp;: <code id="tagName">—</code></p>
+  <p class="hint">Échelle / Décalage&nbsp;: <span id="scaleInfo">—</span></p>
+  <p class="hint">Fréquence PWM&nbsp;: <span id="freqInfo">—</span></p>
+  <p class="hint">État&nbsp;: <span class="badge" id="activeBadge">—</span></p>
+</div>
+
+<div class="panel">
+  <h2>Envoyer une consigne</h2>
+  <div class="range-control">
+    <label for="valueRange">Consigne (typ. 0–10 V)&nbsp;:</label>
+    <input type="range" id="valueRange" min="0" max="10" step="0.1" value="0">
+    <input type="number" id="valueInput" step="0.1" value="0">
+    <div class="actions">
+      <button id="sendBtn" type="button">Appliquer</button>
+      <button id="zeroBtn" type="button">Mettre à 0</button>
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Consigne appliquée</h2>
+  <div class="metrics">
+    <div class="metric">
+      <span>Valeur envoyée</span>
+      <strong id="currentValue">—</strong>
+      <span id="unitHint">Unité définie dans la configuration</span>
+    </div>
+    <div class="metric">
+      <span>Rapport cyclique (bits)</span>
+      <strong id="rawBits">—</strong>
+      <span>0 à 1023</span>
+    </div>
+  </div>
+</div>
+
+<p class="hint">Astuce : pour un convertisseur standard, l’échelle vaut environ <code>102.3</code> (1023 bits / 10 V). Ajustez la consigne numérique pour tester rapidement votre actionneur.</p>
+
+<script>
+(function() {
+  'use strict';
+
+  const state = {
+    entries: [],
+    selected: null,
+    timer: null,
+    values: {},
+    editing: false,
+    editTimeout: null
+  };
+
+  const selectEl = document.getElementById('outputSelect');
+  const statusEl = document.getElementById('status');
+  const tagEl = document.getElementById('tagName');
+  const scaleEl = document.getElementById('scaleInfo');
+  const freqEl = document.getElementById('freqInfo');
+  const activeBadge = document.getElementById('activeBadge');
+  const rangeEl = document.getElementById('valueRange');
+  const inputEl = document.getElementById('valueInput');
+  const sendBtn = document.getElementById('sendBtn');
+  const zeroBtn = document.getElementById('zeroBtn');
+  const currentValueEl = document.getElementById('currentValue');
+  const rawBitsEl = document.getElementById('rawBits');
+  const unitHintEl = document.getElementById('unitHint');
+
+  function showStatus(message, isError = false) {
+    statusEl.textContent = message || '';
+    if (!message) {
+      statusEl.classList.remove('ok');
+      return;
+    }
+    if (isError) {
+      statusEl.classList.remove('ok');
+    } else {
+      statusEl.classList.add('ok');
+    }
+  }
+
+  function stopTimer() {
+    if (state.timer) {
+      clearInterval(state.timer);
+      state.timer = null;
+    }
+  }
+
+  function clearEditingSoon() {
+    if (state.editTimeout) {
+      clearTimeout(state.editTimeout);
+    }
+    state.editTimeout = setTimeout(() => {
+      state.editing = false;
+    }, 1500);
+  }
+
+  function markEditing() {
+    state.editing = true;
+    clearEditingSoon();
+  }
+
+  function updateInfo(entry) {
+    if (!entry) {
+      tagEl.textContent = '—';
+      scaleEl.textContent = '—';
+      freqEl.textContent = '—';
+      activeBadge.textContent = '—';
+      activeBadge.classList.remove('active');
+      rangeEl.disabled = true;
+      inputEl.disabled = true;
+      sendBtn.disabled = true;
+      zeroBtn.disabled = true;
+      unitHintEl.textContent = 'Unité définie dans la configuration';
+      return;
+    }
+    tagEl.textContent = entry.name;
+    const gain = ExampleUtils.normaliseNumber(entry.scale);
+    const offset = ExampleUtils.normaliseNumber(entry.offset) ?? 0;
+    scaleEl.textContent = `${gain ?? '—'} / ${offset}`;
+    const freq = ExampleUtils.normaliseNumber(entry.pwmFreq);
+    freqEl.textContent = freq ? `${freq} Hz` : 'Fréquence par défaut (≈2000 Hz)';
+    rangeEl.disabled = false;
+    inputEl.disabled = false;
+    sendBtn.disabled = false;
+    zeroBtn.disabled = false;
+    unitHintEl.textContent = 'Unité définie dans la configuration';
+  }
+
+  function applyActiveBadge(data) {
+    if (!data) {
+      activeBadge.textContent = '—';
+      activeBadge.classList.remove('active');
+      return;
+    }
+    if (data.active) {
+      activeBadge.textContent = 'Sortie active';
+      activeBadge.classList.add('active');
+    } else {
+      activeBadge.textContent = 'Sortie désactivée';
+      activeBadge.classList.remove('active');
+    }
+  }
+
+  function clamp(value, min, max) {
+    if (!Number.isFinite(value)) return value;
+    if (Number.isFinite(min) && value < min) return min;
+    if (Number.isFinite(max) && value > max) return max;
+    return value;
+  }
+
+  function updateControlsFromValue(value) {
+    const num = ExampleUtils.normaliseNumber(value);
+    if (num === null) {
+      return;
+    }
+    const clamped = clamp(num, Number(rangeEl.min), Number(rangeEl.max));
+    rangeEl.value = clamped;
+    inputEl.value = num.toFixed(2);
+  }
+
+  function updateDisplay() {
+    if (!state.selected) {
+      currentValueEl.textContent = '—';
+      rawBitsEl.textContent = '—';
+      applyActiveBadge(null);
+      return;
+    }
+    const entry = state.entries.find(e => e.name === state.selected);
+    const measurement = state.values[state.selected];
+    const current = measurement ? measurement.value : null;
+    currentValueEl.textContent = ExampleUtils.formatNumber(current, 2);
+    applyActiveBadge(measurement);
+    if (entry) {
+      const raw = ExampleUtils.applyOutputScale(current, entry.scale, entry.offset);
+      rawBitsEl.textContent = raw === null ? '—' : raw.toFixed(0);
+      if (!state.editing) {
+        updateControlsFromValue(current);
+      }
+    } else {
+      rawBitsEl.textContent = '—';
+    }
+  }
+
+  async function refreshValues() {
+    try {
+      const map = await ExampleUtils.fetchOutputsValues();
+      state.values = map;
+      updateDisplay();
+      showStatus('');
+    } catch (err) {
+      showStatus(err.message || 'Erreur de lecture', true);
+    }
+  }
+
+  function handleSelectChange() {
+    state.selected = selectEl.value || null;
+    const entry = state.entries.find(e => e.name === state.selected);
+    updateInfo(entry);
+    updateDisplay();
+  }
+
+  async function sendValue(value) {
+    if (!state.selected) {
+      showStatus('Sélectionnez une sortie PWM.', true);
+      return;
+    }
+    const num = ExampleUtils.normaliseNumber(value);
+    if (num === null) {
+      showStatus('Valeur invalide.', true);
+      return;
+    }
+    try {
+      showStatus('Envoi en cours…');
+      await ExampleUtils.sendOutputValue(state.selected, num);
+      showStatus('Consigne appliquée.');
+      await refreshValues();
+    } catch (err) {
+      showStatus(err.message || 'Échec de l’envoi.', true);
+    }
+  }
+
+  function handleSendClick() {
+    sendValue(inputEl.value);
+  }
+
+  function handleZeroClick() {
+    rangeEl.value = '0';
+    inputEl.value = '0';
+    sendValue(0);
+  }
+
+  function handleRangeInput() {
+    markEditing();
+    inputEl.value = parseFloat(rangeEl.value).toFixed(2);
+  }
+
+  function handleNumberInput() {
+    markEditing();
+    const num = ExampleUtils.normaliseNumber(inputEl.value);
+    if (num !== null) {
+      const clamped = clamp(num, Number(rangeEl.min), Number(rangeEl.max));
+      rangeEl.value = clamped;
+    }
+  }
+
+  async function init() {
+    const cfg = await ExampleUtils.loadConfig();
+    state.entries = ExampleUtils.outputsByType(cfg, 'pwm010');
+    selectEl.innerHTML = '';
+    if (!state.entries.length) {
+      const opt = document.createElement('option');
+      opt.textContent = 'Aucune sortie PWM active';
+      opt.value = '';
+      selectEl.appendChild(opt);
+      selectEl.disabled = true;
+      showStatus('Activez une sortie PWM dans la configuration.', true);
+      updateInfo(null);
+      return;
+    }
+    state.entries.forEach(entry => {
+      const opt = document.createElement('option');
+      opt.value = entry.name;
+      opt.textContent = entry.name;
+      selectEl.appendChild(opt);
+    });
+    selectEl.disabled = false;
+    state.selected = state.entries[0].name;
+    selectEl.value = state.selected;
+    updateInfo(state.entries[0]);
+    await refreshValues();
+    stopTimer();
+    state.timer = setInterval(refreshValues, 1000);
+  }
+
+  selectEl.addEventListener('change', handleSelectChange);
+  sendBtn.addEventListener('click', handleSendClick);
+  zeroBtn.addEventListener('click', handleZeroClick);
+  rangeEl.addEventListener('input', handleRangeInput);
+  inputEl.addEventListener('input', handleNumberInput);
+  window.addEventListener('beforeunload', stopTimer);
+
+  ensureSession()
+    .then(init)
+    .catch(err => {
+      showStatus(err.message || 'Authentification requise', true);
+    });
+})();
+</script>
+</body>
+</html>
