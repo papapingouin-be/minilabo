@@ -209,8 +209,10 @@ void VirtualWorkspace::populateSummaryJson(JsonDocument &doc) const {
     JsonObject obj = mathExpressions.createNestedObject();
     obj["id"] = exprId;
     auto signal = findSignal(exprId);
-    auto mathSignal =
-        std::dynamic_pointer_cast<const MathVirtualSignal>(signal);
+    if (!signal) {
+      continue;
+    }
+    auto mathSignal = signal->asMathSignal();
     if (mathSignal) {
       obj["expression"] = mathSignal->expression();
     }
