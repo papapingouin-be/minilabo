@@ -2,7 +2,7 @@
 <html lang="fr">
 <head>
   <meta charset="utf-8">
-  <title>Exemple – Entrée ADS1115</title>
+  <title>Exemple – Entrée distante</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 1em; max-width: 780px; }
     h1 { margin-top: 0; }
@@ -10,36 +10,36 @@
     select { padding: 0.3em; }
     .panel { border: 1px solid #d0d7e2; border-radius: 8px; padding: 1em; background: #fdfefe; margin-bottom: 1em; }
     .panel h2 { margin-top: 0; font-size: 1.05em; }
-    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75em; }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75em; }
     .metric { background: #f3f7ff; border-radius: 6px; padding: 0.75em; }
     .metric span { display: block; font-size: 0.85em; color: #4b5874; }
-    .metric strong { font-size: 1.4em; }
+    .metric strong { font-size: 1.3em; }
     code { background: #eef2f8; padding: 0.2em 0.4em; border-radius: 4px; }
     .hint { font-size: 0.95em; color: #34495e; }
     .status { color: #c0392b; font-size: 0.9em; }
   </style>
   <script src="../auth.js"></script>
-  <script src="utils.js"></script>
+  <script src="io-exemples-utils.js"></script>
 </head>
 <body>
-<h1>Exemple – ADC externe ADS1115</h1>
-<p class="hint">L'ADS1115 fournit une conversion 16 bits (0–32767) sur une plage 0–4,096 V avec le gain ×1 utilisé par MiniLabBox. Sélectionnez l'entrée pour vérifier la lecture et déduire les bits bruts.</p>
+<h1>Exemple – Entrée distante</h1>
+<p class="hint">Une entrée de type <strong>remote</strong> applique une échelle à la valeur reçue d'un autre nœud MiniLabBox. Vérifiez ici que le nom de nœud et le nom distant correspondent et observez la valeur avant/après conversion.</p>
 
 <div class="controls">
-  <label for="inputSelect">Entrée ADS1115&nbsp;:</label>
+  <label for="inputSelect">Entrée distante&nbsp;:</label>
   <select id="inputSelect"></select>
   <span class="status" id="status"></span>
 </div>
 
 <div class="panel">
   <h2>Détails de l'entrée</h2>
-  <p class="hint">Tag JSON&nbsp;: <code id="tagName">—</code> | Tag brut suggéré&nbsp;: <code id="tagRaw">—</code></p>
-  <p class="hint">Plage brute&nbsp;: 0–32767 codes | Plage physique typique&nbsp;: 0–4,096 V</p>
-  <p class="hint">Canal ADS1115&nbsp;: <span id="channelInfo">—</span></p>
+  <p class="hint">Tag JSON&nbsp;: <code id="tagName">—</code></p>
+  <p class="hint">Nœud distant&nbsp;: <span id="remoteNode">—</span> | Nom distant&nbsp;: <span id="remoteName">—</span></p>
+  <p class="hint">Échelle appliquée&nbsp;: <span id="scaleInfo">—</span></p>
 </div>
 
 <div class="panel">
-  <h2>Mesure instantanée</h2>
+  <h2>Valeurs reçues</h2>
   <div class="metrics">
     <div class="metric">
       <span>Valeur convertie</span>
@@ -47,19 +47,14 @@
       <span id="unit">—</span>
     </div>
     <div class="metric">
-      <span>Codes bruts estimés</span>
-      <strong id="rawBits">—</strong>
-      <span>0 à 32767</span>
-    </div>
-    <div class="metric">
-      <span>Échelle / Décalage</span>
-      <strong id="scaleInfo">—</strong>
-      <span>gain | offset</span>
+      <span>Valeur reçue (avant échelle)</span>
+      <strong id="rawValue">—</strong>
+      <span>Directement depuis le nœud distant</span>
     </div>
   </div>
 </div>
 
-<p class="hint">Astuce : avec un gain de 1, chaque bit vaut environ 125 µV (4,096 V / 32768). Utilisez cette valeur pour calculer l'échelle qui convertit les codes en volts.</p>
+<p class="hint">Assurez-vous que le nœud distant diffuse bien la mesure via UDP et que les identifiants <em>remoteNode</em> et <em>remoteName</em> correspondent exactement à sa configuration.</p>
 
 <script>
 (function() {
@@ -73,11 +68,11 @@
   const selectEl = document.getElementById('inputSelect');
   const valueEl = document.getElementById('value');
   const unitEl = document.getElementById('unit');
-  const rawEl = document.getElementById('rawBits');
+  const rawEl = document.getElementById('rawValue');
   const tagEl = document.getElementById('tagName');
-  const tagRawEl = document.getElementById('tagRaw');
+  const nodeEl = document.getElementById('remoteNode');
+  const nameEl = document.getElementById('remoteName');
   const scaleEl = document.getElementById('scaleInfo');
-  const channelEl = document.getElementById('channelInfo');
   const statusEl = document.getElementById('status');
 
   function stopTimer() {
@@ -90,20 +85,19 @@
   function updateInfo(entry) {
     if (!entry) {
       tagEl.textContent = '—';
-      tagRawEl.textContent = '—';
-      scaleEl.textContent = '—';
+      nodeEl.textContent = '—';
+      nameEl.textContent = '—';
       unitEl.textContent = '—';
-      channelEl.textContent = '—';
+      scaleEl.textContent = '—';
       return;
     }
     tagEl.textContent = entry.name;
-    const slug = ExampleUtils.slugFromName(entry.name);
-    tagRawEl.textContent = slug ? `${slug}_bits` : '—';
+    nodeEl.textContent = entry.remoteNode || '—';
+    nameEl.textContent = entry.remoteName || '—';
     unitEl.textContent = entry.unit || '—';
     const gain = ExampleUtils.normaliseNumber(entry.scale);
     const offset = ExampleUtils.normaliseNumber(entry.offset) ?? 0;
     scaleEl.textContent = `${gain ?? '—'} / ${offset}`;
-    channelEl.textContent = Number.isFinite(entry.adsChannel) ? `A${entry.adsChannel}` : '—';
   }
 
   function updateDisplay() {
@@ -116,8 +110,8 @@
     if (!entry) return;
     const current = state.values[state.selected];
     valueEl.textContent = ExampleUtils.formatNumber(current);
-    const raw = ExampleUtils.computeRawValue(current, entry.scale, entry.offset);
-    rawEl.textContent = raw === null ? '—' : raw.toFixed(0);
+    const remoteVal = ExampleUtils.computeRawValue(current, entry.scale, entry.offset);
+    rawEl.textContent = remoteVal === null ? '—' : ExampleUtils.formatNumber(remoteVal);
   }
 
   async function refreshValues() {
@@ -140,22 +134,23 @@
 
   async function init() {
     const cfg = await ExampleUtils.loadConfig();
-    state.entries = ExampleUtils.inputsByType(cfg, 'ads1115');
+    state.entries = ExampleUtils.inputsByType(cfg, 'remote');
     selectEl.innerHTML = '';
     if (!state.entries.length) {
       const opt = document.createElement('option');
-      opt.textContent = 'Aucune entrée ADS1115 active';
+      opt.textContent = 'Aucune entrée distante active';
       opt.value = '';
       selectEl.appendChild(opt);
       selectEl.disabled = true;
-      statusEl.textContent = 'Activez le module ADS1115 et ajoutez une entrée.';
+      statusEl.textContent = 'Ajoutez une entrée remote pour voir les valeurs reçues.';
       return;
     }
     state.entries.forEach(entry => {
       const opt = document.createElement('option');
       opt.value = entry.name;
-      const label = Number.isFinite(entry.adsChannel) ? `${entry.name} (A${entry.adsChannel})` : entry.name;
-      opt.textContent = label;
+      const labelParts = [entry.name];
+      if (entry.remoteNode) labelParts.push(`← ${entry.remoteNode}`);
+      opt.textContent = labelParts.join(' ');
       selectEl.appendChild(opt);
     });
     selectEl.disabled = false;

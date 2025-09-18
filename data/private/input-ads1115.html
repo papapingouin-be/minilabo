@@ -2,7 +2,7 @@
 <html lang="fr">
 <head>
   <meta charset="utf-8">
-  <title>Exemple – Entrée ADC interne</title>
+  <title>Exemple – Entrée ADS1115</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 1em; max-width: 780px; }
     h1 { margin-top: 0; }
@@ -19,14 +19,14 @@
     .status { color: #c0392b; font-size: 0.9em; }
   </style>
   <script src="../auth.js"></script>
-  <script src="utils.js"></script>
+  <script src="io-exemples-utils.js"></script>
 </head>
 <body>
-<h1>Exemple – ADC interne (A0)</h1>
-<p class="hint">Cette page affiche en direct une entrée configurée en <strong>ADC interne</strong>. L'ESP8266 mesure 10 bits (0–1023) correspondant à environ 0–1,0 V sur la broche A0. Utilisez l'échelle pour convertir ces bits en volts ou en toute autre unité.</p>
+<h1>Exemple – ADC externe ADS1115</h1>
+<p class="hint">L'ADS1115 fournit une conversion 16 bits (0–32767) sur une plage 0–4,096 V avec le gain ×1 utilisé par MiniLabBox. Sélectionnez l'entrée pour vérifier la lecture et déduire les bits bruts.</p>
 
 <div class="controls">
-  <label for="inputSelect">Entrée ADC&nbsp;:</label>
+  <label for="inputSelect">Entrée ADS1115&nbsp;:</label>
   <select id="inputSelect"></select>
   <span class="status" id="status"></span>
 </div>
@@ -34,8 +34,8 @@
 <div class="panel">
   <h2>Détails de l'entrée</h2>
   <p class="hint">Tag JSON&nbsp;: <code id="tagName">—</code> | Tag brut suggéré&nbsp;: <code id="tagRaw">—</code></p>
-  <p class="hint">Plage brute&nbsp;: 0–1023 bits | Plage physique typique&nbsp;: 0–1,0 V</p>
-  <p class="hint">Broche mesurée&nbsp;: <span id="pinInfo">—</span></p>
+  <p class="hint">Plage brute&nbsp;: 0–32767 codes | Plage physique typique&nbsp;: 0–4,096 V</p>
+  <p class="hint">Canal ADS1115&nbsp;: <span id="channelInfo">—</span></p>
 </div>
 
 <div class="panel">
@@ -47,9 +47,9 @@
       <span id="unit">—</span>
     </div>
     <div class="metric">
-      <span>Bits estimés</span>
+      <span>Codes bruts estimés</span>
       <strong id="rawBits">—</strong>
-      <span>0 à 1023</span>
+      <span>0 à 32767</span>
     </div>
     <div class="metric">
       <span>Échelle / Décalage</span>
@@ -59,7 +59,7 @@
   </div>
 </div>
 
-<p class="hint">Astuce : pour obtenir des volts à partir des bits, utilisez une échelle proche de 0,001 (1/1023). Un décalage positif permet de corriger une éventuelle dérive du zéro.</p>
+<p class="hint">Astuce : avec un gain de 1, chaque bit vaut environ 125 µV (4,096 V / 32768). Utilisez cette valeur pour calculer l'échelle qui convertit les codes en volts.</p>
 
 <script>
 (function() {
@@ -77,8 +77,8 @@
   const tagEl = document.getElementById('tagName');
   const tagRawEl = document.getElementById('tagRaw');
   const scaleEl = document.getElementById('scaleInfo');
+  const channelEl = document.getElementById('channelInfo');
   const statusEl = document.getElementById('status');
-  const pinInfoEl = document.getElementById('pinInfo');
 
   function stopTimer() {
     if (state.timer) {
@@ -93,17 +93,17 @@
       tagRawEl.textContent = '—';
       scaleEl.textContent = '—';
       unitEl.textContent = '—';
-      pinInfoEl.textContent = '—';
+      channelEl.textContent = '—';
       return;
     }
     tagEl.textContent = entry.name;
     const slug = ExampleUtils.slugFromName(entry.name);
     tagRawEl.textContent = slug ? `${slug}_bits` : '—';
     unitEl.textContent = entry.unit || '—';
-    pinInfoEl.textContent = entry.pin || 'A0';
     const gain = ExampleUtils.normaliseNumber(entry.scale);
     const offset = ExampleUtils.normaliseNumber(entry.offset) ?? 0;
     scaleEl.textContent = `${gain ?? '—'} / ${offset}`;
+    channelEl.textContent = Number.isFinite(entry.adsChannel) ? `A${entry.adsChannel}` : '—';
   }
 
   function updateDisplay() {
@@ -140,21 +140,22 @@
 
   async function init() {
     const cfg = await ExampleUtils.loadConfig();
-    state.entries = ExampleUtils.inputsByType(cfg, 'adc');
+    state.entries = ExampleUtils.inputsByType(cfg, 'ads1115');
     selectEl.innerHTML = '';
     if (!state.entries.length) {
       const opt = document.createElement('option');
-      opt.textContent = 'Aucune entrée ADC active';
+      opt.textContent = 'Aucune entrée ADS1115 active';
       opt.value = '';
       selectEl.appendChild(opt);
       selectEl.disabled = true;
-      statusEl.textContent = 'Activez une entrée ADC dans la configuration.';
+      statusEl.textContent = 'Activez le module ADS1115 et ajoutez une entrée.';
       return;
     }
     state.entries.forEach(entry => {
       const opt = document.createElement('option');
       opt.value = entry.name;
-      opt.textContent = entry.name;
+      const label = Number.isFinite(entry.adsChannel) ? `${entry.name} (A${entry.adsChannel})` : entry.name;
+      opt.textContent = label;
       selectEl.appendChild(opt);
     });
     selectEl.disabled = false;

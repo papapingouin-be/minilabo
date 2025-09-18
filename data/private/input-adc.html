@@ -2,7 +2,7 @@
 <html lang="fr">
 <head>
   <meta charset="utf-8">
-  <title>Exemple – Entrée distante</title>
+  <title>Exemple – Entrée ADC interne</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 1em; max-width: 780px; }
     h1 { margin-top: 0; }
@@ -10,36 +10,36 @@
     select { padding: 0.3em; }
     .panel { border: 1px solid #d0d7e2; border-radius: 8px; padding: 1em; background: #fdfefe; margin-bottom: 1em; }
     .panel h2 { margin-top: 0; font-size: 1.05em; }
-    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75em; }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75em; }
     .metric { background: #f3f7ff; border-radius: 6px; padding: 0.75em; }
     .metric span { display: block; font-size: 0.85em; color: #4b5874; }
-    .metric strong { font-size: 1.3em; }
+    .metric strong { font-size: 1.4em; }
     code { background: #eef2f8; padding: 0.2em 0.4em; border-radius: 4px; }
     .hint { font-size: 0.95em; color: #34495e; }
     .status { color: #c0392b; font-size: 0.9em; }
   </style>
   <script src="../auth.js"></script>
-  <script src="utils.js"></script>
+  <script src="io-exemples-utils.js"></script>
 </head>
 <body>
-<h1>Exemple – Entrée distante</h1>
-<p class="hint">Une entrée de type <strong>remote</strong> applique une échelle à la valeur reçue d'un autre nœud MiniLabBox. Vérifiez ici que le nom de nœud et le nom distant correspondent et observez la valeur avant/après conversion.</p>
+<h1>Exemple – ADC interne (A0)</h1>
+<p class="hint">Cette page affiche en direct une entrée configurée en <strong>ADC interne</strong>. L'ESP8266 mesure 10 bits (0–1023) correspondant à environ 0–1,0 V sur la broche A0. Utilisez l'échelle pour convertir ces bits en volts ou en toute autre unité.</p>
 
 <div class="controls">
-  <label for="inputSelect">Entrée distante&nbsp;:</label>
+  <label for="inputSelect">Entrée ADC&nbsp;:</label>
   <select id="inputSelect"></select>
   <span class="status" id="status"></span>
 </div>
 
 <div class="panel">
   <h2>Détails de l'entrée</h2>
-  <p class="hint">Tag JSON&nbsp;: <code id="tagName">—</code></p>
-  <p class="hint">Nœud distant&nbsp;: <span id="remoteNode">—</span> | Nom distant&nbsp;: <span id="remoteName">—</span></p>
-  <p class="hint">Échelle appliquée&nbsp;: <span id="scaleInfo">—</span></p>
+  <p class="hint">Tag JSON&nbsp;: <code id="tagName">—</code> | Tag brut suggéré&nbsp;: <code id="tagRaw">—</code></p>
+  <p class="hint">Plage brute&nbsp;: 0–1023 bits | Plage physique typique&nbsp;: 0–1,0 V</p>
+  <p class="hint">Broche mesurée&nbsp;: <span id="pinInfo">—</span></p>
 </div>
 
 <div class="panel">
-  <h2>Valeurs reçues</h2>
+  <h2>Mesure instantanée</h2>
   <div class="metrics">
     <div class="metric">
       <span>Valeur convertie</span>
@@ -47,14 +47,19 @@
       <span id="unit">—</span>
     </div>
     <div class="metric">
-      <span>Valeur reçue (avant échelle)</span>
-      <strong id="rawValue">—</strong>
-      <span>Directement depuis le nœud distant</span>
+      <span>Bits estimés</span>
+      <strong id="rawBits">—</strong>
+      <span>0 à 1023</span>
+    </div>
+    <div class="metric">
+      <span>Échelle / Décalage</span>
+      <strong id="scaleInfo">—</strong>
+      <span>gain | offset</span>
     </div>
   </div>
 </div>
 
-<p class="hint">Assurez-vous que le nœud distant diffuse bien la mesure via UDP et que les identifiants <em>remoteNode</em> et <em>remoteName</em> correspondent exactement à sa configuration.</p>
+<p class="hint">Astuce : pour obtenir des volts à partir des bits, utilisez une échelle proche de 0,001 (1/1023). Un décalage positif permet de corriger une éventuelle dérive du zéro.</p>
 
 <script>
 (function() {
@@ -68,12 +73,12 @@
   const selectEl = document.getElementById('inputSelect');
   const valueEl = document.getElementById('value');
   const unitEl = document.getElementById('unit');
-  const rawEl = document.getElementById('rawValue');
+  const rawEl = document.getElementById('rawBits');
   const tagEl = document.getElementById('tagName');
-  const nodeEl = document.getElementById('remoteNode');
-  const nameEl = document.getElementById('remoteName');
+  const tagRawEl = document.getElementById('tagRaw');
   const scaleEl = document.getElementById('scaleInfo');
   const statusEl = document.getElementById('status');
+  const pinInfoEl = document.getElementById('pinInfo');
 
   function stopTimer() {
     if (state.timer) {
@@ -85,16 +90,17 @@
   function updateInfo(entry) {
     if (!entry) {
       tagEl.textContent = '—';
-      nodeEl.textContent = '—';
-      nameEl.textContent = '—';
-      unitEl.textContent = '—';
+      tagRawEl.textContent = '—';
       scaleEl.textContent = '—';
+      unitEl.textContent = '—';
+      pinInfoEl.textContent = '—';
       return;
     }
     tagEl.textContent = entry.name;
-    nodeEl.textContent = entry.remoteNode || '—';
-    nameEl.textContent = entry.remoteName || '—';
+    const slug = ExampleUtils.slugFromName(entry.name);
+    tagRawEl.textContent = slug ? `${slug}_bits` : '—';
     unitEl.textContent = entry.unit || '—';
+    pinInfoEl.textContent = entry.pin || 'A0';
     const gain = ExampleUtils.normaliseNumber(entry.scale);
     const offset = ExampleUtils.normaliseNumber(entry.offset) ?? 0;
     scaleEl.textContent = `${gain ?? '—'} / ${offset}`;
@@ -110,8 +116,8 @@
     if (!entry) return;
     const current = state.values[state.selected];
     valueEl.textContent = ExampleUtils.formatNumber(current);
-    const remoteVal = ExampleUtils.computeRawValue(current, entry.scale, entry.offset);
-    rawEl.textContent = remoteVal === null ? '—' : ExampleUtils.formatNumber(remoteVal);
+    const raw = ExampleUtils.computeRawValue(current, entry.scale, entry.offset);
+    rawEl.textContent = raw === null ? '—' : raw.toFixed(0);
   }
 
   async function refreshValues() {
@@ -134,23 +140,21 @@
 
   async function init() {
     const cfg = await ExampleUtils.loadConfig();
-    state.entries = ExampleUtils.inputsByType(cfg, 'remote');
+    state.entries = ExampleUtils.inputsByType(cfg, 'adc');
     selectEl.innerHTML = '';
     if (!state.entries.length) {
       const opt = document.createElement('option');
-      opt.textContent = 'Aucune entrée distante active';
+      opt.textContent = 'Aucune entrée ADC active';
       opt.value = '';
       selectEl.appendChild(opt);
       selectEl.disabled = true;
-      statusEl.textContent = 'Ajoutez une entrée remote pour voir les valeurs reçues.';
+      statusEl.textContent = 'Activez une entrée ADC dans la configuration.';
       return;
     }
     state.entries.forEach(entry => {
       const opt = document.createElement('option');
       opt.value = entry.name;
-      const labelParts = [entry.name];
-      if (entry.remoteNode) labelParts.push(`← ${entry.remoteNode}`);
-      opt.textContent = labelParts.join(' ');
+      opt.textContent = entry.name;
       selectEl.appendChild(opt);
     });
     selectEl.disabled = false;
