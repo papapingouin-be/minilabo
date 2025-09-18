@@ -9,6 +9,8 @@ namespace virtual_lab {
 class VirtualWorkspace;
 class MathExpression;
 
+class MathVirtualSignal;
+
 class VirtualSignal {
  public:
   enum class Kind { Constant, Waveform, Math, External };
@@ -33,6 +35,8 @@ class VirtualSignal {
   const String &helpKey() const { return helpKey_; }
 
   virtual float sample(const SampleContext &ctx) const = 0;
+
+  virtual const MathVirtualSignal *asMathSignal() const { return nullptr; }
 
  protected:
   String id_;
@@ -84,6 +88,8 @@ class MathVirtualSignal : public VirtualSignal {
  public:
   MathVirtualSignal(const String &id, const String &name);
   ~MathVirtualSignal();
+
+  const MathVirtualSignal *asMathSignal() const override { return this; }
 
   bool configure(const String &expression,
                  const std::vector<VariableBinding> &bindings,
