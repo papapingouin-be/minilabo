@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>MiniLabBox – Bibliothèque d'exemples IO</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 1em; max-width: 960px; }
+    h1 { margin-top: 0; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1em; padding: 0; list-style: none; }
+    .card { border: 1px solid #d0d7e2; border-radius: 8px; padding: 1em; background: #fdfefe; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    .card h2 { margin: 0 0 0.4em; font-size: 1.05em; }
+    .card p { margin: 0 0 0.6em; font-size: 0.95em; color: #34495e; }
+    .card a { color: #1d5fa7; text-decoration: none; font-weight: bold; }
+    .card a:hover { text-decoration: underline; }
+    .category { margin-top: 2em; }
+  </style>
+  <script src="../auth.js"></script>
+</head>
+<body>
+<h1>Bibliothèque d'exemples des entrées/sorties</h1>
+<p>Choisissez un exemple adapté au type d'entrée ou de sortie que vous configurez. Chaque page reprend la plage de fonctionnement, le tag JSON utilisé dans les API et des conseils de mise en œuvre.</p>
+
+<section class="category">
+  <h2>Entrées</h2>
+  <ul class="grid">
+    <li class="card">
+      <h2>ADC interne (A0)</h2>
+      <p>Visualiser la conversion 10 bits de l'ADC embarqué et obtenir le nombre de bits bruts.</p>
+      <a href="input-adc.html">Ouvrir l'exemple ADC</a>
+    </li>
+    <li class="card">
+      <h2>ADC externe ADS1115</h2>
+      <p>Suivre un canal ADS1115 et convertir les codes 16 bits en tension.</p>
+      <a href="input-ads1115.html">Ouvrir l'exemple ADS1115</a>
+    </li>
+    <li class="card">
+      <h2>Entrée distante</h2>
+      <p>Superviser une mesure reçue d'un autre nœud et vérifier les noms distants.</p>
+      <a href="input-remote.html">Ouvrir l'exemple distant</a>
+    </li>
+    <li class="card">
+      <h2>Capteur ZMPT101B</h2>
+      <p>Convertir la valeur RMS en tension efficace et contrôler l'offset AC.</p>
+      <a href="input-zmpt.html">Ouvrir l'exemple ZMPT</a>
+    </li>
+    <li class="card">
+      <h2>Capteur ZMCT103C</h2>
+      <p>Observer la mesure de courant AC RMS et ajuster le gain A/bit.</p>
+      <a href="input-zmct.html">Ouvrir l'exemple ZMCT</a>
+    </li>
+    <li class="card">
+      <h2>Pont diviseur DC</h2>
+      <p>Calculer la tension réelle à partir des bits de l'ADC et du rapport du pont.</p>
+      <a href="input-div.html">Ouvrir l'exemple Diviseur</a>
+    </li>
+  </ul>
+</section>
+
+<section class="category">
+  <h2>Sorties</h2>
+  <ul class="grid">
+    <li class="card">
+      <h2>PWM → 0–10 V</h2>
+      <p>Envoyer une consigne en volts et visualiser le rapport cyclique PWM calculé.</p>
+      <a href="output-pwm010.html">Ouvrir l'exemple PWM</a>
+    </li>
+    <li class="card">
+      <h2>Sortie GPIO</h2>
+      <p>Basculer un niveau logique et vérifier l'état de la sortie numérique.</p>
+      <a href="output-gpio.html">Ouvrir l'exemple GPIO</a>
+    </li>
+    <li class="card">
+      <h2>DAC MCP4725</h2>
+      <p>Régler une consigne analogique et convertir la valeur en codes 12 bits.</p>
+      <a href="output-mcp4725.html">Ouvrir l'exemple DAC</a>
+    </li>
+  </ul>
+</section>
+
+<p>Pour un scénario combiné (puissance active), l'ancien exemple reste disponible : <a href="../example.html">mesure de puissance</a>.</p>
+
+<script>
+  ensureSession().catch(err => console.error(err));
+</script>
+</body>
+</html>

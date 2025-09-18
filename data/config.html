@@ -58,6 +58,10 @@
     .modal-form-row select { width: 100%; box-sizing: border-box; }
     .modal-actions { display: flex; justify-content: flex-end; gap: 0.6em; margin-top: 1.2em; }
     .modal-description { font-size: 0.9em; color: #555; margin-bottom: 0.9em; }
+    .modal-info { background: #f2f6ff; border-left: 4px solid #3a6abf; padding: 0.75em 1em; border-radius: 6px; color: #2a3a55; font-size: 0.9em; margin-bottom: 1em; }
+    .modal-info h3 { margin: 0 0 0.35em; font-size: 1em; }
+    .modal-info ul { margin: 0.4em 0 0 1.2em; padding: 0; }
+    .modal-info li { margin-bottom: 0.3em; }
   </style>
   <script src="auth.js"></script>
 </head>
@@ -147,6 +151,7 @@
   <div class="modal-content">
     <h2 id="modalTitle">Configurer</h2>
     <p class="modal-description" id="modalDescription"></p>
+    <div class="modal-info" id="modalInfo" aria-live="polite"></div>
     <form id="modalForm">
       <div class="modal-form-row">
         <label for="modalName">Nom</label>
@@ -214,6 +219,184 @@ const MODULE_DEPENDENCIES = {
     mcp4725: 'mcp4725'
   }
 };
+
+const INPUT_TYPE_DETAILS = {
+  adc: {
+    title: 'Entrée ADC interne',
+    summary: 'Utilise le convertisseur analogique-numérique intégré de l’ESP8266 sur la broche A0.',
+    resolution: '10 bits (0 à 1023 codes bruts).',
+    rawRange: '0 à 1023 bits mesurés.',
+    physicalRange: '≈ 0 à 1,0 V sur A0 (atténuation intégrée).',
+    rawTagSuffix: '_bits',
+    notes: [
+      'Appliquez une échelle (ex. 0,001) pour convertir les bits en volts réels.',
+      'Le décalage compense un éventuel zéro non nul.'
+    ]
+  },
+  ads1115: {
+    title: 'Entrée ADS1115',
+    summary: 'Lit un canal simple du convertisseur ADS1115 externe configuré en gain ×1.',
+    resolution: '16 bits (0 à 32767 en mode simple).',
+    rawRange: '0 à 32767 codes.',
+    physicalRange: '0 à 4,096 V pour le gain par défaut.',
+    rawTagSuffix: '_bits',
+    notes: [
+      'Chaque code représente environ 125 µV. Ajustez l’échelle pour exprimer la tension en volts.',
+      'Assurez-vous d’avoir activé le module ADS1115 dans la configuration.'
+    ]
+  },
+  remote: {
+    title: 'Entrée distante',
+    summary: 'Récupère une mesure diffusée par un autre MiniLabBox via UDP sécurisé.',
+    notes: [
+      'La plage dépend du capteur distant ; aucune conversion matérielle locale n’est appliquée.',
+      'Saisissez exactement l’identifiant du nœud et le nom distant pour recevoir la valeur.'
+    ]
+  },
+  zmpt: {
+    title: 'Capteur de tension AC (ZMPT101B)',
+    summary: 'Calcule la valeur RMS de la composante AC mesurée par le module ZMPT101B.',
+    resolution: '10 bits (calcul RMS sur 32 échantillons).',
+    rawRange: '0 à ≈512 bits RMS autour de la valeur médiane.',
+    physicalRange: 'Plage proportionnelle à la tension AC après calibration.',
+    rawTagSuffix: '_bits',
+    notes: [
+      'La valeur brute correspond à l’écart autour de 512 (centre de l’ADC).',
+      'Calibrez l’échelle pour exprimer la tension efficace en volts.'
+    ]
+  },
+  zmct: {
+    title: 'Capteur de courant AC (ZMCT103C)',
+    summary: 'Mesure le courant AC RMS à l’aide du transformateur ZMCT103C et de l’ADC interne.',
+    resolution: '10 bits (calcul RMS sur 32 échantillons).',
+    rawRange: '0 à ≈512 bits RMS autour de la valeur médiane.',
+    physicalRange: 'Plage proportionnelle au courant AC selon la calibration du capteur.',
+    rawTagSuffix: '_bits',
+    notes: [
+      'Déterminez l’échelle à partir de la sensibilité du capteur (A/bit).',
+      'Un décalage positif peut compenser la dérive du zéro.'
+    ]
+  },
+  div: {
+    title: 'Pont diviseur DC',
+    summary: 'Mesure une tension continue via un pont diviseur raccordé à l’ADC interne.',
+    resolution: '10 bits (0 à 1023 codes).',
+    rawRange: '0 à 1023 bits bruts (moyenne de 32 échantillons).',
+    physicalRange: '≈ 0 à 1,0 V en entrée A0 avant application du rapport du pont.',
+    rawTagSuffix: '_bits',
+    notes: [
+      'Ajustez l’échelle selon le rapport du pont pour retrouver la tension réelle.',
+      'Le décalage corrige l’offset éventuel dû aux résistances.'
+    ]
+  },
+  disabled: {
+    title: 'Entrée désactivée',
+    summary: 'La voie n’est pas utilisée tant qu’un type actif n’est pas sélectionné.',
+    notes: [
+      'Activez la voie et choisissez un type pour commencer la mesure.'
+    ]
+  }
+};
+
+const OUTPUT_TYPE_DETAILS = {
+  pwm010: {
+    title: 'Sortie PWM → 0–10 V',
+    summary: 'Pilote un convertisseur PWM/analogique pour générer une tension 0–10 V.',
+    resolution: '10 bits (0 à 1023 de rapport cyclique).',
+    rawRange: '0 à 1023 (pour le rapport cyclique PWM).',
+    physicalRange: '≈ 0 à 10 V après conversion.',
+    notes: [
+      'Envoyez la consigne en volts ; l’échelle et le décalage adaptent la conversion en PWM.',
+      'Ajustez la fréquence PWM en fonction des besoins de votre module 0–10 V.'
+    ]
+  },
+  gpio: {
+    title: 'Sortie GPIO',
+    summary: 'Commande directe d’un GPIO numérique de l’ESP8266.',
+    resolution: '1 bit (niveau logique bas ou haut).',
+    physicalRange: '0 V (LOW) ou 3,3 V (HIGH) sur la broche sélectionnée.',
+    notes: [
+      'Toute consigne supérieure à 0,5 est interprétée comme HIGH.',
+      'Utilisez ce mode pour piloter des relais ou des LEDs avec adaptation appropriée.'
+    ]
+  },
+  mcp4725: {
+    title: 'Sortie DAC MCP4725',
+    summary: 'Génère une tension analogique via le DAC I²C MCP4725.',
+    resolution: '12 bits (0 à 4095 codes).',
+    rawRange: '0 à 4095 codes DAC.',
+    physicalRange: '0 à VCC du module (souvent 5 V).',
+    notes: [
+      'L’échelle traduit vos unités physiques en codes DAC (ex. 819 pour ≈1 V à 5 V).',
+      'Vérifiez l’adresse I²C (0x60 ou 0x61) selon le cavalier matériel.'
+    ]
+  },
+  disabled: {
+    title: 'Sortie désactivée',
+    summary: 'Aucun signal n’est généré tant que la voie reste désactivée.',
+    notes: [
+      'Activez la voie et choisissez un type pour la piloter.'
+    ]
+  }
+};
+
+function defaultIoName(kind, index) {
+  const baseIndex = Number.isFinite(index) ? index : 0;
+  return kind === 'input' ? `IN${baseIndex + 1}` : `OUT${baseIndex + 1}`;
+}
+
+function normaliseTagSlug(name) {
+  if (!name) return '';
+  const normalised = name.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const slug = normalised.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return slug;
+}
+
+function getIoExplanation(kind, data, fallbackName, indexHint) {
+  const dictionaries = kind === 'input' ? INPUT_TYPE_DETAILS : OUTPUT_TYPE_DETAILS;
+  const typeKey = data.type && dictionaries[data.type] ? data.type : 'disabled';
+  const base = dictionaries[typeKey] || dictionaries.disabled;
+  let name = data.name && data.name.trim().length ? data.name.trim() : '';
+  if (!name) {
+    if (fallbackName) {
+      name = fallbackName;
+    } else {
+      name = defaultIoName(kind, Number.isFinite(indexHint) ? indexHint : 0);
+    }
+  }
+  const lines = [];
+  if (name) {
+    lines.push(`Tag JSON : ${name}`);
+  }
+  if (base.rawTagSuffix) {
+    const slug = normaliseTagSlug(name);
+    if (slug) {
+      const rawLabel = `${slug}${base.rawTagSuffix}`;
+      if (base.rawRange) {
+        lines.push(`Tag brut suggéré : ${rawLabel} (${base.rawRange})`);
+      } else {
+        lines.push(`Tag brut suggéré : ${rawLabel}`);
+      }
+    }
+  }
+  if (base.resolution) {
+    lines.push(`Résolution : ${base.resolution}`);
+  }
+  if (base.rawRange && !base.rawTagSuffix) {
+    lines.push(`Valeur brute : ${base.rawRange}`);
+  }
+  if (base.physicalRange) {
+    lines.push(`Plage physique : ${base.physicalRange}`);
+  }
+  if (Array.isArray(base.notes)) {
+    base.notes.forEach(note => lines.push(note));
+  }
+  return {
+    title: base.title,
+    summary: base.summary,
+    lines
+  };
+}
 
 let inputs = [];
 let outputs = [];
@@ -632,37 +815,55 @@ function updateIoCounters() {
   if (outCounter) outCounter.textContent = `${outputs.length} / ${MAX_OUTPUTS}`;
 }
 
-function describeInput(item) {
-  const details = [];
-  if (['adc','div','zmpt','zmct'].includes(item.type) && item.pin) {
-    details.push(`Pin : ${item.pin}`);
+function describeInput(item, index) {
+  const fallbackName = item && item.name && item.name.trim()
+    ? item.name.trim()
+    : `IN${(index != null ? index : 0) + 1}`;
+  const explanation = getIoExplanation('input', item || {}, fallbackName, index);
+  const details = explanation.lines.slice();
+  if (item && ['adc','div','zmpt','zmct'].includes(item.type) && item.pin) {
+    details.push(`Broche utilisée : ${item.pin}`);
   }
-  if (item.type === 'ads1115') {
+  if (item && item.type === 'ads1115') {
     details.push(`Canal ADS1115 : A${item.adsChannel}`);
   }
-  if (item.type === 'remote') {
-    if (item.remoteNode) details.push(`Nœud : ${item.remoteNode}`);
+  if (item && item.type === 'remote') {
+    if (item.remoteNode) details.push(`Nœud distant : ${item.remoteNode}`);
     if (item.remoteName) details.push(`Nom distant : ${item.remoteName}`);
   }
-  details.push(`Échelle : ${item.scale}`);
-  details.push(`Décalage : ${item.offset}`);
-  if (item.unit) details.push(`Unité : ${item.unit}`);
+  if (item && Number.isFinite(item.scale)) {
+    details.push(`Échelle appliquée : ${item.scale}`);
+  }
+  if (item && Number.isFinite(item.offset)) {
+    details.push(`Décalage appliqué : ${item.offset}`);
+  }
+  if (item && item.unit) {
+    details.push(`Unité de restitution : ${item.unit}`);
+  }
   return details;
 }
 
-function describeOutput(item) {
-  const details = [];
-  if ((item.type === 'pwm010' || item.type === 'gpio') && item.pin) {
-    details.push(`Pin : ${item.pin}`);
+function describeOutput(item, index) {
+  const fallbackName = item && item.name && item.name.trim()
+    ? item.name.trim()
+    : `OUT${(index != null ? index : 0) + 1}`;
+  const explanation = getIoExplanation('output', item || {}, fallbackName, index);
+  const details = explanation.lines.slice();
+  if (item && (item.type === 'pwm010' || item.type === 'gpio') && item.pin) {
+    details.push(`Broche utilisée : ${item.pin}`);
   }
-  if (item.type === 'pwm010') {
+  if (item && item.type === 'pwm010') {
     details.push(`Fréquence PWM : ${item.pwmFreq} Hz`);
   }
-  if (item.type === 'mcp4725') {
+  if (item && item.type === 'mcp4725') {
     details.push(`Adresse I²C : ${item.i2cAddress}`);
   }
-  details.push(`Gain : ${item.scale}`);
-  details.push(`Décalage : ${item.offset}`);
+  if (item && Number.isFinite(item.scale)) {
+    details.push(`Échelle appliquée : ${item.scale}`);
+  }
+  if (item && Number.isFinite(item.offset)) {
+    details.push(`Décalage appliqué : ${item.offset}`);
+  }
   return details;
 }
 
@@ -722,7 +923,7 @@ function renderIoList(kind) {
     card.appendChild(header);
     const detailList = document.createElement('ul');
     detailList.className = 'io-details';
-    const lines = kind === 'input' ? describeInput(item) : describeOutput(item);
+    const lines = kind === 'input' ? describeInput(item, idx) : describeOutput(item, idx);
     lines.forEach(text => {
       const li = document.createElement('li');
       li.textContent = text;
@@ -967,6 +1168,30 @@ function renderTypeSpecificFields(data, kind) {
   }
 }
 
+function renderModalInfoPanel(kind, data, indexHint) {
+  const panel = document.getElementById('modalInfo');
+  if (!panel) return;
+  const effectiveIndex = indexHint != null ? indexHint : (kind === 'input' ? inputs.length : outputs.length);
+  const fallback = data && data.name && data.name.trim().length
+    ? data.name.trim()
+    : defaultIoName(kind, effectiveIndex);
+  const info = getIoExplanation(kind, data || {}, fallback, effectiveIndex);
+  panel.innerHTML = '';
+  const titleEl = document.createElement('h3');
+  titleEl.textContent = info.title;
+  panel.appendChild(titleEl);
+  const summaryEl = document.createElement('p');
+  summaryEl.textContent = info.summary;
+  panel.appendChild(summaryEl);
+  const listEl = document.createElement('ul');
+  info.lines.forEach(text => {
+    const li = document.createElement('li');
+    li.textContent = text;
+    listEl.appendChild(li);
+  });
+  panel.appendChild(listEl);
+}
+
 function renderModalForm() {
   if (!modalState) return;
   const { kind, index, data } = modalState;
@@ -990,6 +1215,7 @@ function renderModalForm() {
   nameInput.value = data.name || '';
   nameInput.oninput = (ev) => {
     modalState.data.name = ev.target.value;
+    renderModalInfoPanel(kind, modalState.data, index);
   };
   typeSelect.innerHTML = '';
   let options = typeOptionsForKind(kind);
@@ -1039,6 +1265,7 @@ function renderModalForm() {
     unitRow.classList.add('hidden');
   }
   renderTypeSpecificFields(modalState.data, kind);
+  renderModalInfoPanel(kind, modalState.data, index);
 }
 
 function handleModalSubmit(event) {
