@@ -13,12 +13,14 @@
     .card a { color: #1d5fa7; text-decoration: none; font-weight: bold; }
     .card a:hover { text-decoration: underline; }
     .category { margin-top: 2em; }
+    .hint { font-size: 0.9em; color: #4a5870; margin: 0.4em 0 1.2em; }
   </style>
   <script src="../auth.js"></script>
 </head>
 <body>
 <h1>Bibliothèque d'exemples des entrées/sorties</h1>
 <p>Choisissez un exemple adapté au type d'entrée ou de sortie que vous configurez. Chaque page reprend la plage de fonctionnement, le tag JSON utilisé dans les API et des conseils de mise en œuvre.</p>
+<p class="hint">Tous les exemples sont stockés dans <code>/private</code> et peuvent être édités depuis l'éditeur Highlight.</p>
 
 <section class="category">
   <h2>Entrées</h2>
@@ -77,7 +79,18 @@
   </ul>
 </section>
 
-<p>Pour un scénario combiné (puissance active), l'ancien exemple reste disponible : <a href="../example.html">mesure de puissance</a>.</p>
+<section class="category">
+  <h2>Configuration</h2>
+  <ul class="grid">
+    <li class="card">
+      <h2>Fichier JSON d'exemple</h2>
+      <p>Importer cette configuration type pour découvrir la structure des entrées et sorties disponibles.</p>
+      <a href="io-config-sample.json">Télécharger io-config-sample.json</a>
+    </li>
+  </ul>
+</section>
+
+<p>Pour un scénario combiné (puissance active), l'ancien exemple reste disponible : <a href="power-monitor.html">mesure de puissance</a>.</p>
 
 <script>
   ensureSession().catch(err => console.error(err));

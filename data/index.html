@@ -11,6 +11,10 @@
     h1 { margin-top: 0; }
     a { color: #0066cc; text-decoration: none; }
     a:hover { text-decoration: underline; }
+    .hint { font-size: 0.9em; color: #555; margin: 0.2em 0 1em; }
+    .status-message { font-size: 0.9em; color: #555; min-height: 1.2em; }
+    .status-message.error { color: #c0392b; }
+    #privateFilesTable .empty-row td { text-align: center; color: #666; font-style: italic; }
   </style>
   <script src="auth.js"></script>
 </head>
@@ -36,16 +40,28 @@
 
 <p>
   <a href="config.html">Configurer le système</a> |
-  <a href="example.html">Exemple de mesure de puissance</a> |
+  <a href="private/power-monitor.html">Mesure de puissance</a> |
+  <a href="private/io-exemples.html">Bibliothèque d'exemples IO</a> |
   <a href="logs.html">Logs système</a> |
   <a href="editor.html">Éditeur de fichiers</a>
 </p>
+
+<h2>Fichiers HTML privés</h2>
+<p class="hint">Ces fichiers résident dans <code>/private</code> et peuvent être modifiés via l'éditeur de fichiers.</p>
+<table id="privateFilesTable">
+  <thead>
+    <tr><th>Fichier</th><th>Taille</th></tr>
+  </thead>
+  <tbody></tbody>
+</table>
+<p class="status-message" id="privateFilesStatus" aria-live="polite"></p>
 
 <script>
 let configuredInputs = [];
 let configuredOutputs = [];
 const inputRowMap = new Map();
 const outputRowMap = new Map();
+let privateFilesTimer = null;
 
 function normaliseNumber(value) {
   if (value === null || value === undefined) {
@@ -63,6 +79,19 @@ function formatDisplayValue(value) {
   return num === null ? '—' : num.toFixed(3);
 }
 
+function formatFileSize(bytes) {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes)) {
+    return '—';
+  }
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} Mo`;
+  }
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)} Ko`;
+  }
+  return `${bytes} o`;
+}
+
 function renderEmptyRow(tbody, message, colspan) {
   const row = document.createElement('tr');
   row.classList.add('empty-row');
@@ -71,6 +100,16 @@ function renderEmptyRow(tbody, message, colspan) {
   cell.textContent = message;
   row.appendChild(cell);
   tbody.appendChild(row);
+}
+
+function setPrivateFilesStatus(text, type = '') {
+  const statusEl = document.getElementById('privateFilesStatus');
+  if (!statusEl) return;
+  statusEl.textContent = text || '';
+  statusEl.classList.remove('error');
+  if (type) {
+    statusEl.classList.add(type);
+  }
 }
 
 function normaliseConfiguredInput(item) {
@@ -179,6 +218,53 @@ function renderConfiguredOutputs() {
   });
 }
 
+function renderPrivateFiles(files) {
+  const tbody = document.querySelector('#privateFilesTable tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  if (!Array.isArray(files) || files.length === 0) {
+    renderEmptyRow(tbody, 'Aucun fichier HTML disponible.', 2);
+    return;
+  }
+  files.forEach(file => {
+    if (!file || typeof file.name !== 'string') {
+      return;
+    }
+    const tr = document.createElement('tr');
+    const tdName = document.createElement('td');
+    const link = document.createElement('a');
+    link.textContent = file.name;
+    link.href = `/private/${encodeURIComponent(file.name)}`;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    tdName.appendChild(link);
+    const tdSize = document.createElement('td');
+    tdSize.textContent = formatFileSize(file.size);
+    tr.appendChild(tdName);
+    tr.appendChild(tdSize);
+    tbody.appendChild(tr);
+  });
+}
+
+async function loadPrivateHtmlFiles() {
+  try {
+    const resp = await authFetch('/api/files/list');
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(text || 'Chargement des fichiers privés impossible');
+    }
+    const data = await resp.json();
+    const files = Array.isArray(data.files) ? data.files : [];
+    const htmlFiles = files.filter(item => item && typeof item.name === 'string' && item.name.toLowerCase().endsWith('.html'));
+    htmlFiles.sort((a, b) => a.name.localeCompare(b.name, 'fr', { sensitivity: 'base' }));
+    renderPrivateFiles(htmlFiles);
+    setPrivateFilesStatus('');
+  } catch (err) {
+    console.error(err);
+    setPrivateFilesStatus(err.message || 'Impossible de charger les fichiers du répertoire privé.', 'error');
+  }
+}
+
 // Récupère la configuration pour afficher l'identifiant du nœud et préparer les tables
 async function loadConfig() {
   try {
@@ -265,11 +351,19 @@ window.addEventListener('DOMContentLoaded', () => {
   ensureSession()
     .then(async () => {
       await loadConfig();
-      await loadValues();
+      await Promise.all([
+        loadValues(),
+        loadPrivateHtmlFiles()
+      ]);
       setInterval(loadValues, 1000);
+      if (privateFilesTimer) {
+        clearInterval(privateFilesTimer);
+      }
+      privateFilesTimer = setInterval(loadPrivateHtmlFiles, 10000);
     })
     .catch(err => {
       console.error(err);
+      setPrivateFilesStatus('Impossible de vérifier la session.', 'error');
     });
 });
 </script>

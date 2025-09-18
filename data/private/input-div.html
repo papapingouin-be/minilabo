@@ -2,7 +2,7 @@
 <html lang="fr">
 <head>
   <meta charset="utf-8">
-  <title>Exemple – Capteur de tension AC (ZMPT101B)</title>
+  <title>Exemple – Pont diviseur DC</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 1em; max-width: 780px; }
     h1 { margin-top: 0; }
@@ -19,14 +19,14 @@
     .status { color: #c0392b; font-size: 0.9em; }
   </style>
   <script src="../auth.js"></script>
-  <script src="utils.js"></script>
+  <script src="io-exemples-utils.js"></script>
 </head>
 <body>
-<h1>Exemple – Capteur ZMPT101B</h1>
-<p class="hint">Le module ZMPT101B délivre une tension centrée autour de mi-échelle. MiniLabBox calcule la valeur RMS de la composante AC à partir de 32 échantillons. Sur l'ADC 10 bits, la composante RMS varie approximativement de 0 à 512 bits.</p>
+<h1>Exemple – Pont diviseur DC</h1>
+<p class="hint">Le mode <strong>Diviseur DC</strong> lit 32 échantillons de l'ADC 10 bits et en calcule la moyenne. Utilisez l'échelle pour retrouver la tension réelle avant division.</p>
 
 <div class="controls">
-  <label for="inputSelect">Entrée ZMPT&nbsp;:</label>
+  <label for="inputSelect">Entrée Diviseur&nbsp;:</label>
   <select id="inputSelect"></select>
   <span class="status" id="status"></span>
 </div>
@@ -34,7 +34,7 @@
 <div class="panel">
   <h2>Détails de l'entrée</h2>
   <p class="hint">Tag JSON&nbsp;: <code id="tagName">—</code> | Tag brut suggéré&nbsp;: <code id="tagRaw">—</code></p>
-  <p class="hint">Plage RMS estimée&nbsp;: 0–512 bits | Plage physique dépend du calibrage (V<sub>RMS</sub>)</p>
+  <p class="hint">Plage brute&nbsp;: 0–1023 bits | Plage physique dépend du rapport du pont</p>
   <p class="hint">Broche mesurée&nbsp;: <span id="pinInfo">—</span></p>
 </div>
 
@@ -42,14 +42,14 @@
   <h2>Mesure instantanée</h2>
   <div class="metrics">
     <div class="metric">
-      <span>Tension efficace</span>
+      <span>Tension calculée</span>
       <strong id="value">—</strong>
       <span id="unit">—</span>
     </div>
     <div class="metric">
-      <span>Bits RMS estimés</span>
+      <span>Bits moyens</span>
       <strong id="rawBits">—</strong>
-      <span>0 à 512</span>
+      <span>0 à 1023</span>
     </div>
     <div class="metric">
       <span>Échelle / Décalage</span>
@@ -59,7 +59,7 @@
   </div>
 </div>
 
-<p class="hint">Conseil : réalisez une mesure de référence (par ex. 230 V AC) pour déterminer l'échelle (V/bit). Un offset peut compenser une asymétrie du capteur.</p>
+<p class="hint">Astuce : mesurez la tension réelle à l'entrée du pont et ajustez l'échelle selon le rapport R1/R2 pour obtenir la valeur en volts.</p>
 
 <script>
 (function() {
@@ -140,15 +140,15 @@
 
   async function init() {
     const cfg = await ExampleUtils.loadConfig();
-    state.entries = ExampleUtils.inputsByType(cfg, 'zmpt');
+    state.entries = ExampleUtils.inputsByType(cfg, 'div');
     selectEl.innerHTML = '';
     if (!state.entries.length) {
       const opt = document.createElement('option');
-      opt.textContent = 'Aucun capteur ZMPT actif';
+      opt.textContent = 'Aucun diviseur actif';
       opt.value = '';
       selectEl.appendChild(opt);
       selectEl.disabled = true;
-      statusEl.textContent = 'Activez le module ZMPT et assignez une broche.';
+      statusEl.textContent = 'Activez le module Diviseur et assignez une broche.';
       return;
     }
     state.entries.forEach(entry => {
