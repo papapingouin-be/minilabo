@@ -34,18 +34,25 @@
 static void logPrintf(const char *fmt, ...);
 static void logMessage(const String &msg);
 
-static const uint8_t FIRMWARE_VERSION_MAJOR = 1;
-static const uint8_t FIRMWARE_VERSION_MINOR = 0;
 static bool logStorageReady = false;
 static bool littleFsFormatAttempted = false;
 static String firmwareVersion = "0.0.0";
 
-static String formatFirmwareVersion(uint32_t patch) {
-  char buf[24];
-  snprintf(buf, sizeof(buf), "%u.%u.%lu", static_cast<unsigned>(FIRMWARE_VERSION_MAJOR),
-           static_cast<unsigned>(FIRMWARE_VERSION_MINOR),
-           static_cast<unsigned long>(patch));
-  return String(buf);
+static String formatFirmwareVersion() {
+  String version = String(static_cast<unsigned>(BuildInfo::kFirmwareMajor));
+  version += ".";
+  version += String(static_cast<unsigned>(BuildInfo::kFirmwareMinor));
+  version += ".";
+  version += String(static_cast<unsigned long>(BuildInfo::kFirmwarePatch));
+  if (BuildInfo::HasPreReleaseTag()) {
+    version += "-";
+    version += BuildInfo::kFirmwarePreReleaseTag;
+  }
+  if (BuildInfo::HasBuildMetadata()) {
+    version += "+";
+    version += BuildInfo::kFirmwareBuildMetadata;
+  }
+  return version;
 }
 
 static bool ensureLittleFsReady(bool allowFormat = false) {
@@ -69,9 +76,11 @@ static bool ensureLittleFsReady(bool allowFormat = false) {
 }
 
 static void initFirmwareVersion() {
-  firmwareVersion = formatFirmwareVersion(BuildInfo::kFirmwarePatch);
-  logPrintf("Firmware version initialised to %s (build %lu)",
+  firmwareVersion = formatFirmwareVersion();
+  logPrintf("Firmware version initialised to %s (major=%u minor=%u patch=%lu)",
             firmwareVersion.c_str(),
+            static_cast<unsigned>(BuildInfo::kFirmwareMajor),
+            static_cast<unsigned>(BuildInfo::kFirmwareMinor),
             static_cast<unsigned long>(BuildInfo::kFirmwarePatch));
 }
 
