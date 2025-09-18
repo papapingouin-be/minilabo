@@ -2,10 +2,14 @@ import { mountOscilloscope } from './oscilloscope.js';
 import { mountMultimeter } from './multimeter.js';
 import { mountFunctionGenerator } from './functionGenerator.js';
 import { mountMathZone } from './mathZone.js';
+import { loadIoCatalog } from './ioCatalog.js';
 
-document.addEventListener('DOMContentLoaded', () => {
-  mountOscilloscope(document.getElementById('oscilloscope'));
-  mountMultimeter(document.getElementById('multimeter'));
-  mountFunctionGenerator(document.getElementById('function-generator'));
+document.addEventListener('DOMContentLoaded', async () => {
+  const catalog = await loadIoCatalog();
+  const { inputs, outputs, error } = catalog;
+
+  mountOscilloscope(document.getElementById('oscilloscope'), { inputs, error });
+  mountMultimeter(document.getElementById('multimeter'), { inputs, error });
+  mountFunctionGenerator(document.getElementById('function-generator'), { outputs, error });
   mountMathZone(document.getElementById('math-zone'));
 });
