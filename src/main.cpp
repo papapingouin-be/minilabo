@@ -845,12 +845,13 @@ void parseConfigFromJson(const JsonDocument &doc,
     }
     for (uint8_t idx = 0; idx < desired; ++idx) {
       JsonVariantConst entry = arr[idx];
-      if (!entry.is<JsonObject>()) {
+      JsonObjectConst entryObj = entry.as<JsonObjectConst>();
+      if (entryObj.isNull()) {
         logPrintf("Input entry %u is not an object; skipping",
                   static_cast<unsigned>(idx));
         continue;
       }
-      parseInputEntry(entry.as<JsonObjectConst>(), String(), idx);
+      parseInputEntry(entryObj, String(), idx);
     }
   };
   auto handleInputObject = [&](JsonObjectConst obj) {
@@ -867,12 +868,13 @@ void parseConfigFromJson(const JsonDocument &doc,
         break;
       }
       JsonVariantConst value = kv.value();
-      if (!value.is<JsonObject>()) {
+      JsonObjectConst valueObj = value.as<JsonObjectConst>();
+      if (valueObj.isNull()) {
         logPrintf("Input entry '%s' is not an object; skipping",
                   kv.key().c_str());
         continue;
       }
-      parseInputEntry(value.as<JsonObjectConst>(), String(kv.key().c_str()), -1);
+      parseInputEntry(valueObj, String(kv.key().c_str()), -1);
       processed++;
     }
     if (processed == 0) {
@@ -1026,12 +1028,13 @@ void parseConfigFromJson(const JsonDocument &doc,
     }
     for (uint8_t idx = 0; idx < desired; ++idx) {
       JsonVariantConst entry = arr[idx];
-      if (!entry.is<JsonObject>()) {
+      JsonObjectConst entryObj = entry.as<JsonObjectConst>();
+      if (entryObj.isNull()) {
         logPrintf("Output entry %u is not an object; skipping",
                   static_cast<unsigned>(idx));
         continue;
       }
-      parseOutputEntry(entry.as<JsonObjectConst>(), String(), idx);
+      parseOutputEntry(entryObj, String(), idx);
     }
   };
   auto handleOutputObject = [&](JsonObjectConst obj) {
@@ -1048,12 +1051,13 @@ void parseConfigFromJson(const JsonDocument &doc,
         break;
       }
       JsonVariantConst value = kv.value();
-      if (!value.is<JsonObject>()) {
+      JsonObjectConst valueObj = value.as<JsonObjectConst>();
+      if (valueObj.isNull()) {
         logPrintf("Output entry '%s' is not an object; skipping",
                   kv.key().c_str());
         continue;
       }
-      parseOutputEntry(value.as<JsonObjectConst>(), String(kv.key().c_str()), -1);
+      parseOutputEntry(valueObj, String(kv.key().c_str()), -1);
       processed++;
     }
     if (processed == 0) {
@@ -1162,12 +1166,13 @@ void parseConfigFromJson(const JsonDocument &doc,
     if (desired > MAX_PEERS) desired = MAX_PEERS;
     for (uint8_t idx = 0; idx < desired; ++idx) {
       JsonVariantConst entry = arr[idx];
-      if (!entry.is<JsonObject>()) {
+      JsonObjectConst entryObj = entry.as<JsonObjectConst>();
+      if (entryObj.isNull()) {
         logPrintf("Peer entry %u is not an object; skipping",
                   static_cast<unsigned>(idx));
         continue;
       }
-      parsePeerEntry(entry.as<JsonObjectConst>(), String(), idx);
+      parsePeerEntry(entryObj, String(), idx);
     }
   };
   auto handlePeerObject = [&](JsonObjectConst obj) {
@@ -1183,12 +1188,13 @@ void parseConfigFromJson(const JsonDocument &doc,
         break;
       }
       JsonVariantConst value = kv.value();
-      if (!value.is<JsonObject>()) {
+      JsonObjectConst valueObj = value.as<JsonObjectConst>();
+      if (valueObj.isNull()) {
         logPrintf("Peer entry '%s' is not an object; skipping",
                   kv.key().c_str());
         continue;
       }
-      parsePeerEntry(value.as<JsonObjectConst>(), String(kv.key().c_str()), -1);
+      parsePeerEntry(valueObj, String(kv.key().c_str()), -1);
     }
   };
   if (doc.containsKey("peers")) {
@@ -1294,8 +1300,8 @@ static String formatI2cAddress(uint8_t address) {
 
 static const char *describeJsonType(const JsonVariantConst &value) {
   if (value.isNull()) return "null";
-  if (value.is<JsonArray>()) return "array";
-  if (value.is<JsonObject>()) return "object";
+  if (value.is<JsonArrayConst>()) return "array";
+  if (value.is<JsonObjectConst>()) return "object";
   if (value.is<const char *>()) return "string";
   if (value.is<bool>()) return "boolean";
   if (value.is<float>()) return "float";
