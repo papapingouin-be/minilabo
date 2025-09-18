@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>MiniLabBox | Virtual Lab</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="page">
+    <header>
+      <a href="../index.html" class="return-link" aria-label="Retour à l'accueil">
+        &#x2190; Retour au tableau de bord
+      </a>
+      <span class="status-badge">Environnement virtuel</span>
+    </header>
+
+    <section class="hero">
+      <div class="hero-visual">
+        <img src="../assets/virtual-lab-logo.svg" alt="Logo Virtual Lab MiniLabBox">
+      </div>
+      <div class="hero-content">
+        <h1>Virtual Lab Professionnel</h1>
+        <p>
+          Retrouvez vos instruments de mesure dans une interface immersive inspirée des laboratoires modernes.
+          Configurez l'oscilloscope, le multimètre et le générateur de fonctions comme si vous étiez devant le matériel.
+        </p>
+        <a class="cta" href="#lab">Explorer le laboratoire</a>
+      </div>
+    </section>
+
+    <h2 class="section-title" id="lab">Instruments</h2>
+    <section class="instrument-grid">
+      <article class="instrument-card" id="oscilloscope"></article>
+      <article class="instrument-card" id="multimeter"></article>
+      <article class="instrument-card" id="function-generator"></article>
+    </section>
+
+    <h2 class="section-title">Zone mathématique</h2>
+    <section class="math-zone" id="math-zone"></section>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

@@ -15,12 +15,57 @@
     .status-message { font-size: 0.9em; color: #555; min-height: 1.2em; }
     .status-message.error { color: #c0392b; }
     #privateFilesTable .empty-row td { text-align: center; color: #666; font-style: italic; }
+    .virtual-lab-entry {
+      margin: 1.5em 0 2.5em;
+      display: flex;
+      align-items: center;
+      gap: 1.5em;
+      padding: 1em 1.5em;
+      border: 1px solid #d0e6ff;
+      border-radius: 16px;
+      background: linear-gradient(120deg, rgba(10, 109, 216, 0.05), rgba(69, 209, 255, 0.05));
+      box-shadow: 0 8px 20px rgba(10, 109, 216, 0.08);
+    }
+    .virtual-lab-entry img {
+      width: 96px;
+      height: auto;
+      display: block;
+    }
+    .virtual-lab-entry .virtual-lab-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.6em;
+      font-size: 1.2em;
+      font-weight: 700;
+      color: #0a6dd8;
+    }
+    .virtual-lab-entry .virtual-lab-title:hover {
+      color: #06488f;
+    }
+    .virtual-lab-entry p {
+      margin: 0.3em 0 0;
+      color: #344055;
+      max-width: 460px;
+      line-height: 1.4;
+    }
   </style>
   <script src="auth.js"></script>
 </head>
 <body>
 <h1>MiniLabBox Node</h1>
 <p>Identifiant du nœud : <strong><span id="nodeId"></span></strong></p>
+
+<div class="virtual-lab-entry">
+  <a href="virtual-lab/index.html" aria-label="Accéder au Virtual Lab">
+    <img src="assets/virtual-lab-logo.svg" alt="Logo Virtual Lab">
+  </a>
+  <div>
+    <a class="virtual-lab-title" href="virtual-lab/index.html">
+      Accéder au Virtual Lab professionnel
+    </a>
+    <p>Un environnement immersif regroupant oscilloscope Tektronix, multimètre de laboratoire et générateur de fonctions.</p>
+  </div>
+</div>
 
 <h2>Entrées</h2>
 <table id="inputsTable">
@@ -43,7 +88,8 @@
   <a href="private/power-monitor.html">Mesure de puissance</a> |
   <a href="private/io-exemples.html">Bibliothèque d'exemples IO</a> |
   <a href="logs.html">Logs système</a> |
-  <a href="editor.html">Éditeur de fichiers</a>
+  <a href="editor.html">Éditeur de fichiers</a> |
+  <a href="virtual-lab/index.html">Virtual Lab</a>
 </p>
 
 <h2>Fichiers HTML privés</h2>
