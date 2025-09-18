@@ -843,6 +843,199 @@ static bool parseJsonContainerString(const String &rawValue,
   return false;
 }
 
+static MeterChannelConfig makeEmptyMeterChannel() {
+  return {"", "", "", "", "", "", false, 1.0f, 0.0f, false, 0.0f, false,
+          0.0f, 10};
+}
+
+static MeterChannelConfig makeDefaultMeterChannel() {
+  return {"", "", "", "", "", "", true, 1.0f, 0.0f, false, 0.0f, false,
+          0.0f, 10};
+}
+
+static void clearVirtualMultimeterConfig(VirtualMultimeterConfig &cfg) {
+  cfg.channelCount = 0;
+  for (uint8_t i = 0; i < MAX_METER_CHANNELS; ++i) {
+    cfg.channels[i] = makeEmptyMeterChannel();
+  }
+}
+
+static void parseMeterChannelEntry(JsonObjectConst obj,
+                                   VirtualMultimeterConfig &target,
+                                   int indexHint,
+                                   const String &entryLabel) {
+  if (target.channelCount >= MAX_METER_CHANNELS) {
+    return;
+  }
+  MeterChannelConfig &mc = target.channels[target.channelCount];
+  mc = makeDefaultMeterChannel();
+  auto fallbackId = [&](void) {
+    if (entryLabel.length() > 0) {
+      return entryLabel;
+    }
+    if (indexHint >= 0) {
+      return String("meter") + String(indexHint + 1);
+    }
+    return String("meter") + String(target.channelCount + 1);
+  };
+  if (obj.containsKey("id")) {
+    mc.id = obj["id"].as<String>();
+    mc.id.trim();
+  }
+  if (mc.id.length() == 0) {
+    mc.id = fallbackId();
+  }
+  if (obj.containsKey("name")) {
+    mc.name = obj["name"].as<String>();
+    mc.name.trim();
+  }
+  if (mc.name.length() == 0) {
+    mc.name = mc.id;
+  }
+  if (obj.containsKey("label")) {
+    mc.label = obj["label"].as<String>();
+    mc.label.trim();
+  }
+  if (mc.label.length() == 0) {
+    mc.label = mc.name;
+  }
+  if (obj.containsKey("input")) {
+    mc.input = obj["input"].as<String>();
+    mc.input.trim();
+  }
+  if (obj.containsKey("unit")) {
+    mc.unit = obj["unit"].as<String>();
+    mc.unit.trim();
+  }
+  if (obj.containsKey("symbol")) {
+    mc.symbol = obj["symbol"].as<String>();
+    mc.symbol.trim();
+  }
+  mc.enabled = obj.containsKey("enabled") ? obj["enabled"].as<bool>() : true;
+  mc.scale = obj.containsKey("scale") ? obj["scale"].as<float>() : 1.0f;
+  if (isnan(mc.scale)) mc.scale = 1.0f;
+  mc.offset = obj.containsKey("offset") ? obj["offset"].as<float>() : 0.0f;
+  if (isnan(mc.offset)) mc.offset = 0.0f;
+  if (obj.containsKey("rangeMin") && !obj["rangeMin"].isNull()) {
+    float value = obj["rangeMin"].as<float>();
+    if (isnan(value)) {
+      mc.hasRangeMin = false;
+      mc.rangeMin = 0.0f;
+    } else {
+      mc.hasRangeMin = true;
+      mc.rangeMin = value;
+    }
+  } else {
+    mc.hasRangeMin = false;
+    mc.rangeMin = 0.0f;
+  }
+  if (obj.containsKey("rangeMax") && !obj["rangeMax"].isNull()) {
+    float value = obj["rangeMax"].as<float>();
+    if (isnan(value)) {
+      mc.hasRangeMax = false;
+      mc.rangeMax = 0.0f;
+    } else {
+      mc.hasRangeMax = true;
+      mc.rangeMax = value;
+    }
+  } else {
+    mc.hasRangeMax = false;
+    mc.rangeMax = 0.0f;
+  }
+  int bitsValue = obj.containsKey("bits") ? obj["bits"].as<int>() : 10;
+  if (bitsValue < 1) bitsValue = 1;
+  if (bitsValue > 32) bitsValue = 32;
+  mc.bits = static_cast<uint8_t>(bitsValue);
+  target.channelCount++;
+}
+
+static void parseMeterChannelArray(JsonArrayConst arr,
+                                   VirtualMultimeterConfig &target) {
+  uint8_t index = 0;
+  for (JsonVariantConst entry : arr) {
+    JsonObjectConst obj = entry.as<JsonObjectConst>();
+    if (obj.isNull()) {
+      index++;
+      continue;
+    }
+    parseMeterChannelEntry(obj, target, index, String());
+    index++;
+  }
+}
+
+static void parseMeterChannelObject(JsonObjectConst obj,
+                                    VirtualMultimeterConfig &target) {
+  JsonArrayConst channelsArr = obj["channels"].as<JsonArrayConst>();
+  if (!channelsArr.isNull()) {
+    parseMeterChannelArray(channelsArr, target);
+    return;
+  }
+  JsonObjectConst channelsObj = obj["channels"].as<JsonObjectConst>();
+  if (!channelsObj.isNull()) {
+    int index = 0;
+    for (JsonPairConst kv : channelsObj) {
+      if (target.channelCount >= MAX_METER_CHANNELS) {
+        break;
+      }
+      JsonObjectConst entryObj = kv.value().as<JsonObjectConst>();
+      if (entryObj.isNull()) {
+        index++;
+        continue;
+      }
+      parseMeterChannelEntry(entryObj, target, index,
+                             String(kv.key().c_str()));
+      index++;
+    }
+  }
+}
+
+static void parseVirtualMultimeterVariant(JsonVariantConst meterVar,
+                                          VirtualMultimeterConfig &target) {
+  clearVirtualMultimeterConfig(target);
+  if (meterVar.isNull()) {
+    return;
+  }
+  JsonArrayConst arr = meterVar.as<JsonArrayConst>();
+  if (!arr.isNull()) {
+    parseMeterChannelArray(arr, target);
+    return;
+  }
+  JsonObjectConst obj = meterVar.as<JsonObjectConst>();
+  if (!obj.isNull()) {
+    parseMeterChannelObject(obj, target);
+  }
+}
+
+static void populateVirtualMultimeterJson(JsonObject obj,
+                                          const VirtualMultimeterConfig &cfg) {
+  obj["channelCount"] = cfg.channelCount;
+  JsonArray arr = obj.createNestedArray("channels");
+  for (uint8_t i = 0; i < cfg.channelCount && i < MAX_METER_CHANNELS; ++i) {
+    const MeterChannelConfig &mc = cfg.channels[i];
+    JsonObject entry = arr.createNestedObject();
+    entry["id"] = mc.id;
+    entry["name"] = mc.name;
+    entry["label"] = mc.label;
+    entry["input"] = mc.input;
+    entry["unit"] = mc.unit;
+    entry["symbol"] = mc.symbol;
+    entry["enabled"] = mc.enabled;
+    entry["scale"] = mc.scale;
+    entry["offset"] = mc.offset;
+    if (mc.hasRangeMin) {
+      entry["rangeMin"] = mc.rangeMin;
+    } else {
+      entry["rangeMin"] = nullptr;
+    }
+    if (mc.hasRangeMax) {
+      entry["rangeMax"] = mc.rangeMax;
+    } else {
+      entry["rangeMax"] = nullptr;
+    }
+    entry["bits"] = mc.bits;
+  }
+}
+
 void parseConfigFromJson(const JsonDocument &doc,
                          Config &target,
                          const Config *previous,
@@ -1240,140 +1433,11 @@ void parseConfigFromJson(const JsonDocument &doc,
       }
     }
   }
-  for (uint8_t i = 0; i < MAX_METER_CHANNELS; ++i) {
-    target.virtualMultimeter.channels[i] = {"", "", "", "", "", "", false, 1.0f, 0.0f, false, 0.0f, false, 0.0f, 10};
-  }
-  target.virtualMultimeter.channelCount = 0;
   JsonVariantConst meterVar = doc["virtualMultimeter"];
-  auto parseMeterChannelEntry = [&](JsonObjectConst o, int indexHint,
-                                    const String &entryLabel) {
-    if (target.virtualMultimeter.channelCount >= MAX_METER_CHANNELS) {
-      return;
-    }
-    MeterChannelConfig &mc =
-        target.virtualMultimeter.channels[target.virtualMultimeter.channelCount];
-    mc = {"", "", "", "", "", "", true, 1.0f, 0.0f, false, 0.0f, false, 0.0f, 10};
-    auto fallbackId = [&](void) {
-      if (entryLabel.length() > 0) {
-        return entryLabel;
-      }
-      if (indexHint >= 0) {
-        return String("meter") + String(indexHint + 1);
-      }
-      return String("meter") + String(target.virtualMultimeter.channelCount + 1);
-    };
-    if (o.containsKey("id")) {
-      mc.id = o["id"].as<String>();
-      mc.id.trim();
-    }
-    if (mc.id.length() == 0) {
-      mc.id = fallbackId();
-    }
-    if (o.containsKey("name")) {
-      mc.name = o["name"].as<String>();
-      mc.name.trim();
-    }
-    if (mc.name.length() == 0) {
-      mc.name = mc.id;
-    }
-    if (o.containsKey("label")) {
-      mc.label = o["label"].as<String>();
-      mc.label.trim();
-    }
-    if (mc.label.length() == 0) {
-      mc.label = mc.name;
-    }
-    if (o.containsKey("input")) {
-      mc.input = o["input"].as<String>();
-      mc.input.trim();
-    }
-    if (o.containsKey("unit")) {
-      mc.unit = o["unit"].as<String>();
-      mc.unit.trim();
-    }
-    if (o.containsKey("symbol")) {
-      mc.symbol = o["symbol"].as<String>();
-      mc.symbol.trim();
-    }
-    mc.enabled = o.containsKey("enabled") ? o["enabled"].as<bool>() : true;
-    mc.scale = o.containsKey("scale") ? o["scale"].as<float>() : 1.0f;
-    if (isnan(mc.scale)) mc.scale = 1.0f;
-    mc.offset = o.containsKey("offset") ? o["offset"].as<float>() : 0.0f;
-    if (isnan(mc.offset)) mc.offset = 0.0f;
-    if (o.containsKey("rangeMin") && !o["rangeMin"].isNull()) {
-      float value = o["rangeMin"].as<float>();
-      if (isnan(value)) {
-        mc.hasRangeMin = false;
-        mc.rangeMin = 0.0f;
-      } else {
-        mc.hasRangeMin = true;
-        mc.rangeMin = value;
-      }
-    } else {
-      mc.hasRangeMin = false;
-      mc.rangeMin = 0.0f;
-    }
-    if (o.containsKey("rangeMax") && !o["rangeMax"].isNull()) {
-      float value = o["rangeMax"].as<float>();
-      if (isnan(value)) {
-        mc.hasRangeMax = false;
-        mc.rangeMax = 0.0f;
-      } else {
-        mc.hasRangeMax = true;
-        mc.rangeMax = value;
-      }
-    } else {
-      mc.hasRangeMax = false;
-      mc.rangeMax = 0.0f;
-    }
-    int bitsValue = o.containsKey("bits") ? o["bits"].as<int>() : 10;
-    if (bitsValue < 1) bitsValue = 1;
-    if (bitsValue > 32) bitsValue = 32;
-    mc.bits = static_cast<uint8_t>(bitsValue);
-    target.virtualMultimeter.channelCount++;
-  };
-  auto parseMeterChannelArray = [&](JsonArrayConst arr) {
-    uint8_t index = 0;
-    for (JsonVariantConst entry : arr) {
-      JsonObjectConst obj = entry.as<JsonObjectConst>();
-      if (obj.isNull()) {
-        index++;
-        continue;
-      }
-      parseMeterChannelEntry(obj, index, String());
-      index++;
-    }
-  };
   if (!meterVar.isNull()) {
-    JsonArrayConst arr = meterVar.as<JsonArrayConst>();
-    if (!arr.isNull()) {
-      parseMeterChannelArray(arr);
-    } else {
-      JsonObjectConst meterObj = meterVar.as<JsonObjectConst>();
-      if (!meterObj.isNull()) {
-        JsonArrayConst channelsArr = meterObj["channels"].as<JsonArrayConst>();
-        if (!channelsArr.isNull()) {
-          parseMeterChannelArray(channelsArr);
-        } else {
-          JsonObjectConst channelsObj = meterObj["channels"].as<JsonObjectConst>();
-          if (!channelsObj.isNull()) {
-            int index = 0;
-            for (JsonPairConst kv : channelsObj) {
-              if (target.virtualMultimeter.channelCount >= MAX_METER_CHANNELS) {
-                break;
-              }
-              JsonObjectConst entryObj = kv.value().as<JsonObjectConst>();
-              if (entryObj.isNull()) {
-                index++;
-                continue;
-              }
-              parseMeterChannelEntry(entryObj, index, String(kv.key().c_str()));
-              index++;
-            }
-          }
-        }
-      }
-    }
+    parseVirtualMultimeterVariant(meterVar, target.virtualMultimeter);
+  } else if (previous) {
+    target.virtualMultimeter = previous->virtualMultimeter;
   }
   target.peerCount = 0;
   JsonVariantConst peersVar = doc["peers"];
@@ -1698,33 +1762,7 @@ static void populateConfigJson(JsonDocument &doc,
     o["value"] = oc.value;
   }
   JsonObject meterObj = doc.createNestedObject("virtualMultimeter");
-  meterObj["channelCount"] = config.virtualMultimeter.channelCount;
-  JsonArray meterArr = meterObj.createNestedArray("channels");
-  for (uint8_t i = 0;
-       i < config.virtualMultimeter.channelCount && i < MAX_METER_CHANNELS; ++i) {
-    const MeterChannelConfig &mc = config.virtualMultimeter.channels[i];
-    JsonObject entry = meterArr.createNestedObject();
-    entry["id"] = mc.id;
-    entry["name"] = mc.name;
-    entry["label"] = mc.label;
-    entry["input"] = mc.input;
-    entry["unit"] = mc.unit;
-    entry["symbol"] = mc.symbol;
-    entry["enabled"] = mc.enabled;
-    entry["scale"] = mc.scale;
-    entry["offset"] = mc.offset;
-    if (mc.hasRangeMin) {
-      entry["rangeMin"] = mc.rangeMin;
-    } else {
-      entry["rangeMin"] = nullptr;
-    }
-    if (mc.hasRangeMax) {
-      entry["rangeMax"] = mc.rangeMax;
-    } else {
-      entry["rangeMax"] = nullptr;
-    }
-    entry["bits"] = mc.bits;
-  }
+  populateVirtualMultimeterJson(meterObj, config.virtualMultimeter);
   doc["peerCount"] = config.peerCount;
   JsonArray peersArr = doc.createNestedArray("peers");
   for (uint8_t i = 0; i < config.peerCount && i < MAX_PEERS; i++) {
@@ -3026,6 +3064,85 @@ void registerRoutes(ServerT &server) {
     srv->send(200, "application/json", payload);
     delay(100);
     ESP.restart();
+  });
+
+  server.on("/api/config/virtual-multimeter", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", R"({"error":"No body"})");
+      return;
+    }
+    DynamicJsonDocument doc(4096);
+    if (deserializeJson(doc, body)) {
+      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+      return;
+    }
+    JsonVariantConst channelsVariant;
+    if (doc.containsKey("channels")) {
+      channelsVariant = doc["channels"];
+    } else if (doc.containsKey("virtualMultimeter")) {
+      channelsVariant = doc["virtualMultimeter"];
+    } else {
+      channelsVariant = doc.as<JsonVariantConst>();
+    }
+    VirtualMultimeterConfig newConfig;
+    clearVirtualMultimeterConfig(newConfig);
+    bool parsedChannels = false;
+    if (!channelsVariant.isNull()) {
+      JsonArrayConst arr = channelsVariant.as<JsonArrayConst>();
+      if (!arr.isNull()) {
+        parseMeterChannelArray(arr, newConfig);
+        parsedChannels = true;
+      } else {
+        JsonObjectConst obj = channelsVariant.as<JsonObjectConst>();
+        if (!obj.isNull()) {
+          parseMeterChannelObject(obj, newConfig);
+          parsedChannels = true;
+        }
+      }
+    } else {
+      parsedChannels = true;
+    }
+    if (!parsedChannels) {
+      srv->send(400, "application/json", R"({"error":"invalid_channels"})");
+      return;
+    }
+    Config previousConfig = config;
+    config.virtualMultimeter = newConfig;
+    if (!saveConfig()) {
+      config.virtualMultimeter = previousConfig.virtualMultimeter;
+      srv->send(500, "application/json", R"({"error":"save_failed"})");
+      return;
+    }
+    String verifyError;
+    if (!verifyConfigStored(config, verifyError)) {
+      logPrintf("Virtual multimeter verification failed: %s",
+                verifyError.c_str());
+      config.virtualMultimeter = previousConfig.virtualMultimeter;
+      if (!saveConfig()) {
+        logMessage("Failed to restore configuration after verification failure");
+      }
+      DynamicJsonDocument errDoc(256);
+      errDoc["error"] = "verify_failed";
+      if (verifyError.length() > 0) {
+        errDoc["detail"] = verifyError;
+      }
+      String errPayload;
+      serializeJson(errDoc, errPayload);
+      srv->send(500, "application/json", errPayload);
+      return;
+    }
+    logPrintf("Virtual multimeter configuration updated (%u channels)",
+              static_cast<unsigned>(config.virtualMultimeter.channelCount));
+    DynamicJsonDocument resp(1024);
+    resp["status"] = "ok";
+    JsonObject applied = resp.createNestedObject("applied");
+    populateVirtualMultimeterJson(applied, config.virtualMultimeter);
+    String payload;
+    serializeJson(resp, payload);
+    srv->send(200, "application/json", payload);
   });
 
   server.on("/api/reboot", HTTP_POST, [&server]() {
