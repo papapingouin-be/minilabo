@@ -199,7 +199,7 @@ static const char *CONFIG_BACKUP_FILE_PATH = "/private/io_config.bak";
 static const char *CONFIG_TEMP_FILE_PATH = "/private/io_config.tmp";
 static const char *CONFIG_BACKUP_STAGING_PATH = "/private/io_config.bak.tmp";
 static const char *LEGACY_CONFIG_FILE_PATH = "/config.json";
-static const size_t CONFIG_JSON_CAPACITY = 12288;
+static const size_t CONFIG_JSON_CAPACITY = 16384;
 static const char SAMPLE_FILE_CONTENT[] = R"rawliteral(
 <!DOCTYPE html>
 <html lang="fr">
@@ -3074,7 +3074,7 @@ void registerRoutes(ServerT &server) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
     }
-    DynamicJsonDocument doc(4096);
+    DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
     if (deserializeJson(doc, body)) {
       srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
       return;
