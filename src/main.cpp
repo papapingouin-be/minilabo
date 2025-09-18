@@ -1257,6 +1257,53 @@ void parseConfigFromJson(const JsonDocument &doc, Config &target) {
 
 
 
+int parsePin(const String &pinString) {
+  String trimmed = pinString;
+  trimmed.trim();
+  if (trimmed.length() == 0) {
+    return -1;
+  }
+
+  String upper = trimmed;
+  upper.toUpperCase();
+
+  struct PinName {
+    const char *name;
+    int value;
+  };
+
+  static const PinName kNamedPins[] = {
+      {"D0", D0},   {"D1", D1},   {"D2", D2},   {"D3", D3},
+      {"D4", D4},   {"D5", D5},   {"D6", D6},   {"D7", D7},
+      {"D8", D8},   {"D9", D9},   {"D10", D10}, {"A0", A0},
+  };
+
+  for (const auto &entry : kNamedPins) {
+    if (upper == entry.name) {
+      return entry.value;
+    }
+  }
+
+  if (upper.startsWith("GPIO")) {
+    const char *start = upper.c_str() + 4;
+    if (*start != '\0') {
+      char *end = nullptr;
+      long value = strtol(start, &end, 10);
+      if (end != start && *end == '\0') {
+        return static_cast<int>(value);
+      }
+    }
+    return -1;
+  }
+
+  char *end = nullptr;
+  long value = strtol(trimmed.c_str(), &end, 0);
+  if (end == trimmed.c_str() || *end != '\0') {
+    return -1;
+  }
+  return static_cast<int>(value);
+}
+
 // Utility to convert a numeric pin back to a string.  Only common
 // NodeMCU pin names are supported.  Unknown pins are returned as
 // hexadecimal strings.
