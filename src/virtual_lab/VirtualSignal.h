@@ -83,6 +83,7 @@ struct VariableBinding {
 class MathVirtualSignal : public VirtualSignal {
  public:
   MathVirtualSignal(const String &id, const String &name);
+  ~MathVirtualSignal();
 
   bool configure(const String &expression,
                  const std::vector<VariableBinding> &bindings,

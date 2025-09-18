@@ -77,6 +77,8 @@ float WaveformSignal::sample(const SampleContext &ctx) const {
 MathVirtualSignal::MathVirtualSignal(const String &id, const String &name)
     : VirtualSignal(id, name, Kind::Math) {}
 
+MathVirtualSignal::~MathVirtualSignal() = default;
+
 bool MathVirtualSignal::configure(const String &expression,
                                   const std::vector<VariableBinding> &bindings,
                                   String &error) {
