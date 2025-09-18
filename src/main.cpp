@@ -31,6 +31,10 @@
 #include <vector>
 
 #include "build_version.h"
+#include "virtual_lab/FunctionGenerator.h"
+#include "virtual_lab/MathZone.h"
+#include "virtual_lab/Multimeter.h"
+#include "virtual_lab/Oscilloscope.h"
 #include "virtual_lab/VirtualWorkspace.h"
 
 static void logPrintf(const char *fmt, ...);

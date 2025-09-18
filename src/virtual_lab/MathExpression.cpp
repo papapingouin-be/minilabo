@@ -11,23 +11,13 @@
 
 namespace virtual_lab {
 
-namespace {
-
-struct Node {
-  enum class Type { Constant, Variable, Unary, Binary, Function };
-  Type type;
-  float constant = 0.0f;
-  char op = '\0';
-  String identifier;
-  std::vector<std::unique_ptr<Node>> children;
-};
-
-class Parser {
+class MathExpressionParser {
  public:
-  Parser(const std::string &source, MathExpression *owner, String &error)
+  MathExpressionParser(const std::string &source, MathExpression *owner,
+                       String &error)
       : source_(source), owner_(owner), error_(error) {}
 
-  std::unique_ptr<Node> parse() {
+  std::unique_ptr<MathExpression::Node> parse() {
     skipWhitespace();
     auto expr = parseExpression();
     skipWhitespace();
@@ -42,6 +32,8 @@ class Parser {
   }
 
  private:
+  using Node = MathExpression::Node;
+
   std::unique_ptr<Node> parseExpression() {
     auto node = parseTerm();
     if (!node) return nullptr;
@@ -261,6 +253,8 @@ class Parser {
   size_t position_ = 0;
 };
 
+namespace {
+
 float applyBinary(char op, float lhs, float rhs) {
   switch (op) {
     case '+':
@@ -425,7 +419,7 @@ bool MathExpression::compile(const String &expression, String &errorMessage) {
   asciiExpression_ = std::string(expression.c_str());
   variables_.clear();
   errorMessage = "";
-  Parser parser(asciiExpression_, this, errorMessage);
+  MathExpressionParser parser(asciiExpression_, this, errorMessage);
   root_ = parser.parse();
   if (!root_) {
     return false;
