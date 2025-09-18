@@ -339,71 +339,280 @@ body {
 /* Multimeter ------------------------------------------------------------ */
 
 .multimeter-shell {
-  gap: 1.4rem;
+  display: grid;
+  gap: 1.8rem;
+}
+
+.multimeter-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 1.6rem;
+}
+
+.multimeter-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 2rem;
+  align-items: stretch;
+}
+
+@media (max-width: 980px) {
+  .multimeter-body {
+    grid-template-columns: 1fr;
+  }
 }
 
 .multimeter-display {
   background: linear-gradient(180deg, rgba(10, 26, 24, 0.95), rgba(5, 14, 12, 0.88));
-  border-radius: 18px;
+  border-radius: 22px;
   border: 1px solid rgba(56, 143, 123, 0.28);
-  padding: 1.5rem 1.8rem;
+  padding: 2rem 2.2rem;
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
-  align-items: flex-start;
-  box-shadow: inset 0 22px 48px rgba(56, 143, 123, 0.12);
+  gap: 1.2rem;
+  align-items: stretch;
+  box-shadow: inset 0 28px 56px rgba(56, 143, 123, 0.12);
+}
+
+.multimeter-value-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1.4rem;
 }
 
 .multimeter-readout {
   font-family: "Segment7Standard", "Share Tech Mono", "Roboto Mono", monospace;
-  font-size: clamp(2.2rem, 3vw, 3rem);
-  letter-spacing: 0.18em;
+  font-size: clamp(2.6rem, 4vw, 3.6rem);
+  letter-spacing: 0.2em;
   color: #7df9a9;
-  text-shadow: 0 0 12px rgba(125, 249, 169, 0.45);
+  text-shadow: 0 0 18px rgba(125, 249, 169, 0.5);
 }
 
-.multimeter-unit {
-  font-size: 1rem;
-  letter-spacing: 0.15em;
+.multimeter-symbol {
+  font-size: 1.25rem;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
   color: rgba(125, 249, 169, 0.8);
 }
 
-.multimeter-controls {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1rem;
-}
-
-.multimeter-controls label {
+.multimeter-display-footer {
   display: flex;
-  flex-direction: column;
-  gap: 0.45rem;
-  font-size: 0.78rem;
-  letter-spacing: 0.12em;
+  align-items: center;
+  gap: 1.1rem;
+  font-size: 0.85rem;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: var(--text-muted);
+  color: rgba(125, 249, 169, 0.75);
 }
 
-.multimeter-controls progress {
+.multimeter-unit {
+  font-size: 1rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(125, 249, 169, 0.85);
+}
+
+.multimeter-acdc {
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(125, 249, 169, 0.12);
+  border: 1px solid rgba(125, 249, 169, 0.32);
+  font-weight: 600;
+}
+
+.multimeter-hold-indicator {
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(246, 198, 91, 0.18);
+  border: 1px solid rgba(246, 198, 91, 0.45);
+  color: #f6c65b;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+}
+
+.multimeter-display progress {
   width: 100%;
-  height: 14px;
+  height: 16px;
   background: rgba(0, 0, 0, 0.35);
   border-radius: 999px;
   border: 1px solid rgba(125, 249, 169, 0.28);
   overflow: hidden;
 }
 
-.multimeter-controls progress::-webkit-progress-bar {
+.multimeter-display progress::-webkit-progress-bar {
   background: transparent;
 }
 
-.multimeter-controls progress::-webkit-progress-value {
+.multimeter-display progress::-webkit-progress-value {
   background: linear-gradient(135deg, rgba(125, 249, 169, 0.2), rgba(125, 249, 169, 0.65));
 }
 
-.multimeter-controls progress::-moz-progress-bar {
+.multimeter-display progress::-moz-progress-bar {
   background: linear-gradient(135deg, rgba(125, 249, 169, 0.2), rgba(125, 249, 169, 0.65));
+}
+
+.multimeter-sidepanel {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.multimeter-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+
+.meter-button {
+  background: linear-gradient(180deg, rgba(18, 26, 32, 0.92), rgba(12, 18, 22, 0.92));
+  border: 1px solid rgba(107, 164, 182, 0.35);
+  border-radius: 12px;
+  color: rgba(225, 238, 255, 0.88);
+  font-size: 0.75rem;
+  letter-spacing: 0.18em;
+  padding: 0.65rem 0.75rem;
+  text-transform: uppercase;
+  font-weight: 600;
+  transition: background 0.2s ease, box-shadow 0.2s ease, color 0.2s ease;
+  box-shadow: inset 0 0 0 rgba(0, 0, 0, 0);
+}
+
+.meter-button:hover,
+.meter-button:focus {
+  outline: none;
+  background: linear-gradient(180deg, rgba(28, 46, 58, 0.95), rgba(18, 32, 40, 0.95));
+}
+
+.meter-button.is-active {
+  color: #f6c65b;
+  border-color: rgba(246, 198, 91, 0.65);
+  box-shadow: inset 0 0 12px rgba(246, 198, 91, 0.35);
+}
+
+.meter-button--power.is-active {
+  color: #7df9a9;
+  border-color: rgba(125, 249, 169, 0.65);
+  box-shadow: inset 0 0 16px rgba(125, 249, 169, 0.35);
+}
+
+.meter-button--measurement {
+  font-size: 1.05rem;
+  padding-block: 0.75rem;
+}
+
+.measurement-buttons {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+
+.rotary-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.9rem;
+}
+
+.rotary-wrapper {
+  position: relative;
+  width: 220px;
+  height: 220px;
+}
+
+.rotary-knob {
+  --rotation: -90deg;
+  position: absolute;
+  inset: 40px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, rgba(86, 108, 128, 0.85), rgba(22, 32, 40, 0.95));
+  box-shadow: inset -12px -12px 26px rgba(0, 0, 0, 0.45), inset 6px 6px 18px rgba(255, 255, 255, 0.08);
+  transform: rotate(var(--rotation));
+  transition: transform 0.35s ease;
+}
+
+.rotary-indicator {
+  position: absolute;
+  top: 18px;
+  left: 50%;
+  width: 6px;
+  height: 42px;
+  background: #f6c65b;
+  border-radius: 3px;
+  transform: translateX(-50%);
+  box-shadow: 0 0 12px rgba(246, 198, 91, 0.45);
+}
+
+.rotary-center {
+  position: absolute;
+  inset: 50%;
+  width: 46px;
+  height: 46px;
+  margin: -23px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, rgba(10, 12, 18, 0.9), rgba(0, 0, 0, 0.95));
+  box-shadow: inset 0 0 10px rgba(255, 255, 255, 0.12);
+}
+
+.rotary-options {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.rotary-option {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: rotate(var(--angle)) translateY(-100px) rotate(calc(-1 * var(--angle)));
+  background: transparent;
+  border: none;
+  color: rgba(225, 238, 255, 0.72);
+  font-size: 0.68rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-weight: 600;
+  pointer-events: auto;
+  padding: 0.25rem 0.35rem;
+  border-radius: 6px;
+  transition: color 0.2s ease, background 0.2s ease;
+}
+
+.rotary-option:hover,
+.rotary-option:focus {
+  outline: none;
+  color: #f6c65b;
+}
+
+.rotary-option.is-active {
+  color: #7df9a9;
+  background: rgba(125, 249, 169, 0.12);
+}
+
+.rotary-label {
+  font-size: 0.82rem;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: rgba(225, 238, 255, 0.6);
+}
+
+.multimeter-status-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  font-size: 0.78rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.multimeter-updates {
+  display: flex;
+  justify-content: space-between;
+  color: rgba(225, 238, 255, 0.7);
 }
 
 /* Math zone ------------------------------------------------------------- */
