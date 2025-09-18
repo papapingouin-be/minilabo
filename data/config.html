@@ -185,6 +185,8 @@ const MAX_INPUTS = 4;
 const MAX_OUTPUTS = 2;
 const ANALOG_PINS = ['A0'];
 const DIGITAL_PINS = ['D0','D1','D2','D3','D4','D5','D6','D7','D8'];
+const ANALOG_TYPES = new Set(['adc','div','zmpt','zmct']);
+const OUTPUT_PIN_TYPES = new Set(['pwm010','gpio']);
 const INPUT_TYPES = [
   { value: 'adc', label: 'ADC interne (A0)' },
   { value: 'ads1115', label: 'ADC externe ADS1115' },
@@ -200,9 +202,29 @@ const OUTPUT_TYPES = [
   { value: 'mcp4725', label: 'DAC I²C MCP4725' },
   { value: 'disabled', label: 'Désactivée' }
 ];
+const MODULE_DEPENDENCIES = {
+  input: {
+    ads1115: 'ads1115',
+    zmpt: 'zmpt',
+    zmct: 'zmct',
+    div: 'div'
+  },
+  output: {
+    pwm010: 'pwm010',
+    mcp4725: 'mcp4725'
+  }
+};
 
 let inputs = [];
 let outputs = [];
+const moduleState = {
+  ads1115: false,
+  pwm010: false,
+  mcp4725: false,
+  zmpt: false,
+  zmct: false,
+  div: false
+};
 let discoveryTableBody;
 let discoveryStatusEl;
 let discoveryTimer = null;
@@ -215,8 +237,151 @@ const STATUS_PENDING = 'pending';
 let lastAppliedInputs = new Map();
 let lastAppliedOutputs = new Map();
 
+function logIoStep(message, detail) {
+  if (detail !== undefined) {
+    console.log(`[IO] ${message}`, detail);
+  } else {
+    console.log(`[IO] ${message}`);
+  }
+}
+
 function getSnapshotMap(kind) {
   return kind === 'input' ? lastAppliedInputs : lastAppliedOutputs;
+}
+
+function refreshModuleStateFromForm() {
+  const modAds = document.getElementById('modAds');
+  const modPwm = document.getElementById('modPwm');
+  const modDac = document.getElementById('modDac');
+  const modZmpt = document.getElementById('modZmpt');
+  const modZmct = document.getElementById('modZmct');
+  const modDiv = document.getElementById('modDiv');
+  moduleState.ads1115 = !!(modAds && modAds.checked);
+  moduleState.pwm010 = !!(modPwm && modPwm.checked);
+  moduleState.mcp4725 = !!(modDac && modDac.checked);
+  moduleState.zmpt = !!(modZmpt && modZmpt.checked);
+  moduleState.zmct = !!(modZmct && modZmct.checked);
+  moduleState.div = !!(modDiv && modDiv.checked);
+}
+
+function isTypeAvailable(kind, type) {
+  if (type === 'disabled') {
+    return true;
+  }
+  if (kind === 'input') {
+    if (type === 'adc' || type === 'remote') {
+      return true;
+    }
+    const moduleKey = MODULE_DEPENDENCIES.input[type];
+    if (!moduleKey) {
+      return true;
+    }
+    return !!moduleState[moduleKey];
+  }
+  if (type === 'gpio') {
+    return true;
+  }
+  const moduleKey = MODULE_DEPENDENCIES.output[type];
+  if (!moduleKey) {
+    return true;
+  }
+  return !!moduleState[moduleKey];
+}
+
+function typeOptionsForKind(kind) {
+  const source = kind === 'input' ? INPUT_TYPES : OUTPUT_TYPES;
+  return source.filter(opt => isTypeAvailable(kind, opt.value));
+}
+
+function firstAvailableType(kind) {
+  const options = typeOptionsForKind(kind);
+  if (options.length > 0) {
+    return options[0].value;
+  }
+  return 'disabled';
+}
+
+function gatherUsedPins(kind, typeSet, excludeIndex) {
+  const used = new Set();
+  const list = kind === 'input' ? inputs : outputs;
+  list.forEach((item, idx) => {
+    if (!item || idx === excludeIndex) {
+      return;
+    }
+    if (!item.active || !item.pin) {
+      return;
+    }
+    if (typeSet.has(item.type)) {
+      used.add(item.pin);
+    }
+  });
+  return used;
+}
+
+function availablePinsForInput(data, index) {
+  if (!ANALOG_TYPES.has(data.type)) {
+    return [];
+  }
+  const basePins = Array.from(new Set([...ANALOG_PINS, ...DIGITAL_PINS]));
+  const used = gatherUsedPins('input', ANALOG_TYPES, index);
+  return basePins.filter(pin => !used.has(pin) || data.pin === pin);
+}
+
+function availablePinsForOutput(data, index) {
+  if (!OUTPUT_PIN_TYPES.has(data.type)) {
+    return [];
+  }
+  const used = gatherUsedPins('output', OUTPUT_PIN_TYPES, index);
+  return DIGITAL_PINS.filter(pin => !used.has(pin) || data.pin === pin);
+}
+
+function ensureTypeAvailability(kind) {
+  const source = kind === 'input' ? inputs : outputs;
+  let changed = false;
+  source.forEach((item, idx) => {
+    if (!item) return;
+    if (isTypeAvailable(kind, item.type)) {
+      return;
+    }
+    const previousName = item.name;
+    logIoStep(`Type ${item.type} indisponible pour ${kind === 'input' ? 'entrée' : 'sortie'} ${previousName || (kind === 'input' ? `IN${idx + 1}` : `OUT${idx + 1}`)} — passage en mode désactivé.`);
+    const replacement = kind === 'input' ? newInputConfig('disabled') : newOutputConfig('disabled');
+    replacement.name = previousName;
+    replacement.scale = item.scale;
+    replacement.offset = item.offset;
+    replacement.active = false;
+    if (kind === 'input') {
+      replacement.unit = item.unit || '';
+    }
+    source[idx] = replacement;
+    const snapshot = kind === 'input' ? snapshotInput(replacement, idx) : snapshotOutput(replacement, idx);
+    recordPendingSnapshot(kind, snapshot, previousName && previousName !== snapshot.name ? previousName : undefined);
+    changed = true;
+  });
+  return changed;
+}
+
+function handleModuleStateChange() {
+  refreshModuleStateFromForm();
+  logIoStep('Mise à jour des modules optionnels', {
+    ads1115: moduleState.ads1115,
+    pwm010: moduleState.pwm010,
+    mcp4725: moduleState.mcp4725,
+    zmpt: moduleState.zmpt,
+    zmct: moduleState.zmct,
+    div: moduleState.div
+  });
+  const inputsChanged = ensureTypeAvailability('input');
+  const outputsChanged = ensureTypeAvailability('output');
+  if (inputsChanged || outputsChanged) {
+    logIoStep('Certaines voies ont été désactivées suite au changement de modules.');
+  }
+  renderIoList('input');
+  renderIoList('output');
+  if (modalState) {
+    applyTypeChange(modalState.kind, modalState.data.type);
+    renderModalForm();
+  }
 }
 
 function snapshotInput(item, idx) {
@@ -365,9 +530,10 @@ function toNumber(value, fallback) {
 }
 
 function newInputConfig(type) {
+  const resolvedType = isTypeAvailable('input', type) ? type : firstAvailableType('input');
   const cfg = {
     name: '',
-    type,
+    type: resolvedType,
     active: true,
     pin: '',
     adsChannel: 0,
@@ -377,22 +543,23 @@ function newInputConfig(type) {
     offset: 0,
     unit: ''
   };
-  if (type === 'adc' || type === 'div' || type === 'zmpt' || type === 'zmct') {
+  if (ANALOG_TYPES.has(cfg.type)) {
     cfg.pin = 'A0';
   }
-  if (type === 'ads1115') {
+  if (cfg.type === 'ads1115') {
     cfg.adsChannel = 0;
   }
-  if (type === 'disabled') {
+  if (cfg.type === 'disabled') {
     cfg.active = false;
   }
   return cfg;
 }
 
 function newOutputConfig(type) {
+  const resolvedType = isTypeAvailable('output', type) ? type : firstAvailableType('output');
   const cfg = {
     name: '',
-    type,
+    type: resolvedType,
     active: true,
     pin: '',
     pwmFreq: 2000,
@@ -400,12 +567,12 @@ function newOutputConfig(type) {
     scale: 1,
     offset: 0
   };
-  if (type === 'pwm010') {
+  if (cfg.type === 'pwm010') {
     cfg.pin = 'D2';
     cfg.pwmFreq = 2000;
-  } else if (type === 'gpio') {
+  } else if (cfg.type === 'gpio') {
     cfg.pin = 'D1';
-  } else if (type === 'disabled') {
+  } else if (cfg.type === 'disabled') {
     cfg.active = false;
   }
   return cfg;
@@ -422,9 +589,13 @@ function typeLabel(kind, value) {
 }
 
 function normaliseInput(data) {
-  const base = newInputConfig(data.type || 'disabled');
+  const requestedType = data.type || 'disabled';
+  const availableType = isTypeAvailable('input', requestedType) ? requestedType : firstAvailableType('input');
+  if (requestedType !== availableType) {
+    logIoStep(`Type ${requestedType} indisponible à l'import, utilisation de ${availableType}.`);
+  }
+  const base = newInputConfig(availableType);
   base.name = data.name || '';
-  base.type = data.type || 'disabled';
   base.active = !!data.active;
   base.pin = data.pin || base.pin;
   const channel = parseInt(data.adsChannel, 10);
@@ -438,9 +609,13 @@ function normaliseInput(data) {
 }
 
 function normaliseOutput(data) {
-  const base = newOutputConfig(data.type || 'disabled');
+  const requestedType = data.type || 'disabled';
+  const availableType = isTypeAvailable('output', requestedType) ? requestedType : firstAvailableType('output');
+  if (requestedType !== availableType) {
+    logIoStep(`Type ${requestedType} indisponible à l'import pour une sortie, utilisation de ${availableType}.`);
+  }
+  const base = newOutputConfig(availableType);
   base.name = data.name || '';
-  base.type = data.type || 'disabled';
   base.active = !!data.active;
   base.pin = data.pin || base.pin;
   base.pwmFreq = Math.max(1, Math.round(toNumber(data.pwmFreq, base.pwmFreq)));
@@ -600,11 +775,12 @@ function openIoModal(kind, index) {
     const source = kind === 'input' ? inputs : outputs;
     data = cloneConfig(source[index]);
   } else {
-    const defaults = kind === 'input' ? newInputConfig(INPUT_TYPES[0].value) : newOutputConfig(OUTPUT_TYPES[0].value);
+    const defaults = kind === 'input' ? newInputConfig(firstAvailableType('input')) : newOutputConfig(firstAvailableType('output'));
     defaults.name = kind === 'input' ? `IN${inputs.length + 1}` : `OUT${outputs.length + 1}`;
     data = defaults;
   }
   modalState = { kind, index, data };
+  logIoStep(`Ouverture du formulaire ${kind === 'input' ? 'entrée' : 'sortie'}`, { index, type: data.type });
   renderModalForm();
   modal.classList.remove('hidden');
 }
@@ -620,6 +796,10 @@ function closeIoModal() {
 function applyTypeChange(kind, newType) {
   if (!modalState) return;
   const old = modalState.data;
+  if (!isTypeAvailable(kind, newType)) {
+    logIoStep(`Type ${newType} indisponible pour ${kind}, sélection automatique ignorée.`);
+    newType = firstAvailableType(kind);
+  }
   if (old.type === newType) return;
   const defaults = kind === 'input' ? newInputConfig(newType) : newOutputConfig(newType);
   defaults.name = old.name;
@@ -629,6 +809,7 @@ function applyTypeChange(kind, newType) {
   if (kind === 'input') {
     defaults.unit = old.unit;
   }
+  logIoStep(`Changement de type ${kind === 'input' ? 'entrée' : 'sortie'}: ${old.type} → ${newType}`);
   modalState.data = defaults;
 }
 
@@ -637,20 +818,32 @@ function renderTypeSpecificFields(data, kind) {
   if (!container) return;
   container.innerHTML = '';
   if (kind === 'input') {
-    if (['adc','div','zmpt','zmct'].includes(data.type)) {
+    if (ANALOG_TYPES.has(data.type)) {
       const row = document.createElement('div');
       row.className = 'modal-form-row';
       const label = document.createElement('label');
       label.textContent = 'Entrée analogique';
       const select = document.createElement('select');
-      ANALOG_PINS.concat(DIGITAL_PINS).forEach(pin => {
+      const availablePins = availablePinsForInput(data, modalState ? modalState.index : -1);
+      if (!data.pin || !availablePins.includes(data.pin)) {
+        data.pin = availablePins.length ? availablePins[0] : '';
+      }
+      if (availablePins.length === 0) {
         const opt = document.createElement('option');
-        opt.value = pin;
-        opt.textContent = pin;
+        opt.value = '';
+        opt.textContent = 'Aucune broche disponible';
         select.appendChild(opt);
-      });
-      if (!data.pin) data.pin = 'A0';
-      select.value = data.pin;
+        select.disabled = true;
+        logIoStep('Aucune broche analogique disponible pour la nouvelle entrée.');
+      } else {
+        availablePins.forEach(pin => {
+          const opt = document.createElement('option');
+          opt.value = pin;
+          opt.textContent = pin;
+          select.appendChild(opt);
+        });
+        select.value = data.pin;
+      }
       select.onchange = (ev) => {
         modalState.data.pin = ev.target.value;
       };
@@ -705,20 +898,32 @@ function renderTypeSpecificFields(data, kind) {
       container.appendChild(rowName);
     }
   } else {
-    if (['pwm010','gpio'].includes(data.type)) {
+    if (OUTPUT_PIN_TYPES.has(data.type)) {
       const row = document.createElement('div');
       row.className = 'modal-form-row';
       const label = document.createElement('label');
       label.textContent = 'Pin de sortie';
       const select = document.createElement('select');
-      DIGITAL_PINS.forEach(pin => {
+      const availablePins = availablePinsForOutput(data, modalState ? modalState.index : -1);
+      if (!data.pin || !availablePins.includes(data.pin)) {
+        data.pin = availablePins.length ? availablePins[0] : '';
+      }
+      if (availablePins.length === 0) {
         const opt = document.createElement('option');
-        opt.value = pin;
-        opt.textContent = pin;
+        opt.value = '';
+        opt.textContent = 'Aucune broche disponible';
         select.appendChild(opt);
-      });
-      if (!data.pin) data.pin = 'D2';
-      select.value = data.pin;
+        select.disabled = true;
+        logIoStep('Aucune broche numérique libre pour la sortie demandée.');
+      } else {
+        availablePins.forEach(pin => {
+          const opt = document.createElement('option');
+          opt.value = pin;
+          opt.textContent = pin;
+          select.appendChild(opt);
+        });
+        select.value = data.pin;
+      }
       select.onchange = (ev) => {
         modalState.data.pin = ev.target.value;
       };
@@ -787,7 +992,15 @@ function renderModalForm() {
     modalState.data.name = ev.target.value;
   };
   typeSelect.innerHTML = '';
-  const options = kind === 'input' ? INPUT_TYPES : OUTPUT_TYPES;
+  let options = typeOptionsForKind(kind);
+  if (!options.length) {
+    options = [{ value: 'disabled', label: 'Désactivée' }];
+  }
+  if (!isTypeAvailable(kind, data.type)) {
+    const fallback = firstAvailableType(kind);
+    logIoStep(`Type ${data.type} non disponible dans le formulaire, bascule vers ${fallback}.`);
+    data.type = fallback;
+  }
   options.forEach(opt => {
     const optionEl = document.createElement('option');
     optionEl.value = opt.value;
@@ -837,6 +1050,7 @@ function handleModalSubmit(event) {
     return;
   }
   data.name = data.name.trim();
+  logIoStep(`Enregistrement ${kind === 'input' ? 'entrée' : 'sortie'} ${data.name}`, { type: data.type, active: data.active });
   if (kind === 'input') {
     if (index != null) {
       const previous = inputs[index];
@@ -890,6 +1104,7 @@ function addInput() {
     alert(`Nombre maximum d'entrées atteint (${MAX_INPUTS}).`);
     return;
   }
+  logIoStep('Initialisation de l\'ajout d\'une nouvelle entrée.');
   openIoModal('input', null);
 }
 
@@ -898,6 +1113,7 @@ function addOutput() {
     alert(`Nombre maximum de sorties atteint (${MAX_OUTPUTS}).`);
     return;
   }
+  logIoStep('Initialisation de l\'ajout d\'une nouvelle sortie.');
   openIoModal('output', null);
 }
 
@@ -907,6 +1123,7 @@ async function loadConfig() {
     const resp = await authFetch('/api/config/get');
     if (!resp.ok) throw new Error('Chargement impossible');
     const cfg = await resp.json();
+    logIoStep('Configuration reçue du serveur');
     document.getElementById('nodeId').value = cfg.nodeId || '';
     const wifi = cfg.wifi || {};
     document.getElementById('wifiMode').value = wifi.mode || 'AP';
@@ -920,12 +1137,17 @@ async function loadConfig() {
     document.getElementById('modZmpt').checked = !!modules.zmpt;
     document.getElementById('modZmct').checked = !!modules.zmct;
     document.getElementById('modDiv').checked = !!modules.div;
+    refreshModuleStateFromForm();
+    logIoStep('Modules synchronisés lors du chargement', { ...moduleState });
     inputs = Array.isArray(cfg.inputs) ? cfg.inputs.slice(0, MAX_INPUTS).map(normaliseInput) : [];
     outputs = Array.isArray(cfg.outputs) ? cfg.outputs.slice(0, MAX_OUTPUTS).map(normaliseOutput) : [];
+    ensureTypeAvailability('input');
+    ensureTypeAvailability('output');
     resetSnapshotsFromConfig('input', inputs);
     resetSnapshotsFromConfig('output', outputs);
     renderIoList('input');
     renderIoList('output');
+    logIoStep('Configuration appliquée', { inputs: inputs.length, outputs: outputs.length });
     knownPeers.clear();
     if (Array.isArray(cfg.peers)) {
       cfg.peers.forEach(peer => {
@@ -938,12 +1160,15 @@ async function loadConfig() {
     showHideWifi();
   } catch (err) {
     console.error(err);
+    logIoStep('Erreur lors du chargement de la configuration', err);
     document.getElementById('status').textContent = 'Erreur lors du chargement de la configuration.';
   }
 }
 
 // Serialize form to config JSON and post to server
 async function saveConfig() {
+  refreshModuleStateFromForm();
+  logIoStep('Début de sauvegarde de la configuration', { ...moduleState });
   const cfg = {};
   cfg.nodeId = document.getElementById('nodeId').value || '';
   cfg.wifi = {
@@ -1007,6 +1232,11 @@ async function saveConfig() {
     cfg.peers.push({ nodeId, pin: pin || '' });
   });
   cfg.peerCount = cfg.peers.length;
+  logIoStep('Configuration assemblée avant envoi', {
+    inputs: cfg.inputs.length,
+    outputs: cfg.outputs.length,
+    peers: cfg.peerCount
+  });
 
   // Post config
   const statusEl = document.getElementById('status');
@@ -1040,6 +1270,7 @@ async function saveConfig() {
         renderIoList('input');
         renderIoList('output');
       }
+      logIoStep('Configuration sauvegardée avec succès');
       if (statusEl) {
         statusEl.textContent = 'Sauvegarde vérifiée, redémarrage...';
       }
@@ -1054,12 +1285,14 @@ async function saveConfig() {
       } else if (raw && raw.length) {
         message = `Erreur lors de la sauvegarde (${raw})`;
       }
+      logIoStep('Échec de la sauvegarde', { status: resp.status, message });
       if (statusEl) {
         statusEl.textContent = message;
       }
     }
   } catch (err) {
     console.error(err);
+    logIoStep('Exception lors de la sauvegarde', err);
     if (statusEl) {
       statusEl.textContent = 'Erreur lors de la sauvegarde';
     }
@@ -1182,6 +1415,7 @@ async function refreshDiscovery() {
 window.addEventListener('DOMContentLoaded', () => {
   discoveryTableBody = document.querySelector('#discoveryTable tbody');
   discoveryStatusEl = document.getElementById('discoveryStatus');
+  refreshModuleStateFromForm();
   const scanBtn = document.getElementById('scanBtn');
   if (scanBtn) {
     scanBtn.addEventListener('click', () => {
@@ -1196,6 +1430,12 @@ window.addEventListener('DOMContentLoaded', () => {
   if (addOutputBtn) {
     addOutputBtn.addEventListener('click', addOutput);
   }
+  ['modAds','modPwm','modDac','modZmpt','modZmct','modDiv'].forEach(id => {
+    const checkbox = document.getElementById(id);
+    if (checkbox) {
+      checkbox.addEventListener('change', handleModuleStateChange);
+    }
+  });
   const modalForm = document.getElementById('modalForm');
   if (modalForm) {
     modalForm.addEventListener('submit', handleModalSubmit);
