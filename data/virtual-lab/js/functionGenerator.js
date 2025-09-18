@@ -9,7 +9,7 @@ function drawPreview(canvas, type) {
   const ctx = canvas.getContext('2d');
   const { width, height } = canvas;
   ctx.clearRect(0, 0, width, height);
-  ctx.strokeStyle = 'rgba(148, 163, 184, 0.35)';
+  ctx.strokeStyle = 'rgba(255, 179, 71, 0.22)';
   ctx.lineWidth = 1;
   for (let i = 1; i < 6; i += 1) {
     const y = (height / 6) * i;
@@ -19,11 +19,11 @@ function drawPreview(canvas, type) {
     ctx.stroke();
   }
 
-  ctx.strokeStyle = '#45d1ff';
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(255, 208, 128, 0.9)';
+  ctx.lineWidth = 2.1;
   ctx.beginPath();
   const cycles = 2;
-  const samples = 500;
+  const samples = 480;
   for (let i = 0; i <= samples; i += 1) {
     const ratio = i / samples;
     const x = ratio * width;
@@ -34,10 +34,10 @@ function drawPreview(canvas, type) {
         yRatio = Math.sin(phase) >= 0 ? 0.15 : 0.85;
         break;
       case 'ramp':
-        yRatio = 0.15 + (ratio * cycles % 1) * 0.7;
+        yRatio = 0.15 + ((ratio * cycles) % 1) * 0.7;
         break;
       case 'pulse':
-        yRatio = (phase % (Math.PI * 2)) < 0.3 ? 0.15 : 0.85;
+        yRatio = phase % (Math.PI * 2) < 0.3 ? 0.2 : 0.85;
         break;
       case 'sine':
       default:
@@ -64,42 +64,76 @@ function formatFrequency(value) {
   return `${value.toFixed(0)} Hz`;
 }
 
-export function mountFunctionGenerator(container) {
+function populateSelect(select, options, placeholder) {
+  select.innerHTML = '';
+  if (!options.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = placeholder;
+    select.appendChild(opt);
+    select.disabled = true;
+    return;
+  }
+  options.forEach((item) => {
+    const opt = document.createElement('option');
+    opt.value = item.name;
+    opt.textContent = item.name;
+    select.appendChild(opt);
+  });
+  select.disabled = false;
+}
+
+export function mountFunctionGenerator(container, { outputs = [], error = null } = {}) {
   if (!container) return;
   container.innerHTML = `
-    <span class="status-badge">Générateur RF/Arb</span>
-    <h3>Générateur de fonctions 2 canaux</h3>
-    <p>
-      Sélectionnez vos formes d'onde et paramètres de sortie pour alimenter bancs d'essai et prototypes.
-    </p>
-    <div class="instrument-display">
-      <canvas width="520" height="160" aria-label="Aperçu signal" id="function-preview"></canvas>
-      <div id="function-summary" class="measurement-unit"></div>
-    </div>
-    <div class="instrument-controls">
-      <label>
-        Forme d'onde
-        <select id="function-wave"></select>
-      </label>
-      <label>
-        Fréquence
-        <input type="range" id="function-frequency" min="10" max="1000000" step="10" value="1000">
-      </label>
-      <label>
-        Amplitude (Vpp)
-        <input type="range" id="function-amplitude" min="0.2" max="10" step="0.2" value="2">
-      </label>
-      <label>
-        Offset (V)
-        <input type="range" id="function-offset" min="-5" max="5" step="0.1" value="0">
-      </label>
-      <label>
-        Sortie
-        <select id="function-output">
-          <option value="on">Activée</option>
-          <option value="off">Désactivée</option>
-        </select>
-      </label>
+    <div class="device-shell generator-shell">
+      <div class="device-header">
+        <div class="device-branding">
+          <span class="device-brand">Rigol</span>
+          <span class="device-model" id="function-generator-title">DG1022Z</span>
+          <span class="device-subtitle">Générateur de fonctions</span>
+        </div>
+        <div class="io-selector">
+          <label for="function-io">Sortie assignée</label>
+          <select id="function-io" class="io-select"></select>
+        </div>
+      </div>
+      <div class="device-status" id="function-generator-status"></div>
+      <div class="generator-body">
+        <div class="generator-visual">
+          <canvas width="520" height="160" aria-label="Aperçu signal" id="function-preview"></canvas>
+          <div id="function-summary" class="generator-summary"></div>
+        </div>
+        <div class="generator-controls">
+          <label>
+            Forme d'onde
+            <select id="function-wave" class="io-select"></select>
+          </label>
+          <label>
+            Fréquence
+            <input type="range" id="function-frequency" min="10" max="1000000" step="10" value="1000">
+          </label>
+          <label>
+            Amplitude (Vpp)
+            <input type="range" id="function-amplitude" min="0.2" max="10" step="0.2" value="2">
+          </label>
+          <label>
+            Offset (V)
+            <input type="range" id="function-offset" min="-5" max="5" step="0.1" value="0">
+          </label>
+          <label>
+            Sortie
+            <select id="function-output" class="io-select">
+              <option value="on">Activée</option>
+              <option value="off">Désactivée</option>
+            </select>
+          </label>
+          <label>
+            Harmoniques
+            <input type="range" id="function-harmonics" min="0" max="100" step="10" value="20">
+          </label>
+        </div>
+      </div>
     </div>
   `;
 
@@ -110,6 +144,19 @@ export function mountFunctionGenerator(container) {
   const amplitude = container.querySelector('#function-amplitude');
   const offset = container.querySelector('#function-offset');
   const output = container.querySelector('#function-output');
+  const harmonics = container.querySelector('#function-harmonics');
+  const ioSelect = container.querySelector('#function-io');
+  const statusLabel = container.querySelector('#function-generator-status');
+
+  populateSelect(ioSelect, outputs, 'Aucune sortie active');
+  if (outputs.length) {
+    ioSelect.value = outputs[0].name;
+    statusLabel.textContent = `${outputs.length} sortie(s) configurées`;
+  } else if (error) {
+    statusLabel.textContent = 'Impossible de charger la configuration des sorties.';
+  } else {
+    statusLabel.textContent = 'Activez une sortie dans la configuration.';
+  }
 
   Object.entries(WAVE_TYPES).forEach(([value, { label }]) => {
     const option = document.createElement('option');
@@ -125,10 +172,13 @@ export function mountFunctionGenerator(container) {
     const offsetValue = parseFloat(offset.value).toFixed(1);
     const freqText = formatFrequency(parseFloat(frequency.value));
     const waveInfo = WAVE_TYPES[currentWave];
-    summary.textContent = `${waveInfo.label} • ${freqText} • ${amplitudeValue} Vpp • Offset ${offsetValue} V • Sortie ${output.value === 'on' ? 'ON' : 'OFF'}`;
+    const targetOutput = ioSelect.value ? `Sortie ${ioSelect.value}` : 'Pas de sortie assignée';
+    const harmonicContent = `${harmonics.value}%`;
+    const outputState = output.value === 'on' ? 'ON' : 'OFF';
+    summary.textContent = `${waveInfo.label} • ${freqText} • ${amplitudeValue} Vpp • Offset ${offsetValue} V • ${targetOutput} • Harmoniques ${harmonicContent} • Sortie ${outputState}`;
   };
 
-  [waveSelect, frequency, amplitude, offset, output].forEach((input) => {
+  [waveSelect, frequency, amplitude, offset, output, harmonics, ioSelect].forEach((input) => {
     input.addEventListener('input', update);
     input.addEventListener('change', update);
   });

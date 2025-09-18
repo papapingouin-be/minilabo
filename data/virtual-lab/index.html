@@ -7,39 +7,26 @@
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-  <div class="page">
-    <header>
-      <a href="../index.html" class="return-link" aria-label="Retour à l'accueil">
-        &#x2190; Retour au tableau de bord
-      </a>
-      <span class="status-badge">Environnement virtuel</span>
-    </header>
-
-    <section class="hero">
-      <div class="hero-visual">
-        <img src="../assets/virtual-lab-logo.svg" alt="Logo Virtual Lab MiniLabBox">
-      </div>
-      <div class="hero-content">
-        <h1>Virtual Lab Professionnel</h1>
-        <p>
-          Retrouvez vos instruments de mesure dans une interface immersive inspirée des laboratoires modernes.
-          Configurez l'oscilloscope, le multimètre et le générateur de fonctions comme si vous étiez devant le matériel.
-        </p>
-        <a class="cta" href="#lab">Explorer le laboratoire</a>
-      </div>
+  <div class="lab-grid" role="main">
+    <section class="zone zone-oscilloscope" aria-labelledby="oscilloscope-title">
+      <div class="device" id="oscilloscope"></div>
     </section>
-
-    <h2 class="section-title" id="lab">Instruments</h2>
-    <section class="instrument-grid">
-      <article class="instrument-card" id="oscilloscope"></article>
-      <article class="instrument-card" id="multimeter"></article>
-      <article class="instrument-card" id="function-generator"></article>
+    <section class="zone zone-generator" aria-labelledby="function-generator-title">
+      <div class="device" id="function-generator"></div>
     </section>
-
-    <h2 class="section-title">Zone mathématique</h2>
-    <section class="math-zone" id="math-zone"></section>
+    <section class="zone zone-multimeter" aria-labelledby="multimeter-title">
+      <div class="device" id="multimeter"></div>
+    </section>
+    <section class="zone zone-math" aria-labelledby="math-zone-title">
+      <div class="device" id="math-zone"></div>
+    </section>
   </div>
 
+  <noscript>
+    <div class="noscript">Activez JavaScript pour accéder au laboratoire virtuel.</div>
+  </noscript>
+
+  <script src="../auth.js"></script>
   <script type="module" src="js/main.js"></script>
 </body>
 </html>

@@ -22,21 +22,32 @@ function safeEval(expression) {
 export function mountMathZone(container) {
   if (!container) return;
   container.innerHTML = `
-    <div>
-      <h3>Calculs rapides</h3>
-      <p>
-        Évaluez instantanément vos formules : rapports de division, conversions d'unités ou calculs de puissance.
-        La zone est isolée pour simplifier la maintenance du code.
-      </p>
-    </div>
-    <div class="math-input">
-      <input type="text" id="math-expression" placeholder="Exemple : (5.0/2) * Math.PI" aria-label="Expression mathématique">
-      <button type="button" id="math-run">Calculer</button>
-    </div>
-    <div class="math-result" id="math-result" aria-live="polite"></div>
-    <div>
-      <h4>Idées de calculs</h4>
-      <ul>${renderExamples(EXAMPLES)}</ul>
+    <div class="device-shell math-shell">
+      <div class="device-header">
+        <div class="device-branding">
+          <span class="device-brand">Analyse</span>
+          <span class="device-model" id="math-zone-title">Console mathématique</span>
+          <span class="device-subtitle">Calculs temps réel</span>
+        </div>
+      </div>
+      <div class="math-console">
+        <div>
+          <h3>Calculs rapides</h3>
+          <p>
+            Évaluez instantanément vos formules : rapports de division, conversions d'unités ou calculs de puissance.
+            La console est isolée pour simplifier la maintenance du code.
+          </p>
+        </div>
+        <div class="math-input">
+          <input type="text" id="math-expression" placeholder="Exemple : (5.0/2) * Math.PI" aria-label="Expression mathématique">
+          <button type="button" id="math-run">Calculer</button>
+        </div>
+        <div class="math-result" id="math-result" aria-live="polite"></div>
+        <div>
+          <h4>Idées de calculs</h4>
+          <ul>${renderExamples(EXAMPLES)}</ul>
+        </div>
+      </div>
     </div>
   `;
 
