@@ -2838,10 +2838,12 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
   }
   logIoDelta(previousConfig, config);
   logConfigSummary("Applied IO");
-  logMessage("IO configuration update saved; rebooting");
+  logMessage("IO configuration update saved; reboot required");
   DynamicJsonDocument respDoc(2048);
   respDoc["status"] = "ok";
+  respDoc["saved"] = true;
   respDoc["verified"] = true;
+  respDoc["requiresReboot"] = true;
   JsonObject modulesObj = respDoc.createNestedObject("modules");
   modulesObj["ads1115"] = config.modules.ads1115;
   modulesObj["pwm010"] = config.modules.pwm010;
@@ -2893,8 +2895,6 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
   String payload;
   serializeJson(respDoc, payload);
   srv->send(200, "application/json", payload);
-  delay(100);
-  ESP.restart();
 }
 
 template <typename ServerT>
