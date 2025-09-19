@@ -1413,18 +1413,17 @@ async function saveConfig() {
 
   // Post config
   const statusEl = document.getElementById('status');
-  try {
-    const resp = await authFetch('/api/config/io/set', {
-      method: 'POST',
-      // The firmware expects a plain text body for configuration updates.
-      // Sending JSON with a text/plain content type allows the server to
-      // access the payload via the "plain" parameter.
-      headers: { 'Content-Type': 'text/plain' },
-      body: JSON.stringify(cfg)
-    });
+  const requestOptions = {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: JSON.stringify(cfg)
+  };
+
+  async function sendConfigRequest(url) {
+    const response = await authFetch(url, requestOptions);
     let raw = '';
     try {
-      raw = await resp.text();
+      raw = await response.text();
     } catch (_) {
       raw = '';
     }
@@ -1436,6 +1435,19 @@ async function saveConfig() {
         parsed = null;
       }
     }
+    return { response, raw, parsed };
+  }
+
+  try {
+    let attempt = await sendConfigRequest('/api/config/io/set');
+    let legacyEndpointUsed = false;
+    if (attempt.response.status === 404) {
+      logIoStep('Point de terminaison /api/config/io/set indisponible, tentative via /api/config/set.');
+      legacyEndpointUsed = true;
+      attempt = await sendConfigRequest('/api/config/set');
+    }
+
+    const { response: resp, raw, parsed } = attempt;
     if (resp.ok) {
       if (parsed && parsed.applied) {
         applyServerSnapshots('input', parsed.applied.inputs || []);
@@ -1443,9 +1455,15 @@ async function saveConfig() {
         renderIoList('input');
         renderIoList('output');
       }
-      logIoStep('Configuration sauvegardée avec succès');
+      if (legacyEndpointUsed) {
+        logIoStep('Configuration sauvegardée via le point de terminaison historique /api/config/set.');
+      } else {
+        logIoStep('Configuration sauvegardée avec succès');
+      }
       if (statusEl) {
-        statusEl.textContent = 'Sauvegarde vérifiée, redémarrage...';
+        statusEl.textContent = legacyEndpointUsed
+          ? 'Sauvegarde vérifiée (mode compatibilité), redémarrage...'
+          : 'Sauvegarde vérifiée, redémarrage...';
       }
     } else {
       let message = 'Erreur lors de la sauvegarde';
@@ -1457,6 +1475,9 @@ async function saveConfig() {
         }
       } else if (raw && raw.length) {
         message = `Erreur lors de la sauvegarde (${raw})`;
+      }
+      if (legacyEndpointUsed) {
+        message += ' — tentative via /api/config/set.';
       }
       logIoStep('Échec de la sauvegarde', { status: resp.status, message });
       if (statusEl) {
