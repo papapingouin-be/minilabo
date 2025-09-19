@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>Interface réseau MiniLabBox</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 1em; }
+    h1 { margin-top: 0; }
+    fieldset { border: 1px solid #ccc; padding: 1em; margin-bottom: 1em; }
+    legend { font-weight: bold; }
+    label.inline { display: inline-block; width: 160px; margin-bottom: 0.5em; }
+    input[type="text"], input[type="password"] { width: 220px; }
+    select { width: 220px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.5em; }
+    th, td { border: 1px solid #ccc; padding: 0.35em 0.5em; }
+    tr:nth-child(even) { background-color: #f8f8f8; }
+    .hint { font-size: 0.9em; color: #555; margin-top: 0.5em; }
+    button { padding: 0.5em 1em; font-size: 1em; }
+    .peer-pin { width: 70px; text-align: center; }
+    .status { margin-left: 1em; font-weight: bold; }
+  </style>
+  <script src="auth.js"></script>
+</head>
+<body>
+<h1>Interface réseau MiniLabBox</h1>
+<p class="hint">
+  Configurez l'identifiant du nœud, le mode Wi-Fi et les codes PIN autorisés pour les autres MiniLabBox.
+  La configuration des entrées/sorties se trouve sur la page <a href="config.html">Configuration IO</a>.
+</p>
+
+<form id="interfaceForm" onsubmit="return false;">
+  <fieldset>
+    <legend>Identifiant et Wi-Fi</legend>
+    <label class="inline" for="nodeId">Identifiant du nœud :</label>
+    <input type="text" id="nodeId" name="nodeId">
+    <br><br>
+    <label class="inline" for="wifiMode">Mode Wi-Fi :</label>
+    <select id="wifiMode" name="wifiMode">
+      <option value="AP">Point d'accès (AP)</option>
+      <option value="STA">Client (STA)</option>
+    </select>
+    <div id="staConfig" class="hint">
+      <p>
+        <label class="inline" for="ssid">SSID :</label>
+        <input type="text" id="ssid" name="ssid">
+      </p>
+      <p>
+        <label class="inline" for="pass">Mot de passe :</label>
+        <input type="password" id="pass" name="pass">
+      </p>
+    </div>
+    <div id="apInfo" class="hint">
+      En mode point d'accès, l'identifiant du nœud sert également de SSID. Aucun mot de passe n'est requis.
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>MiniLabBox sur le réseau</legend>
+    <p>Identifiez les MiniLabBox découvertes et saisissez leur code PIN pour autoriser les échanges sécurisés.</p>
+    <button type="button" id="scanBtn">Scanner le réseau local</button>
+    <table id="discoveryTable">
+      <thead>
+        <tr><th>Identifiant</th><th>Adresse IP</th><th>Dernière vue</th><th>Code PIN</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div id="discoveryStatus" class="hint"></div>
+  </fieldset>
+
+  <button id="saveBtn">Enregistrer et redémarrer</button>
+  <span id="status" class="status"></span>
+</form>
+
+<script>
+let knownPeers = new Map();
+let discoveryData = [];
+let discoveryTimer = null;
+
+function logStep(message, detail) {
+  if (detail !== undefined) {
+    console.log(`[iface] ${message}`, detail);
+  } else {
+    console.log(`[iface] ${message}`);
+  }
+}
+
+function formatAge(ageMs) {
+  if (ageMs == null) return '—';
+  const seconds = ageMs / 1000;
+  if (seconds < 1) return 'juste maintenant';
+  if (seconds < 60) return `${seconds.toFixed(1)} s`;
+  const minutes = seconds / 60;
+  if (minutes < 60) return `${minutes.toFixed(1)} min`;
+  const hours = minutes / 60;
+  return `${hours.toFixed(1)} h`;
+}
+
+function showHideWifi() {
+  const modeSelect = document.getElementById('wifiMode');
+  const sta = document.getElementById('staConfig');
+  const ap = document.getElementById('apInfo');
+  if (!modeSelect || !sta || !ap) return;
+  if (modeSelect.value === 'STA') {
+    sta.style.display = 'block';
+    ap.style.display = 'none';
+  } else {
+    sta.style.display = 'none';
+    ap.style.display = 'block';
+  }
+}
+
+function renderDiscoveryRows() {
+  const tbody = document.querySelector('#discoveryTable tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  const combined = [];
+  const seen = new Set();
+  discoveryData.forEach(node => {
+    if (!node || !node.nodeId) return;
+    combined.push(node);
+    seen.add(node.nodeId);
+    if (!knownPeers.has(node.nodeId)) {
+      knownPeers.set(node.nodeId, '');
+    }
+  });
+  knownPeers.forEach((pin, nodeId) => {
+    if (!nodeId || seen.has(nodeId)) return;
+    combined.push({ nodeId, ip: '', ageMs: null });
+  });
+  if (!combined.length) {
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = 4;
+    cell.textContent = 'Aucune MiniLabBox détectée pour le moment.';
+    row.appendChild(cell);
+    tbody.appendChild(row);
+    return;
+  }
+  combined.sort((a, b) => a.nodeId.localeCompare(b.nodeId));
+  combined.forEach(node => {
+    const row = document.createElement('tr');
+    row.dataset.nodeId = node.nodeId;
+    const tdId = document.createElement('td');
+    tdId.textContent = node.nodeId;
+    const tdIp = document.createElement('td');
+    tdIp.textContent = node.ip && node.ip.length ? node.ip : '—';
+    const tdAge = document.createElement('td');
+    tdAge.textContent = formatAge(node.ageMs);
+    const tdPin = document.createElement('td');
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.maxLength = 4;
+    input.className = 'peer-pin';
+    input.placeholder = '0000';
+    input.value = knownPeers.get(node.nodeId) || '';
+    input.addEventListener('input', () => {
+      knownPeers.set(node.nodeId, input.value.trim());
+    });
+    tdPin.appendChild(input);
+    row.appendChild(tdId);
+    row.appendChild(tdIp);
+    row.appendChild(tdAge);
+    row.appendChild(tdPin);
+    tbody.appendChild(row);
+  });
+}
+
+async function refreshDiscovery() {
+  const statusEl = document.getElementById('discoveryStatus');
+  if (statusEl) {
+    statusEl.textContent = 'Scan en cours...';
+  }
+  try {
+    const resp = await authFetch('/api/discovery');
+    if (!resp.ok) throw new Error('Scan impossible');
+    const data = await resp.json();
+    let list = [];
+    if (Array.isArray(data)) {
+      list = data;
+    } else if (data && Array.isArray(data.nodes)) {
+      list = data.nodes;
+    }
+    discoveryData = list.map(item => ({
+      nodeId: item && item.nodeId ? item.nodeId : '',
+      ip: item && item.ip ? item.ip : '',
+      ageMs: typeof item.ageMs === 'number' ? item.ageMs : null
+    }));
+    renderDiscoveryRows();
+    if (statusEl) {
+      if (discoveryData.length) {
+        statusEl.textContent = `Dernière mise à jour : ${new Date().toLocaleTimeString()}`;
+      } else {
+        statusEl.textContent = 'Aucune MiniLabBox détectée pour le moment.';
+      }
+    }
+  } catch (err) {
+    console.error(err);
+    if (statusEl) {
+      statusEl.textContent = 'Échec du scan du réseau.';
+    }
+  }
+}
+
+async function loadConfig() {
+  try {
+    const resp = await authFetch('/api/config/interface/get');
+    if (!resp.ok) throw new Error('Chargement impossible');
+    const cfg = await resp.json();
+    document.getElementById('nodeId').value = cfg.nodeId || '';
+    const wifi = cfg.wifi || {};
+    document.getElementById('wifiMode').value = wifi.mode || 'AP';
+    document.getElementById('ssid').value = wifi.ssid || '';
+    document.getElementById('pass').value = wifi.pass || '';
+    knownPeers = new Map();
+    if (Array.isArray(cfg.peers)) {
+      cfg.peers.forEach(peer => {
+        if (peer && peer.nodeId) {
+          knownPeers.set(peer.nodeId, peer.pin || '');
+        }
+      });
+    }
+    showHideWifi();
+    renderDiscoveryRows();
+    const statusEl = document.getElementById('status');
+    if (statusEl) statusEl.textContent = '';
+  } catch (err) {
+    console.error(err);
+    const statusEl = document.getElementById('status');
+    if (statusEl) statusEl.textContent = 'Erreur lors du chargement de la configuration.';
+  }
+}
+
+async function saveConfig() {
+  const statusEl = document.getElementById('status');
+  if (statusEl) statusEl.textContent = 'Sauvegarde...';
+  const cfg = {
+    nodeId: document.getElementById('nodeId').value || '',
+    wifi: {
+      mode: document.getElementById('wifiMode').value,
+      ssid: document.getElementById('ssid').value || '',
+      pass: document.getElementById('pass').value || ''
+    },
+    peers: []
+  };
+  knownPeers.forEach((pin, nodeId) => {
+    if (!nodeId) return;
+    cfg.peers.push({ nodeId, pin: pin || '' });
+  });
+  logStep('Sauvegarde interface', cfg);
+  try {
+    const resp = await authFetch('/api/config/interface/set', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify(cfg)
+    });
+    if (resp.ok) {
+      if (statusEl) statusEl.textContent = 'Configuration enregistrée, redémarrage...';
+    } else {
+      let message = `Erreur lors de la sauvegarde (${resp.status})`;
+      try {
+        const data = await resp.json();
+        if (data && data.error) {
+          message = data.detail ? `${data.error}: ${data.detail}` : data.error;
+        }
+      } catch (_) {}
+      if (statusEl) statusEl.textContent = message;
+    }
+  } catch (err) {
+    console.error(err);
+    if (statusEl) statusEl.textContent = 'Erreur lors de la sauvegarde.';
+  }
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('wifiMode').addEventListener('change', showHideWifi);
+  document.getElementById('scanBtn').addEventListener('click', () => {
+    refreshDiscovery();
+  });
+  document.getElementById('saveBtn').addEventListener('click', () => {
+    saveConfig();
+  });
+  ensureSession()
+    .then(() => {
+      loadConfig();
+      refreshDiscovery();
+      if (discoveryTimer) clearInterval(discoveryTimer);
+      discoveryTimer = setInterval(refreshDiscovery, 8000);
+    })
+    .catch(err => {
+      console.error(err);
+      const statusEl = document.getElementById('status');
+      if (statusEl) statusEl.textContent = 'Session requise pour modifier la configuration.';
+    });
+});
+</script>
+</body>
+</html>

@@ -194,10 +194,18 @@ static bool parseVariableBindings(JsonVariantConst variant,
 static const char *LOG_PATH = "/log.txt";
 static const char *USER_FILES_DIR = "/private";
 static const char *SAMPLE_FILE_PATH = "/private/sample.html";
-static const char *CONFIG_FILE_PATH = "/private/io_config.json";
-static const char *CONFIG_BACKUP_FILE_PATH = "/private/io_config.bak";
-static const char *CONFIG_TEMP_FILE_PATH = "/private/io_config.tmp";
-static const char *CONFIG_BACKUP_STAGING_PATH = "/private/io_config.bak.tmp";
+static const char *IO_CONFIG_FILE_PATH = "/private/io_config.json";
+static const char *IO_CONFIG_BACKUP_FILE_PATH = "/private/io_config.bak";
+static const char *IO_CONFIG_TEMP_FILE_PATH = "/private/io_config.tmp";
+static const char *IO_CONFIG_BACKUP_STAGING_PATH = "/private/io_config.bak.tmp";
+static const char *INTERFACE_CONFIG_FILE_PATH = "/private/interface_config.json";
+static const char *INTERFACE_CONFIG_BACKUP_FILE_PATH = "/private/interface_config.bak";
+static const char *INTERFACE_CONFIG_TEMP_FILE_PATH = "/private/interface_config.tmp";
+static const char *INTERFACE_CONFIG_BACKUP_STAGING_PATH = "/private/interface_config.bak.tmp";
+static const char *VIRTUAL_CONFIG_FILE_PATH = "/private/virtual_config.json";
+static const char *VIRTUAL_CONFIG_BACKUP_FILE_PATH = "/private/virtual_config.bak";
+static const char *VIRTUAL_CONFIG_TEMP_FILE_PATH = "/private/virtual_config.tmp";
+static const char *VIRTUAL_CONFIG_BACKUP_STAGING_PATH = "/private/virtual_config.bak.tmp";
 static const char *LEGACY_CONFIG_FILE_PATH = "/config.json";
 static const size_t CONFIG_JSON_CAPACITY = 16384;
 static const char SAMPLE_FILE_CONTENT[] = R"rawliteral(
@@ -727,6 +735,17 @@ struct Config {
   uint8_t       peerCount;   // Number of stored peer PINs
   PeerAuth      peers[MAX_PEERS];
 };
+
+static const uint8_t CONFIG_SECTION_INTERFACE = 0x01;
+static const uint8_t CONFIG_SECTION_MODULES   = 0x02;
+static const uint8_t CONFIG_SECTION_IO        = 0x04;
+static const uint8_t CONFIG_SECTION_VIRTUAL   = 0x08;
+static const uint8_t CONFIG_SECTION_PEERS     = 0x10;
+static const uint8_t CONFIG_SECTION_ALL = CONFIG_SECTION_INTERFACE |
+                                         CONFIG_SECTION_MODULES   |
+                                         CONFIG_SECTION_IO        |
+                                         CONFIG_SECTION_VIRTUAL   |
+                                         CONFIG_SECTION_PEERS;
 
 static Config config;            // Global configuration instance
 static const uint16_t HTTP_PORT = 80;
@@ -1342,7 +1361,9 @@ static uint32_t lastBroadcastUpdate = 0;
 
 // Forward declarations
 void loadConfig();
-bool saveConfig();
+bool saveIoConfig();
+bool saveInterfaceConfig();
+bool saveVirtualConfig();
 void setDefaultConfig();
 void setupWiFi();
 void setupSensors();
@@ -1558,101 +1579,113 @@ static void populateVirtualMultimeterJson(JsonObject obj,
 void parseConfigFromJson(const JsonDocument &doc,
                          Config &target,
                          const Config *previous,
-                         bool logIoChanges) {
-  if (doc.containsKey("nodeId")) {
-    target.nodeId = doc["nodeId"].as<String>();
-  }
-  if (doc.containsKey("wifi")) {
-    JsonObjectConst w = doc["wifi"].as<JsonObjectConst>();
-    if (!w.isNull()) {
-      if (w.containsKey("mode")) target.wifi.mode = w["mode"].as<String>();
-      if (w.containsKey("ssid")) target.wifi.ssid = w["ssid"].as<String>();
-      if (w.containsKey("pass")) target.wifi.pass = w["pass"].as<String>();
+                         bool logIoChanges,
+                         uint8_t sections = CONFIG_SECTION_ALL) {
+  if (sections & CONFIG_SECTION_INTERFACE) {
+    if (doc.containsKey("nodeId")) {
+      target.nodeId = doc["nodeId"].as<String>();
+    }
+    if (doc.containsKey("wifi")) {
+      JsonObjectConst w = doc["wifi"].as<JsonObjectConst>();
+      if (!w.isNull()) {
+        if (w.containsKey("mode")) target.wifi.mode = w["mode"].as<String>();
+        if (w.containsKey("ssid")) target.wifi.ssid = w["ssid"].as<String>();
+        if (w.containsKey("pass")) target.wifi.pass = w["pass"].as<String>();
+      }
     }
   }
-  if (doc.containsKey("modules")) {
-    JsonObjectConst m = doc["modules"].as<JsonObjectConst>();
-    if (!m.isNull()) {
-      if (m.containsKey("ads1115")) target.modules.ads1115 = m["ads1115"].as<bool>();
-      if (m.containsKey("pwm010")) target.modules.pwm010 = m["pwm010"].as<bool>();
-      if (m.containsKey("zmpt")) target.modules.zmpt = m["zmpt"].as<bool>();
-      if (m.containsKey("zmct")) target.modules.zmct = m["zmct"].as<bool>();
-      if (m.containsKey("div")) target.modules.div = m["div"].as<bool>();
-      if (m.containsKey("mcp4725")) target.modules.mcp4725 = m["mcp4725"].as<bool>();
+  if (sections & CONFIG_SECTION_MODULES) {
+    if (doc.containsKey("modules")) {
+      JsonObjectConst m = doc["modules"].as<JsonObjectConst>();
+      if (!m.isNull()) {
+        if (m.containsKey("ads1115")) target.modules.ads1115 = m["ads1115"].as<bool>();
+        if (m.containsKey("pwm010")) target.modules.pwm010 = m["pwm010"].as<bool>();
+        if (m.containsKey("zmpt")) target.modules.zmpt = m["zmpt"].as<bool>();
+        if (m.containsKey("zmct")) target.modules.zmct = m["zmct"].as<bool>();
+        if (m.containsKey("div")) target.modules.div = m["div"].as<bool>();
+        if (m.containsKey("mcp4725")) target.modules.mcp4725 = m["mcp4725"].as<bool>();
+      }
     }
   }
 
-  resetInputSlots(target);
-  resetOutputSlots(target);
-  if (!previous) {
+  if (sections & CONFIG_SECTION_IO) {
+    resetInputSlots(target);
+    resetOutputSlots(target);
+  }
+  if ((sections & CONFIG_SECTION_VIRTUAL) && !previous) {
     clearVirtualMultimeterConfig(target.virtualMultimeter);
   }
 
-  std::vector<InputConfig> parsedInputs;
-  JsonVariantConst inputsVar = doc["inputs"];
-  if (!inputsVar.isNull()) {
-    if (!decodeInputs(inputsVar, parsedInputs)) {
-      logPrintf("Input configuration malformed: expected array or object but found %s",
-                describeJsonType(inputsVar));
-      logMessage("Input configuration malformed: expected array or object");
+  if (sections & CONFIG_SECTION_IO) {
+    std::vector<InputConfig> parsedInputs;
+    JsonVariantConst inputsVar = doc["inputs"];
+    if (!inputsVar.isNull()) {
+      if (!decodeInputs(inputsVar, parsedInputs)) {
+        logPrintf("Input configuration malformed: expected array or object but found %s",
+                  describeJsonType(inputsVar));
+        logMessage("Input configuration malformed: expected array or object");
+      }
+    } else {
+      logPrintf("Configuration JSON missing 'inputs'; keeping defaults");
     }
-  } else {
-    logPrintf("Configuration JSON missing 'inputs'; keeping defaults");
+
+    if (!parsedInputs.empty()) {
+      uint8_t applied = static_cast<uint8_t>(parsedInputs.size());
+      if (applied > MAX_INPUTS) {
+        applied = MAX_INPUTS;
+      }
+      for (uint8_t i = 0; i < applied; ++i) {
+        target.inputs[i] = parsedInputs[i];
+      }
+      target.inputCount = applied;
+    } else {
+      target.inputCount = 0;
+    }
+    logPrintf("Applied %u input configuration entries",
+              static_cast<unsigned>(target.inputCount));
+
+    std::vector<OutputConfig> parsedOutputs;
+    JsonVariantConst outputsVar = doc["outputs"];
+    if (!outputsVar.isNull()) {
+      if (!decodeOutputs(outputsVar, parsedOutputs)) {
+        logPrintf("Output configuration malformed: expected array or object but found %s",
+                  describeJsonType(outputsVar));
+        logMessage("Output configuration malformed: expected array or object");
+      }
+    } else {
+      logPrintf("Configuration JSON missing 'outputs'; keeping defaults");
+    }
+
+    if (!parsedOutputs.empty()) {
+      uint8_t applied = static_cast<uint8_t>(parsedOutputs.size());
+      if (applied > MAX_OUTPUTS) {
+        applied = MAX_OUTPUTS;
+      }
+      for (uint8_t i = 0; i < applied; ++i) {
+        target.outputs[i] = parsedOutputs[i];
+      }
+      target.outputCount = applied;
+    } else {
+      target.outputCount = 0;
+    }
+    logPrintf("Applied %u output configuration entries",
+              static_cast<unsigned>(target.outputCount));
   }
 
-  if (!parsedInputs.empty()) {
-    uint8_t applied = static_cast<uint8_t>(parsedInputs.size());
-    if (applied > MAX_INPUTS) {
-      applied = MAX_INPUTS;
+  if (sections & CONFIG_SECTION_VIRTUAL) {
+    JsonVariantConst meterVar = doc["virtualMultimeter"];
+    if (!meterVar.isNull()) {
+      parseVirtualMultimeterVariant(meterVar, target.virtualMultimeter);
+    } else if (previous) {
+      target.virtualMultimeter = previous->virtualMultimeter;
+    } else {
+      clearVirtualMultimeterConfig(target.virtualMultimeter);
     }
-    for (uint8_t i = 0; i < applied; ++i) {
-      target.inputs[i] = parsedInputs[i];
-    }
-    target.inputCount = applied;
-  } else {
-    target.inputCount = 0;
-  }
-  logPrintf("Applied %u input configuration entries",
-            static_cast<unsigned>(target.inputCount));
-
-  std::vector<OutputConfig> parsedOutputs;
-  JsonVariantConst outputsVar = doc["outputs"];
-  if (!outputsVar.isNull()) {
-    if (!decodeOutputs(outputsVar, parsedOutputs)) {
-      logPrintf("Output configuration malformed: expected array or object but found %s",
-                describeJsonType(outputsVar));
-      logMessage("Output configuration malformed: expected array or object");
-    }
-  } else {
-    logPrintf("Configuration JSON missing 'outputs'; keeping defaults");
   }
 
-  if (!parsedOutputs.empty()) {
-    uint8_t applied = static_cast<uint8_t>(parsedOutputs.size());
-    if (applied > MAX_OUTPUTS) {
-      applied = MAX_OUTPUTS;
-    }
-    for (uint8_t i = 0; i < applied; ++i) {
-      target.outputs[i] = parsedOutputs[i];
-    }
-    target.outputCount = applied;
-  } else {
-    target.outputCount = 0;
-  }
-  logPrintf("Applied %u output configuration entries",
-            static_cast<unsigned>(target.outputCount));
-
-  JsonVariantConst meterVar = doc["virtualMultimeter"];
-  if (!meterVar.isNull()) {
-    parseVirtualMultimeterVariant(meterVar, target.virtualMultimeter);
-  } else if (previous) {
-    target.virtualMultimeter = previous->virtualMultimeter;
-  } else {
-    clearVirtualMultimeterConfig(target.virtualMultimeter);
-  }
-
-  target.peerCount = 0;
-  JsonVariantConst peersVar = doc["peers"];
+  if (sections & CONFIG_SECTION_PEERS) {
+    target.peerCount = 0;
+    JsonVariantConst peersVar = doc["peers"];
   auto parsePeerEntry = [&](JsonObjectConst o, const String &entryLabel,
                             int indexForLog) {
     if (target.peerCount >= MAX_PEERS) {
@@ -1782,13 +1815,15 @@ void parseConfigFromJson(const JsonDocument &doc,
     target.peers[i].pin = "";
   }
 
-  if (logIoChanges && previous) {
+  if ((sections & CONFIG_SECTION_IO) && logIoChanges && previous) {
     logIoDelta(*previous, target);
   }
 }
 
-void parseConfigFromJson(const JsonDocument &doc, Config &target) {
-  parseConfigFromJson(doc, target, nullptr, false);
+void parseConfigFromJson(const JsonDocument &doc,
+                         Config &target,
+                         uint8_t sections = CONFIG_SECTION_ALL) {
+  parseConfigFromJson(doc, target, nullptr, false, sections);
 }
 
 
@@ -1929,66 +1964,79 @@ static void logConfigJson(const char *context, JsonDocument &doc) {
 }
 
 static void populateConfigJson(JsonDocument &doc,
+                               uint8_t sections = CONFIG_SECTION_ALL,
                                bool includeRuntimeFields = false) {
   doc.clear();
-  doc["nodeId"] = config.nodeId;
-  if (includeRuntimeFields) {
-    doc["fwVersion"] = getFirmwareVersion();
+  if (sections & CONFIG_SECTION_INTERFACE) {
+    doc["nodeId"] = config.nodeId;
+    if (includeRuntimeFields) {
+      doc["fwVersion"] = getFirmwareVersion();
+    }
+    JsonObject wifiObj = doc.createNestedObject("wifi");
+    wifiObj["mode"] = config.wifi.mode;
+    wifiObj["ssid"] = config.wifi.ssid;
+    wifiObj["pass"] = config.wifi.pass;
   }
-  JsonObject wifiObj = doc.createNestedObject("wifi");
-  wifiObj["mode"] = config.wifi.mode;
-  wifiObj["ssid"] = config.wifi.ssid;
-  wifiObj["pass"] = config.wifi.pass;
-  JsonObject modObj = doc.createNestedObject("modules");
-  modObj["ads1115"] = config.modules.ads1115;
-  modObj["pwm010"] = config.modules.pwm010;
-  modObj["zmpt"] = config.modules.zmpt;
-  modObj["zmct"] = config.modules.zmct;
-  modObj["div"] = config.modules.div;
-  modObj["mcp4725"] = config.modules.mcp4725;
-  doc["inputCount"] = config.inputCount;
-  JsonArray inputsArr = doc.createNestedArray("inputs");
-  for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
-    JsonObject o = inputsArr.createNestedObject();
-    const InputConfig &ic = config.inputs[i];
-    o["name"] = ic.name;
-    o["type"] = inputTypeToString(ic.type);
-    o["pin"] = pinToString(ic.pin);
-    o["adsChannel"] = ic.adsChannel;
-    o["remoteNode"] = ic.remoteNode;
-    o["remoteName"] = ic.remoteName;
-    o["scale"] = ic.scale;
-    o["offset"] = ic.offset;
-    o["unit"] = ic.unit;
-    o["active"] = ic.active;
+  if (sections & CONFIG_SECTION_MODULES) {
+    JsonObject modObj = doc.createNestedObject("modules");
+    modObj["ads1115"] = config.modules.ads1115;
+    modObj["pwm010"] = config.modules.pwm010;
+    modObj["zmpt"] = config.modules.zmpt;
+    modObj["zmct"] = config.modules.zmct;
+    modObj["div"] = config.modules.div;
+    modObj["mcp4725"] = config.modules.mcp4725;
   }
-  doc["outputCount"] = config.outputCount;
-  JsonArray outputsArr = doc.createNestedArray("outputs");
-  for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
-    JsonObject o = outputsArr.createNestedObject();
-    const OutputConfig &oc = config.outputs[i];
-    o["name"] = oc.name;
-    o["type"] = outputTypeToString(oc.type);
-    o["pin"] = pinToString(oc.pin);
-    o["pwmFreq"] = oc.pwmFreq;
-    o["i2cAddress"] = formatI2cAddress(oc.i2cAddress);
-    o["scale"] = oc.scale;
-    o["offset"] = oc.offset;
-    o["active"] = oc.active;
-    o["value"] = oc.value;
+  if (sections & CONFIG_SECTION_IO) {
+    doc["inputCount"] = config.inputCount;
+    JsonArray inputsArr = doc.createNestedArray("inputs");
+    for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
+      JsonObject o = inputsArr.createNestedObject();
+      const InputConfig &ic = config.inputs[i];
+      o["name"] = ic.name;
+      o["type"] = inputTypeToString(ic.type);
+      o["pin"] = pinToString(ic.pin);
+      o["adsChannel"] = ic.adsChannel;
+      o["remoteNode"] = ic.remoteNode;
+      o["remoteName"] = ic.remoteName;
+      o["scale"] = ic.scale;
+      o["offset"] = ic.offset;
+      o["unit"] = ic.unit;
+      o["active"] = ic.active;
+    }
+    doc["outputCount"] = config.outputCount;
+    JsonArray outputsArr = doc.createNestedArray("outputs");
+    for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
+      JsonObject o = outputsArr.createNestedObject();
+      const OutputConfig &oc = config.outputs[i];
+      o["name"] = oc.name;
+      o["type"] = outputTypeToString(oc.type);
+      o["pin"] = pinToString(oc.pin);
+      o["pwmFreq"] = oc.pwmFreq;
+      o["i2cAddress"] = formatI2cAddress(oc.i2cAddress);
+      o["scale"] = oc.scale;
+      o["offset"] = oc.offset;
+      o["active"] = oc.active;
+      o["value"] = oc.value;
+    }
   }
-  JsonObject meterObj = doc.createNestedObject("virtualMultimeter");
-  populateVirtualMultimeterJson(meterObj, config.virtualMultimeter);
-  doc["peerCount"] = config.peerCount;
-  JsonArray peersArr = doc.createNestedArray("peers");
-  for (uint8_t i = 0; i < config.peerCount && i < MAX_PEERS; i++) {
-    JsonObject o = peersArr.createNestedObject();
-    o["nodeId"] = config.peers[i].nodeId;
-    o["pin"] = config.peers[i].pin;
+  if (sections & CONFIG_SECTION_VIRTUAL) {
+    JsonObject meterObj = doc.createNestedObject("virtualMultimeter");
+    populateVirtualMultimeterJson(meterObj, config.virtualMultimeter);
+  }
+  if (sections & CONFIG_SECTION_PEERS) {
+    doc["peerCount"] = config.peerCount;
+    JsonArray peersArr = doc.createNestedArray("peers");
+    for (uint8_t i = 0; i < config.peerCount && i < MAX_PEERS; i++) {
+      JsonObject o = peersArr.createNestedObject();
+      o["nodeId"] = config.peers[i].nodeId;
+      o["pin"] = config.peers[i].pin;
+    }
   }
 }
 
-static bool loadConfigFromPath(const char *path, const char *label) {
+static bool loadConfigFromPath(const char *path,
+                               const char *label,
+                               uint8_t sections) {
   File f = LittleFS.open(path, "r");
   if (!f) {
     logPrintf("Failed to open %s config file: %s", label, path);
@@ -2014,7 +2062,7 @@ static bool loadConfigFromPath(const char *path, const char *label) {
     logPrintf("Failed to parse %s config JSON: %s", label, err.c_str());
     return false;
   }
-  parseConfigFromJson(doc, config);
+  parseConfigFromJson(doc, config, sections);
   logConfigSummary(label);
   logConfigJson(label, doc);
   logMessage(String("Configuration loaded from ") + path);
@@ -2075,51 +2123,169 @@ void loadConfig() {
     setDefaultConfig();
     return;
   }
-  bool loaded = false;
-  if (LittleFS.exists(CONFIG_FILE_PATH)) {
-    if (loadConfigFromPath(CONFIG_FILE_PATH, "primary")) {
-      loaded = true;
+
+  setDefaultConfig();
+
+  bool interfaceLoaded = false;
+  bool interfaceNeedsRewrite = false;
+  if (LittleFS.exists(INTERFACE_CONFIG_FILE_PATH)) {
+    if (loadConfigFromPath(INTERFACE_CONFIG_FILE_PATH, "interface",
+                           CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS)) {
+      interfaceLoaded = true;
     } else {
-      logMessage("Primary configuration load failed");
+      logMessage("Primary interface configuration load failed");
     }
   }
-  if (!loaded && LittleFS.exists(CONFIG_BACKUP_FILE_PATH)) {
-    logMessage("Attempting to load configuration from backup");
-    if (loadConfigFromPath(CONFIG_BACKUP_FILE_PATH, "backup")) {
-      loaded = true;
-      if (!saveConfig()) {
-        logMessage("Failed to rewrite configuration after restoring backup");
+  if (!interfaceLoaded && LittleFS.exists(INTERFACE_CONFIG_BACKUP_FILE_PATH)) {
+    logMessage("Attempting to load interface configuration from backup");
+    if (loadConfigFromPath(INTERFACE_CONFIG_BACKUP_FILE_PATH,
+                           "interface backup",
+                           CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS)) {
+      interfaceLoaded = true;
+      interfaceNeedsRewrite = true;
+    } else {
+      logMessage("Interface backup configuration load failed");
+    }
+  }
+
+  bool virtualLoaded = false;
+  bool virtualNeedsRewrite = false;
+  if (LittleFS.exists(VIRTUAL_CONFIG_FILE_PATH)) {
+    if (loadConfigFromPath(VIRTUAL_CONFIG_FILE_PATH, "virtual",
+                           CONFIG_SECTION_VIRTUAL)) {
+      virtualLoaded = true;
+    } else {
+      logMessage("Primary virtual configuration load failed");
+    }
+  }
+  if (!virtualLoaded && LittleFS.exists(VIRTUAL_CONFIG_BACKUP_FILE_PATH)) {
+    logMessage("Attempting to load virtual configuration from backup");
+    if (loadConfigFromPath(VIRTUAL_CONFIG_BACKUP_FILE_PATH,
+                           "virtual backup",
+                           CONFIG_SECTION_VIRTUAL)) {
+      virtualLoaded = true;
+      virtualNeedsRewrite = true;
+    } else {
+      logMessage("Virtual backup configuration load failed");
+    }
+  }
+
+  bool ioLoaded = false;
+  bool ioNeedsRewrite = false;
+  uint8_t ioSections = CONFIG_SECTION_MODULES | CONFIG_SECTION_IO;
+  if (!interfaceLoaded) {
+    ioSections |= CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS;
+  }
+  if (!virtualLoaded) {
+    ioSections |= CONFIG_SECTION_VIRTUAL;
+  }
+  if (LittleFS.exists(IO_CONFIG_FILE_PATH)) {
+    if (loadConfigFromPath(IO_CONFIG_FILE_PATH, "IO primary", ioSections)) {
+      ioLoaded = true;
+      if (!interfaceLoaded &&
+          (ioSections & (CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS))) {
+        interfaceLoaded = true;
+        interfaceNeedsRewrite = true;
+      }
+      if (!virtualLoaded && (ioSections & CONFIG_SECTION_VIRTUAL)) {
+        virtualLoaded = true;
+        virtualNeedsRewrite = true;
+      }
+      if (ioSections & (CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS |
+                        CONFIG_SECTION_VIRTUAL)) {
+        ioNeedsRewrite = true;
       }
     } else {
-      logMessage("Backup configuration load failed");
+      logMessage("Primary IO configuration load failed");
     }
   }
-  if (!loaded && LittleFS.exists(LEGACY_CONFIG_FILE_PATH)) {
+  if (!ioLoaded && LittleFS.exists(IO_CONFIG_BACKUP_FILE_PATH)) {
+    logMessage("Attempting to load IO configuration from backup");
+    if (loadConfigFromPath(IO_CONFIG_BACKUP_FILE_PATH, "IO backup",
+                           ioSections)) {
+      ioLoaded = true;
+      ioNeedsRewrite = true;
+      if (!interfaceLoaded &&
+          (ioSections & (CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS))) {
+        interfaceLoaded = true;
+        interfaceNeedsRewrite = true;
+      }
+      if (!virtualLoaded && (ioSections & CONFIG_SECTION_VIRTUAL)) {
+        virtualLoaded = true;
+        virtualNeedsRewrite = true;
+      }
+    } else {
+      logMessage("IO backup configuration load failed");
+    }
+  }
+
+  bool legacyUsed = false;
+  if ((!ioLoaded || !interfaceLoaded || !virtualLoaded) &&
+      LittleFS.exists(LEGACY_CONFIG_FILE_PATH)) {
     logMessage("Migrating legacy configuration from /config.json");
-    if (loadConfigFromPath(LEGACY_CONFIG_FILE_PATH, "legacy")) {
-      loaded = true;
-      if (saveConfig()) {
-        LittleFS.remove(LEGACY_CONFIG_FILE_PATH);
-        logMessage("Legacy configuration migrated to /private/io_config.json");
-      } else {
-        logMessage("Failed to save migrated configuration");
-      }
+    if (loadConfigFromPath(LEGACY_CONFIG_FILE_PATH, "legacy",
+                           CONFIG_SECTION_ALL)) {
+      ioLoaded = true;
+      interfaceLoaded = true;
+      virtualLoaded = true;
+      ioNeedsRewrite = true;
+      interfaceNeedsRewrite = true;
+      virtualNeedsRewrite = true;
+      legacyUsed = true;
     } else {
-      logMessage("Legacy config parse failed, applying defaults");
+      logMessage("Legacy configuration parse failed");
     }
   }
-  if (!loaded) {
-    logMessage("No valid configuration found, applying defaults");
-    setDefaultConfig();
-    if (!saveConfig()) {
-      logMessage("Failed to save default configuration");
+
+  if (!ioLoaded) {
+    logMessage("No IO configuration found; applying defaults");
+  }
+  if (!interfaceLoaded) {
+    logMessage("No interface configuration found; applying defaults");
+  }
+  if (!virtualLoaded) {
+    logMessage("No virtual configuration found; applying defaults");
+  }
+
+  if (legacyUsed) {
+    LittleFS.remove(LEGACY_CONFIG_FILE_PATH);
+  }
+
+  if (ioLoaded && ioNeedsRewrite) {
+    if (!saveIoConfig()) {
+      logMessage("Failed to rewrite IO configuration");
+    }
+  } else if (!ioLoaded) {
+    if (!saveIoConfig()) {
+      logMessage("Failed to save default IO configuration");
+    }
+  }
+
+  if (interfaceLoaded && interfaceNeedsRewrite) {
+    if (!saveInterfaceConfig()) {
+      logMessage("Failed to rewrite interface configuration");
+    }
+  } else if (!interfaceLoaded) {
+    if (!saveInterfaceConfig()) {
+      logMessage("Failed to save default interface configuration");
+    }
+  }
+
+  if (virtualLoaded && virtualNeedsRewrite) {
+    if (!saveVirtualConfig()) {
+      logMessage("Failed to rewrite virtual configuration");
+    }
+  } else if (!virtualLoaded) {
+    if (!saveVirtualConfig()) {
+      logMessage("Failed to save default virtual configuration");
     }
   }
 }
 
-// Save the current configuration to LittleFS.  If writing fails the
-// operation is silently ignored.  Always call saveConfig() after
-// modifying the global config.  Returns true on success.
+// Save configuration sections to LittleFS.  Each helper persists a subset
+// of the global configuration to its dedicated JSON file inside /private.
+// Call saveIoConfig(), saveInterfaceConfig() or saveVirtualConfig() after
+// modifying the respective portion of the global config.
 static bool removeFileIfExists(const char *path) {
   if (!LittleFS.exists(path)) {
     return true;
@@ -2183,77 +2349,110 @@ static bool copyFileToPath(const char *sourcePath, const char *destPath) {
   return true;
 }
 
-bool saveConfig() {
+static bool saveConfigSection(const char *label,
+                              uint8_t sections,
+                              const char *primaryPath,
+                              const char *backupPath,
+                              const char *tempPath,
+                              const char *stagingPath) {
   DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
-  populateConfigJson(doc);
-  logConfigSummary("Saving");
-  logConfigJson("Saving", doc);
+  populateConfigJson(doc, sections);
+  logConfigSummary(label);
+  logConfigJson(label, doc);
   String payload;
   if (serializeJson(doc, payload) == 0) {
-    logMessage("Failed to encode config JSON");
+    logMessage(String(label) + " config JSON encode failed");
     return false;
   }
   if (!ensureUserDirectory()) {
-    logMessage("Failed to ensure private directory for config");
+    logMessage(String(label) + " config directory unavailable");
     return false;
   }
-  if (!removeFileIfExists(CONFIG_TEMP_FILE_PATH)) {
+  if (!removeFileIfExists(tempPath)) {
     return false;
   }
-  if (!writeStringToFile(CONFIG_TEMP_FILE_PATH, payload)) {
+  if (!writeStringToFile(tempPath, payload)) {
     return false;
   }
-  if (!removeFileIfExists(CONFIG_BACKUP_STAGING_PATH)) {
-    LittleFS.remove(CONFIG_TEMP_FILE_PATH);
+  if (!removeFileIfExists(stagingPath)) {
+    LittleFS.remove(tempPath);
     return false;
   }
-  bool hadExistingConfig = LittleFS.exists(CONFIG_FILE_PATH);
+  bool hadExistingConfig = LittleFS.exists(primaryPath);
   if (hadExistingConfig) {
-    if (!LittleFS.rename(CONFIG_FILE_PATH, CONFIG_BACKUP_STAGING_PATH)) {
-      logPrintf("Failed to stage existing configuration %s",
-                CONFIG_FILE_PATH);
-      LittleFS.remove(CONFIG_TEMP_FILE_PATH);
+    if (!LittleFS.rename(primaryPath, stagingPath)) {
+      logPrintf("Failed to stage %s configuration %s", label, primaryPath);
+      LittleFS.remove(tempPath);
       return false;
     }
-    logPrintf("Existing configuration moved to staging %s",
-              CONFIG_BACKUP_STAGING_PATH);
+    logPrintf("Existing %s configuration moved to staging %s", label,
+              stagingPath);
   }
-  if (!LittleFS.rename(CONFIG_TEMP_FILE_PATH, CONFIG_FILE_PATH)) {
-    logPrintf("Failed to commit configuration file %s", CONFIG_FILE_PATH);
-    LittleFS.remove(CONFIG_TEMP_FILE_PATH);
+  if (!LittleFS.rename(tempPath, primaryPath)) {
+    logPrintf("Failed to commit %s configuration file %s", label,
+              primaryPath);
+    LittleFS.remove(tempPath);
     if (hadExistingConfig) {
-      if (!LittleFS.rename(CONFIG_BACKUP_STAGING_PATH, CONFIG_FILE_PATH)) {
-        logPrintf("Failed to restore configuration from staging %s",
-                  CONFIG_BACKUP_STAGING_PATH);
+      if (!LittleFS.rename(stagingPath, primaryPath)) {
+        logPrintf("Failed to restore %s configuration from staging %s",
+                  label, stagingPath);
       }
     }
     return false;
   }
-  if (!writeStringToFile(CONFIG_BACKUP_FILE_PATH, payload)) {
-    logPrintf("Failed to refresh backup config file %s", CONFIG_BACKUP_FILE_PATH);
+  if (!writeStringToFile(backupPath, payload)) {
+    logPrintf("Failed to refresh %s backup config file %s", label,
+              backupPath);
     if (hadExistingConfig) {
-      if (!removeFileIfExists(CONFIG_FILE_PATH)) {
-        logPrintf("Unable to remove partially written config %s", CONFIG_FILE_PATH);
+      if (!removeFileIfExists(primaryPath)) {
+        logPrintf("Unable to remove partially written %s config %s", label,
+                  primaryPath);
       }
-      if (!LittleFS.rename(CONFIG_BACKUP_STAGING_PATH, CONFIG_FILE_PATH)) {
-        logPrintf("Failed to restore configuration from staging %s",
-                  CONFIG_BACKUP_STAGING_PATH);
+      if (!LittleFS.rename(stagingPath, primaryPath)) {
+        logPrintf("Failed to restore %s configuration from staging %s", label,
+                  stagingPath);
       } else {
-        logPrintf("Configuration restored from staging after backup failure");
-        copyFileToPath(CONFIG_FILE_PATH, CONFIG_BACKUP_FILE_PATH);
+        logPrintf("%s configuration restored from staging after backup failure",
+                  label);
+        copyFileToPath(primaryPath, backupPath);
       }
     } else {
-      removeFileIfExists(CONFIG_FILE_PATH);
+      removeFileIfExists(primaryPath);
     }
     return false;
   }
   if (hadExistingConfig) {
-    removeFileIfExists(CONFIG_BACKUP_STAGING_PATH);
+    removeFileIfExists(stagingPath);
   }
-  logPrintf("Configuration saved to %s (%u bytes)", CONFIG_FILE_PATH,
+  logPrintf("%s configuration saved to %s (%u bytes)", label, primaryPath,
             static_cast<unsigned>(payload.length()));
-  logMessage("Configuration saved");
+  logMessage(String(label) + " configuration saved");
   return true;
+}
+
+bool saveIoConfig() {
+  return saveConfigSection("IO", CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
+                          IO_CONFIG_FILE_PATH, IO_CONFIG_BACKUP_FILE_PATH,
+                          IO_CONFIG_TEMP_FILE_PATH,
+                          IO_CONFIG_BACKUP_STAGING_PATH);
+}
+
+bool saveInterfaceConfig() {
+  return saveConfigSection("Interface",
+                          CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS,
+                          INTERFACE_CONFIG_FILE_PATH,
+                          INTERFACE_CONFIG_BACKUP_FILE_PATH,
+                          INTERFACE_CONFIG_TEMP_FILE_PATH,
+                          INTERFACE_CONFIG_BACKUP_STAGING_PATH);
+}
+
+bool saveVirtualConfig() {
+  return saveConfigSection("Virtual",
+                          CONFIG_SECTION_VIRTUAL,
+                          VIRTUAL_CONFIG_FILE_PATH,
+                          VIRTUAL_CONFIG_BACKUP_FILE_PATH,
+                          VIRTUAL_CONFIG_TEMP_FILE_PATH,
+                          VIRTUAL_CONFIG_BACKUP_STAGING_PATH);
 }
 
 static const InputConfig *findInputByName(const Config &cfg, const String &name) {
@@ -2515,10 +2714,13 @@ static bool outputsMatch(const Config &expected,
   return true;
 }
 
-static bool verifyConfigStored(const Config &expected, String &errorDetail) {
-  File f = LittleFS.open(CONFIG_FILE_PATH, "r");
+static bool verifyConfigStored(const Config &expected,
+                               const char *path,
+                               uint8_t sections,
+                               String &errorDetail) {
+  File f = LittleFS.open(path, "r");
   if (!f) {
-    errorDetail = String("open failed: ") + CONFIG_FILE_PATH;
+    errorDetail = String("open failed: ") + path;
     return false;
   }
   size_t size = f.size();
@@ -2534,17 +2736,230 @@ static bool verifyConfigStored(const Config &expected, String &errorDetail) {
     return false;
   }
   Config reloaded = expected;
-  parseConfigFromJson(doc, reloaded);
-  if (!inputsMatch(expected, reloaded, errorDetail)) {
-    return false;
+  parseConfigFromJson(doc, reloaded, sections);
+  if (sections & CONFIG_SECTION_MODULES) {
+    if (expected.modules.ads1115 != reloaded.modules.ads1115 ||
+        expected.modules.pwm010 != reloaded.modules.pwm010 ||
+        expected.modules.zmpt != reloaded.modules.zmpt ||
+        expected.modules.zmct != reloaded.modules.zmct ||
+        expected.modules.div != reloaded.modules.div ||
+        expected.modules.mcp4725 != reloaded.modules.mcp4725) {
+      errorDetail = "module_flags_mismatch";
+      return false;
+    }
   }
-  if (!outputsMatch(expected, reloaded, errorDetail)) {
-    return false;
+  if (sections & CONFIG_SECTION_IO) {
+    if (!inputsMatch(expected, reloaded, errorDetail)) {
+      return false;
+    }
+    if (!outputsMatch(expected, reloaded, errorDetail)) {
+      return false;
+    }
   }
-  logPrintf("Configuration verification succeeded (%u inputs, %u outputs)",
-            static_cast<unsigned>(expected.inputCount),
-            static_cast<unsigned>(expected.outputCount));
+  if (sections & CONFIG_SECTION_INTERFACE) {
+    if (expected.nodeId != reloaded.nodeId) {
+      errorDetail = "nodeId mismatch";
+      return false;
+    }
+    if (expected.wifi.mode != reloaded.wifi.mode ||
+        expected.wifi.ssid != reloaded.wifi.ssid ||
+        expected.wifi.pass != reloaded.wifi.pass) {
+      errorDetail = "wifi mismatch";
+      return false;
+    }
+  }
+  if (sections & CONFIG_SECTION_PEERS) {
+    if (expected.peerCount != reloaded.peerCount) {
+      errorDetail = "peerCount mismatch";
+      return false;
+    }
+    for (uint8_t i = 0; i < expected.peerCount && i < MAX_PEERS; ++i) {
+      if (expected.peers[i].nodeId != reloaded.peers[i].nodeId ||
+          expected.peers[i].pin != reloaded.peers[i].pin) {
+        errorDetail = "peer mismatch";
+        return false;
+      }
+    }
+  }
+  if (sections & CONFIG_SECTION_VIRTUAL) {
+    if (expected.virtualMultimeter.channelCount !=
+        reloaded.virtualMultimeter.channelCount) {
+      errorDetail = "virtualMultimeter mismatch";
+      return false;
+    }
+  }
+  logPrintf("Configuration verification succeeded for %s", path);
   return true;
+}
+
+template <typename ServerT>
+static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
+  if (body.length() == 0) {
+    srv->send(400, "application/json", R"({"error":"No body"})");
+    return;
+  }
+  DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
+  if (deserializeJson(doc, body)) {
+    srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+    return;
+  }
+  logPrintf("IO configuration update received (%u bytes)",
+            static_cast<unsigned>(body.length()));
+  logConfigJson("Received IO", doc);
+  Config previousConfig = config;
+  parseConfigFromJson(doc, config, &previousConfig, false,
+                      CONFIG_SECTION_MODULES | CONFIG_SECTION_IO);
+  if (!saveIoConfig()) {
+    config = previousConfig;
+    logMessage("IO configuration update failed to save; changes reverted");
+    srv->send(500, "application/json", R"({"error":"save_failed"})");
+    return;
+  }
+  String verifyError;
+  if (!verifyConfigStored(config, IO_CONFIG_FILE_PATH,
+                          CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
+                          verifyError)) {
+    logPrintf("IO configuration verification failed: %s",
+              verifyError.c_str());
+    config = previousConfig;
+    if (!saveIoConfig()) {
+      logMessage("Failed to restore IO configuration after verification failure");
+    }
+    DynamicJsonDocument errDoc(256);
+    errDoc["error"] = "verify_failed";
+    if (verifyError.length() > 0) {
+      errDoc["detail"] = verifyError;
+    }
+    String errPayload;
+    serializeJson(errDoc, errPayload);
+    srv->send(500, "application/json", errPayload);
+    return;
+  }
+  logIoDelta(previousConfig, config);
+  logConfigSummary("Applied IO");
+  logMessage("IO configuration update saved; rebooting");
+  DynamicJsonDocument respDoc(2048);
+  respDoc["status"] = "ok";
+  respDoc["verified"] = true;
+  JsonObject modulesObj = respDoc.createNestedObject("modules");
+  modulesObj["ads1115"] = config.modules.ads1115;
+  modulesObj["pwm010"] = config.modules.pwm010;
+  modulesObj["mcp4725"] = config.modules.mcp4725;
+  modulesObj["zmpt"] = config.modules.zmpt;
+  modulesObj["zmct"] = config.modules.zmct;
+  modulesObj["div"] = config.modules.div;
+  JsonArray inputsArr = respDoc.createNestedArray("inputs");
+  for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
+    JsonObject out = inputsArr.createNestedObject();
+    const InputConfig &ic = config.inputs[i];
+    out["name"] = ic.name;
+    out["type"] = inputTypeToString(ic.type);
+    if (ic.type == INPUT_ADC || ic.type == INPUT_DIV || ic.type == INPUT_ZMPT ||
+        ic.type == INPUT_ZMCT) {
+      out["pin"] = pinToString(ic.pin);
+    }
+    if (ic.type == INPUT_ADS1115) {
+      out["adsChannel"] = ic.adsChannel;
+    }
+    if (ic.type == INPUT_REMOTE) {
+      out["remoteNode"] = ic.remoteNode;
+      out["remoteName"] = ic.remoteName;
+    }
+    out["scale"] = ic.scale;
+    out["offset"] = ic.offset;
+    out["unit"] = ic.unit;
+    out["active"] = ic.active;
+  }
+  JsonArray outputsArr = respDoc.createNestedArray("outputs");
+  for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
+    JsonObject out = outputsArr.createNestedObject();
+    const OutputConfig &oc = config.outputs[i];
+    out["name"] = oc.name;
+    out["type"] = outputTypeToString(oc.type);
+    if (oc.type == OUTPUT_PWM010 || oc.type == OUTPUT_GPIO) {
+      out["pin"] = pinToString(oc.pin);
+    }
+    if (oc.type == OUTPUT_PWM010) {
+      out["pwmFreq"] = oc.pwmFreq;
+    }
+    if (oc.type == OUTPUT_MCP4725) {
+      out["i2cAddress"] = formatI2cAddress(oc.i2cAddress);
+    }
+    out["scale"] = oc.scale;
+    out["offset"] = oc.offset;
+    out["active"] = oc.active;
+  }
+  String payload;
+  serializeJson(respDoc, payload);
+  srv->send(200, "application/json", payload);
+  delay(100);
+  ESP.restart();
+}
+
+template <typename ServerT>
+static void handleInterfaceConfigSetRequest(ServerT *srv, const String &body) {
+  if (body.length() == 0) {
+    srv->send(400, "application/json", R"({"error":"No body"})");
+    return;
+  }
+  DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
+  if (deserializeJson(doc, body)) {
+    srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+    return;
+  }
+  logPrintf("Interface configuration update received (%u bytes)",
+            static_cast<unsigned>(body.length()));
+  logConfigJson("Received interface", doc);
+  Config previousConfig = config;
+  parseConfigFromJson(doc, config, &previousConfig, false,
+                      CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS);
+  if (!saveInterfaceConfig()) {
+    config = previousConfig;
+    logMessage("Interface configuration update failed to save; changes reverted");
+    srv->send(500, "application/json", R"({"error":"save_failed"})");
+    return;
+  }
+  String verifyError;
+  if (!verifyConfigStored(config, INTERFACE_CONFIG_FILE_PATH,
+                          CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS,
+                          verifyError)) {
+    logPrintf("Interface configuration verification failed: %s",
+              verifyError.c_str());
+    config = previousConfig;
+    if (!saveInterfaceConfig()) {
+      logMessage("Failed to restore interface configuration after verification failure");
+    }
+    DynamicJsonDocument errDoc(256);
+    errDoc["error"] = "verify_failed";
+    if (verifyError.length() > 0) {
+      errDoc["detail"] = verifyError;
+    }
+    String errPayload;
+    serializeJson(errDoc, errPayload);
+    srv->send(500, "application/json", errPayload);
+    return;
+  }
+  logConfigSummary("Applied interface");
+  logMessage("Interface configuration update saved; rebooting");
+  DynamicJsonDocument respDoc(1024);
+  respDoc["status"] = "ok";
+  respDoc["verified"] = true;
+  respDoc["nodeId"] = config.nodeId;
+  JsonObject wifiObj = respDoc.createNestedObject("wifi");
+  wifiObj["mode"] = config.wifi.mode;
+  wifiObj["ssid"] = config.wifi.ssid;
+  wifiObj["pass"] = config.wifi.pass;
+  JsonArray peersArr = respDoc.createNestedArray("peers");
+  for (uint8_t i = 0; i < config.peerCount && i < MAX_PEERS; ++i) {
+    JsonObject peer = peersArr.createNestedObject();
+    peer["nodeId"] = config.peers[i].nodeId;
+    peer["pin"] = config.peers[i].pin;
+  }
+  String payload;
+  serializeJson(respDoc, payload);
+  srv->send(200, "application/json", payload);
+  delay(100);
+  ESP.restart();
 }
 
 // Parse a configuration from a JSON document.  This helper reads
@@ -3170,107 +3585,59 @@ void registerRoutes(ServerT &server) {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
     DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
-    populateConfigJson(doc, true);
+    populateConfigJson(doc, CONFIG_SECTION_ALL, true);
     String payload;
     serializeJson(doc, payload);
     srv->send(200, "application/json", payload);
+  });
+
+  server.on("/api/config/io/get", HTTP_GET, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
+    populateConfigJson(doc, CONFIG_SECTION_MODULES | CONFIG_SECTION_IO);
+    JsonObject limits = doc.createNestedObject("limits");
+    limits["maxInputs"] = MAX_INPUTS;
+    limits["maxOutputs"] = MAX_OUTPUTS;
+    JsonObject metadata = doc.createNestedObject("metadata");
+    metadata["nodeId"] = config.nodeId;
+    metadata["fwVersion"] = getFirmwareVersion();
+    String payload;
+    serializeJson(doc, payload);
+    srv->send(200, "application/json", payload);
+  });
+
+  server.on("/api/config/io/set", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    handleIoConfigSetRequest(srv, body);
   });
 
   server.on("/api/config/set", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
     String body = srv->hasArg("plain") ? srv->arg("plain") : String();
-    if (body.length() == 0) {
-      srv->send(400, "application/json", R"({"error":"No body"})");
-      return;
-    }
+    handleIoConfigSetRequest(srv, body);
+  });
+
+  server.on("/api/config/interface/get", HTTP_GET, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
     DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
-    if (deserializeJson(doc, body)) {
-      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
-      return;
-    }
-    logPrintf("Configuration update received (%u bytes)",
-              static_cast<unsigned>(body.length()));
-    logConfigJson("Received", doc);
-    Config previousConfig = config;
-    parseConfigFromJson(doc, config, &previousConfig, false);
-    if (!saveConfig()) {
-      config = previousConfig;
-      logMessage("Configuration update failed to save; changes reverted");
-      srv->send(500, "application/json", R"({"error":"save_failed"})");
-      return;
-    }
-    String verifyError;
-    if (!verifyConfigStored(config, verifyError)) {
-      logPrintf("Configuration verification failed: %s",
-                verifyError.c_str());
-      config = previousConfig;
-      if (!saveConfig()) {
-        logMessage("Failed to restore configuration after verification failure");
-      }
-      DynamicJsonDocument errDoc(256);
-      errDoc["error"] = "verify_failed";
-      if (verifyError.length() > 0) {
-        errDoc["detail"] = verifyError;
-      }
-      String errPayload;
-      serializeJson(errDoc, errPayload);
-      srv->send(500, "application/json", errPayload);
-      return;
-    }
-    logIoDelta(previousConfig, config);
-    logConfigSummary("Applied");
-    logMessage("Configuration update saved; rebooting");
-    DynamicJsonDocument respDoc(2048);
-    respDoc["status"] = "ok";
-    respDoc["verified"] = true;
-    JsonObject applied = respDoc.createNestedObject("applied");
-    JsonArray inputsArr = applied.createNestedArray("inputs");
-    for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
-      JsonObject out = inputsArr.createNestedObject();
-      const InputConfig &ic = config.inputs[i];
-      out["name"] = ic.name;
-      out["type"] = inputTypeToString(ic.type);
-      if (ic.type == INPUT_ADC || ic.type == INPUT_DIV || ic.type == INPUT_ZMPT ||
-          ic.type == INPUT_ZMCT) {
-        out["pin"] = pinToString(ic.pin);
-      }
-      if (ic.type == INPUT_ADS1115) {
-        out["adsChannel"] = ic.adsChannel;
-      }
-      if (ic.type == INPUT_REMOTE) {
-        out["remoteNode"] = ic.remoteNode;
-        out["remoteName"] = ic.remoteName;
-      }
-      out["scale"] = ic.scale;
-      out["offset"] = ic.offset;
-      out["unit"] = ic.unit;
-      out["active"] = ic.active;
-    }
-    JsonArray outputsArr = applied.createNestedArray("outputs");
-    for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
-      JsonObject out = outputsArr.createNestedObject();
-      const OutputConfig &oc = config.outputs[i];
-      out["name"] = oc.name;
-      out["type"] = outputTypeToString(oc.type);
-      if (oc.type == OUTPUT_PWM010 || oc.type == OUTPUT_GPIO) {
-        out["pin"] = pinToString(oc.pin);
-      }
-      if (oc.type == OUTPUT_PWM010) {
-        out["pwmFreq"] = oc.pwmFreq;
-      }
-      if (oc.type == OUTPUT_MCP4725) {
-        out["i2cAddress"] = formatI2cAddress(oc.i2cAddress);
-      }
-      out["scale"] = oc.scale;
-      out["offset"] = oc.offset;
-      out["active"] = oc.active;
-    }
+    populateConfigJson(doc,
+                       CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS,
+                       true);
     String payload;
-    serializeJson(respDoc, payload);
+    serializeJson(doc, payload);
     srv->send(200, "application/json", payload);
-    delay(100);
-    ESP.restart();
+  });
+
+  server.on("/api/config/interface/set", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    handleInterfaceConfigSetRequest(srv, body);
   });
 
   server.on("/api/config/virtual-multimeter", HTTP_POST, [&server]() {
@@ -3318,18 +3685,20 @@ void registerRoutes(ServerT &server) {
     }
     Config previousConfig = config;
     config.virtualMultimeter = newConfig;
-    if (!saveConfig()) {
+    if (!saveVirtualConfig()) {
       config.virtualMultimeter = previousConfig.virtualMultimeter;
       srv->send(500, "application/json", R"({"error":"save_failed"})");
       return;
     }
     String verifyError;
-    if (!verifyConfigStored(config, verifyError)) {
+    if (!verifyConfigStored(config, VIRTUAL_CONFIG_FILE_PATH,
+                            CONFIG_SECTION_VIRTUAL, verifyError)) {
       logPrintf("Virtual multimeter verification failed: %s",
                 verifyError.c_str());
       config.virtualMultimeter = previousConfig.virtualMultimeter;
-      if (!saveConfig()) {
-        logMessage("Failed to restore configuration after verification failure");
+      if (!saveVirtualConfig()) {
+        logMessage(
+            "Failed to restore virtual configuration after verification failure");
       }
       DynamicJsonDocument errDoc(256);
       errDoc["error"] = "verify_failed";
@@ -3524,7 +3893,7 @@ void registerRoutes(ServerT &server) {
       return;
     }
     updateOutputs();
-    saveConfig();
+    saveIoConfig();
     srv->send(200, "application/json", R"({"status":"ok"})");
   });
 
@@ -3611,7 +3980,7 @@ void registerRoutes(ServerT &server) {
       config.peers[idx].pin = o["pin"].as<String>();
       idx++;
     }
-    saveConfig();
+    saveInterfaceConfig();
     srv->send(200, "application/json", R"({"status":"ok"})");
   });
 
