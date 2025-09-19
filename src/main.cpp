@@ -223,6 +223,20 @@ static size_t configJsonCapacityForPayload(size_t payloadSize) {
   }
   return capacity;
 }
+
+static size_t growConfigJsonCapacity(size_t current) {
+  if (current >= CONFIG_JSON_MAX_CAPACITY) {
+    return CONFIG_JSON_MAX_CAPACITY;
+  }
+  size_t next = current + current / 2;
+  if (next < current + 1024) {
+    next = current + 1024;
+  }
+  if (next > CONFIG_JSON_MAX_CAPACITY) {
+    next = CONFIG_JSON_MAX_CAPACITY;
+  }
+  return next;
+}
 static const char SAMPLE_FILE_CONTENT[] = R"rawliteral(
 <!DOCTYPE html>
 <html lang="fr">
@@ -2115,19 +2129,36 @@ static bool loadConfigFromPath(const char *path,
               static_cast<unsigned>(size), static_cast<unsigned>(read));
   }
   size_t docCapacity = configJsonCapacityForPayload(read);
-  DynamicJsonDocument doc(docCapacity);
-  DeserializationError err = deserializeJson(doc, buf.get(), read);
-  if (err) {
-    String context = String(label) + " config";
-    String payload(buf.get());
-    logJsonParseFailure(context.c_str(), payload, docCapacity, err);
-    return false;
+  while (true) {
+    DynamicJsonDocument doc(docCapacity);
+    DeserializationError err = deserializeJson(doc, buf.get(), read);
+    if (err == DeserializationError::NoMemory &&
+        docCapacity < CONFIG_JSON_MAX_CAPACITY) {
+      size_t nextCapacity = growConfigJsonCapacity(docCapacity);
+      if (nextCapacity == docCapacity) {
+        String context = String(label) + " config";
+        String payload(buf.get());
+        logJsonParseFailure(context.c_str(), payload, docCapacity, err);
+        return false;
+      }
+      logPrintf("%s config JSON exceeded %u bytes while loading; retrying with %u",
+                label, static_cast<unsigned>(docCapacity),
+                static_cast<unsigned>(nextCapacity));
+      docCapacity = nextCapacity;
+      continue;
+    }
+    if (err) {
+      String context = String(label) + " config";
+      String payload(buf.get());
+      logJsonParseFailure(context.c_str(), payload, docCapacity, err);
+      return false;
+    }
+    parseConfigFromJson(doc, config, sections);
+    logConfigSummary(label);
+    logConfigJson(label, doc);
+    logMessage(String("Configuration loaded from ") + path);
+    return true;
   }
-  parseConfigFromJson(doc, config, sections);
-  logConfigSummary(label);
-  logConfigJson(label, doc);
-  logMessage(String("Configuration loaded from ") + path);
-  return true;
 }
 
 // Default configuration used when no config file is present.  The
@@ -2416,14 +2447,36 @@ static bool saveConfigSection(const char *label,
                               const char *backupPath,
                               const char *tempPath,
                               const char *stagingPath) {
-  DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
-  populateConfigJson(doc, sections);
   logConfigSummary(label);
-  logConfigJson(label, doc);
+  size_t docCapacity = CONFIG_JSON_CAPACITY;
   String payload;
-  if (serializeJson(doc, payload) == 0) {
-    logMessage(String(label) + " config JSON encode failed");
-    return false;
+  while (true) {
+    DynamicJsonDocument doc(docCapacity);
+    populateConfigJson(doc, sections);
+    if (doc.overflowed()) {
+      if (docCapacity >= CONFIG_JSON_MAX_CAPACITY) {
+        logPrintf("%s config JSON exceeded maximum capacity (%u bytes)", label,
+                  static_cast<unsigned>(docCapacity));
+        return false;
+      }
+      size_t nextCapacity = growConfigJsonCapacity(docCapacity);
+      if (nextCapacity == docCapacity) {
+        logPrintf("%s config JSON could not grow beyond %u bytes", label,
+                  static_cast<unsigned>(docCapacity));
+        return false;
+      }
+      logPrintf("%s config JSON overflowed %u bytes; retrying with %u", label,
+                static_cast<unsigned>(docCapacity),
+                static_cast<unsigned>(nextCapacity));
+      docCapacity = nextCapacity;
+      continue;
+    }
+    logConfigJson(label, doc);
+    if (serializeJson(doc, payload) == 0) {
+      logMessage(String(label) + " config JSON encode failed");
+      return false;
+    }
+    break;
   }
   if (!ensureUserDirectory()) {
     logMessage(String(label) + " config directory unavailable");
@@ -2791,70 +2844,88 @@ static bool verifyConfigStored(const Config &expected,
   buf[read] = '\0';
 
   size_t docCapacity = configJsonCapacityForPayload(read);
-  DynamicJsonDocument doc(docCapacity);
-  DeserializationError err = deserializeJson(doc, buf.get());
-  if (err) {
-    errorDetail = String("json parse failed: ") + err.c_str();
-    String context = String(path) + " verify";
-    String payload(buf.get());
-    logJsonParseFailure(context.c_str(), payload, docCapacity, err);
-    return false;
-  }
-  Config reloaded = expected;
-  parseConfigFromJson(doc, reloaded, sections);
-  if (sections & CONFIG_SECTION_MODULES) {
-    if (expected.modules.ads1115 != reloaded.modules.ads1115 ||
-        expected.modules.pwm010 != reloaded.modules.pwm010 ||
-        expected.modules.zmpt != reloaded.modules.zmpt ||
-        expected.modules.zmct != reloaded.modules.zmct ||
-        expected.modules.div != reloaded.modules.div ||
-        expected.modules.mcp4725 != reloaded.modules.mcp4725) {
-      errorDetail = "module_flags_mismatch";
+  while (true) {
+    DynamicJsonDocument doc(docCapacity);
+    DeserializationError err = deserializeJson(doc, buf.get());
+    if (err == DeserializationError::NoMemory &&
+        docCapacity < CONFIG_JSON_MAX_CAPACITY) {
+      size_t nextCapacity = growConfigJsonCapacity(docCapacity);
+      if (nextCapacity == docCapacity) {
+        errorDetail = String("json parse failed: ") + err.c_str();
+        String context = String(path) + " verify";
+        String payload(buf.get());
+        logJsonParseFailure(context.c_str(), payload, docCapacity, err);
+        return false;
+      }
+      logPrintf("Verification JSON for %s exceeded %u bytes; retrying with %u",
+                path, static_cast<unsigned>(docCapacity),
+                static_cast<unsigned>(nextCapacity));
+      docCapacity = nextCapacity;
+      continue;
+    }
+    if (err) {
+      errorDetail = String("json parse failed: ") + err.c_str();
+      String context = String(path) + " verify";
+      String payload(buf.get());
+      logJsonParseFailure(context.c_str(), payload, docCapacity, err);
       return false;
     }
-  }
-  if (sections & CONFIG_SECTION_IO) {
-    if (!inputsMatch(expected, reloaded, errorDetail)) {
-      return false;
-    }
-    if (!outputsMatch(expected, reloaded, errorDetail)) {
-      return false;
-    }
-  }
-  if (sections & CONFIG_SECTION_INTERFACE) {
-    if (expected.nodeId != reloaded.nodeId) {
-      errorDetail = "nodeId mismatch";
-      return false;
-    }
-    if (expected.wifi.mode != reloaded.wifi.mode ||
-        expected.wifi.ssid != reloaded.wifi.ssid ||
-        expected.wifi.pass != reloaded.wifi.pass) {
-      errorDetail = "wifi mismatch";
-      return false;
-    }
-  }
-  if (sections & CONFIG_SECTION_PEERS) {
-    if (expected.peerCount != reloaded.peerCount) {
-      errorDetail = "peerCount mismatch";
-      return false;
-    }
-    for (uint8_t i = 0; i < expected.peerCount && i < MAX_PEERS; ++i) {
-      if (expected.peers[i].nodeId != reloaded.peers[i].nodeId ||
-          expected.peers[i].pin != reloaded.peers[i].pin) {
-        errorDetail = "peer mismatch";
+    Config reloaded = expected;
+    parseConfigFromJson(doc, reloaded, sections);
+    if (sections & CONFIG_SECTION_MODULES) {
+      if (expected.modules.ads1115 != reloaded.modules.ads1115 ||
+          expected.modules.pwm010 != reloaded.modules.pwm010 ||
+          expected.modules.zmpt != reloaded.modules.zmpt ||
+          expected.modules.zmct != reloaded.modules.zmct ||
+          expected.modules.div != reloaded.modules.div ||
+          expected.modules.mcp4725 != reloaded.modules.mcp4725) {
+        errorDetail = "module_flags_mismatch";
         return false;
       }
     }
-  }
-  if (sections & CONFIG_SECTION_VIRTUAL) {
-    if (expected.virtualMultimeter.channelCount !=
-        reloaded.virtualMultimeter.channelCount) {
-      errorDetail = "virtualMultimeter mismatch";
-      return false;
+    if (sections & CONFIG_SECTION_IO) {
+      if (!inputsMatch(expected, reloaded, errorDetail)) {
+        return false;
+      }
+      if (!outputsMatch(expected, reloaded, errorDetail)) {
+        return false;
+      }
     }
+    if (sections & CONFIG_SECTION_INTERFACE) {
+      if (expected.nodeId != reloaded.nodeId) {
+        errorDetail = "nodeId mismatch";
+        return false;
+      }
+      if (expected.wifi.mode != reloaded.wifi.mode ||
+          expected.wifi.ssid != reloaded.wifi.ssid ||
+          expected.wifi.pass != reloaded.wifi.pass) {
+        errorDetail = "wifi mismatch";
+        return false;
+      }
+    }
+    if (sections & CONFIG_SECTION_PEERS) {
+      if (expected.peerCount != reloaded.peerCount) {
+        errorDetail = "peerCount mismatch";
+        return false;
+      }
+      for (uint8_t i = 0; i < expected.peerCount && i < MAX_PEERS; ++i) {
+        if (expected.peers[i].nodeId != reloaded.peers[i].nodeId ||
+            expected.peers[i].pin != reloaded.peers[i].pin) {
+          errorDetail = "peer mismatch";
+          return false;
+        }
+      }
+    }
+    if (sections & CONFIG_SECTION_VIRTUAL) {
+      if (expected.virtualMultimeter.channelCount !=
+          reloaded.virtualMultimeter.channelCount) {
+        errorDetail = "virtualMultimeter mismatch";
+        return false;
+      }
+    }
+    logPrintf("Configuration verification succeeded for %s", path);
+    return true;
   }
-  logPrintf("Configuration verification succeeded for %s", path);
-  return true;
 }
 
 template <typename ServerT>
@@ -2864,118 +2935,143 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
     return;
   }
   size_t docCapacity = configJsonCapacityForPayload(body.length());
-  DynamicJsonDocument doc(docCapacity);
-  DeserializationError parseErr = deserializeJson(doc, body);
-  if (parseErr) {
-    logJsonParseFailure("IO configuration", body, docCapacity, parseErr);
-    DynamicJsonDocument errDoc(256);
-    errDoc["error"] = "invalid_json";
-    errDoc["detail"] = parseErr.c_str();
-    errDoc["bytes"] = static_cast<uint32_t>(body.length());
-    errDoc["capacity"] = static_cast<uint32_t>(docCapacity);
-    if (parseErr == DeserializationError::NoMemory) {
-      errDoc["hint"] = "payload_too_large";
+  while (true) {
+    DynamicJsonDocument doc(docCapacity);
+    DeserializationError parseErr = deserializeJson(doc, body);
+    if (parseErr == DeserializationError::NoMemory &&
+        docCapacity < CONFIG_JSON_MAX_CAPACITY) {
+      size_t nextCapacity = growConfigJsonCapacity(docCapacity);
+      if (nextCapacity == docCapacity) {
+        logJsonParseFailure("IO configuration", body, docCapacity, parseErr);
+        DynamicJsonDocument errDoc(256);
+        errDoc["error"] = "invalid_json";
+        errDoc["detail"] = parseErr.c_str();
+        errDoc["bytes"] = static_cast<uint32_t>(body.length());
+        errDoc["capacity"] = static_cast<uint32_t>(docCapacity);
+        errDoc["hint"] = "payload_too_large";
+        String errPayload;
+        serializeJson(errDoc, errPayload);
+        srv->send(400, "application/json", errPayload);
+        return;
+      }
+      logPrintf("IO configuration JSON parse exceeded %u bytes; retrying with %u",
+                static_cast<unsigned>(docCapacity),
+                static_cast<unsigned>(nextCapacity));
+      docCapacity = nextCapacity;
+      continue;
     }
-    String errPayload;
-    serializeJson(errDoc, errPayload);
-    srv->send(400, "application/json", errPayload);
-    return;
-  }
-  logPrintf("IO configuration update received (%u bytes)",
-            static_cast<unsigned>(body.length()));
-  logConfigJson("Received IO", doc);
-  logMessage("IO configuration payload parsed; applying runtime changes");
-  Config previousConfig = config;
-  parseConfigFromJson(doc, config, &previousConfig, false,
-                      CONFIG_SECTION_MODULES | CONFIG_SECTION_IO);
-  logMessage("IO configuration ready to be written to storage");
-  if (!saveIoConfig()) {
-    config = previousConfig;
-    logMessage("IO configuration update failed to save; changes reverted");
-    srv->send(500, "application/json", R"({"error":"save_failed"})");
-    return;
-  }
-  logMessage("IO configuration saved; verifying integrity");
-  String verifyError;
-  if (!verifyConfigStored(config, IO_CONFIG_FILE_PATH,
-                          CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
-                          verifyError)) {
-    logPrintf("IO configuration verification failed: %s",
-              verifyError.c_str());
-    config = previousConfig;
+    if (parseErr) {
+      logJsonParseFailure("IO configuration", body, docCapacity, parseErr);
+      DynamicJsonDocument errDoc(256);
+      errDoc["error"] = "invalid_json";
+      errDoc["detail"] = parseErr.c_str();
+      errDoc["bytes"] = static_cast<uint32_t>(body.length());
+      errDoc["capacity"] = static_cast<uint32_t>(docCapacity);
+      if (parseErr == DeserializationError::NoMemory) {
+        errDoc["hint"] = "payload_too_large";
+      }
+      String errPayload;
+      serializeJson(errDoc, errPayload);
+      srv->send(400, "application/json", errPayload);
+      return;
+    }
+    logPrintf("IO configuration update received (%u bytes)",
+              static_cast<unsigned>(body.length()));
+    logConfigJson("Received IO", doc);
+    logMessage("IO configuration payload parsed; applying runtime changes");
+    Config previousConfig = config;
+    parseConfigFromJson(doc, config, &previousConfig, false,
+                        CONFIG_SECTION_MODULES | CONFIG_SECTION_IO);
+    logMessage("IO configuration ready to be written to storage");
     if (!saveIoConfig()) {
-      logMessage("Failed to restore IO configuration after verification failure");
+      config = previousConfig;
+      logMessage("IO configuration update failed to save; changes reverted");
+      srv->send(500, "application/json", R"({"error":"save_failed"})");
+      return;
     }
-    DynamicJsonDocument errDoc(256);
-    errDoc["error"] = "verify_failed";
-    if (verifyError.length() > 0) {
-      errDoc["detail"] = verifyError;
+    logMessage("IO configuration saved; verifying integrity");
+    String verifyError;
+    if (!verifyConfigStored(config, IO_CONFIG_FILE_PATH,
+                            CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
+                            verifyError)) {
+      logPrintf("IO configuration verification failed: %s",
+                verifyError.c_str());
+      config = previousConfig;
+      if (!saveIoConfig()) {
+        logMessage("Failed to restore IO configuration after verification failure");
+      }
+      DynamicJsonDocument errDoc(256);
+      errDoc["error"] = "verify_failed";
+      if (verifyError.length() > 0) {
+        errDoc["detail"] = verifyError;
+      }
+      String errPayload;
+      serializeJson(errDoc, errPayload);
+      srv->send(500, "application/json", errPayload);
+      return;
     }
-    String errPayload;
-    serializeJson(errDoc, errPayload);
-    srv->send(500, "application/json", errPayload);
+    logIoDelta(previousConfig, config);
+    logConfigSummary("Applied IO");
+    logMessage("IO configuration verification succeeded");
+    logMessage("IO configuration update saved; reboot required");
+    DynamicJsonDocument respDoc(2048);
+    respDoc["status"] = "ok";
+    respDoc["saved"] = true;
+    respDoc["verified"] = true;
+    respDoc["requiresReboot"] = true;
+    JsonObject modulesObj = respDoc.createNestedObject("modules");
+    modulesObj["ads1115"] = config.modules.ads1115;
+    modulesObj["pwm010"] = config.modules.pwm010;
+    modulesObj["mcp4725"] = config.modules.mcp4725;
+    modulesObj["zmpt"] = config.modules.zmpt;
+    modulesObj["zmct"] = config.modules.zmct;
+    modulesObj["div"] = config.modules.div;
+    JsonArray inputsArr = respDoc.createNestedArray("inputs");
+    for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
+      JsonObject out = inputsArr.createNestedObject();
+      const InputConfig &ic = config.inputs[i];
+      out["name"] = ic.name;
+      out["type"] = inputTypeToString(ic.type);
+      if (ic.type == INPUT_ADC || ic.type == INPUT_DIV ||
+          ic.type == INPUT_ZMPT || ic.type == INPUT_ZMCT) {
+        out["pin"] = pinToString(ic.pin);
+      }
+      if (ic.type == INPUT_ADS1115) {
+        out["adsChannel"] = ic.adsChannel;
+      }
+      if (ic.type == INPUT_REMOTE) {
+        out["remoteNode"] = ic.remoteNode;
+        out["remoteName"] = ic.remoteName;
+      }
+      out["scale"] = ic.scale;
+      out["offset"] = ic.offset;
+      out["unit"] = ic.unit;
+      out["active"] = ic.active;
+    }
+    JsonArray outputsArr = respDoc.createNestedArray("outputs");
+    for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
+      JsonObject out = outputsArr.createNestedObject();
+      const OutputConfig &oc = config.outputs[i];
+      out["name"] = oc.name;
+      out["type"] = outputTypeToString(oc.type);
+      if (oc.type == OUTPUT_PWM010 || oc.type == OUTPUT_GPIO) {
+        out["pin"] = pinToString(oc.pin);
+      }
+      if (oc.type == OUTPUT_PWM010) {
+        out["pwmFreq"] = oc.pwmFreq;
+      }
+      if (oc.type == OUTPUT_MCP4725) {
+        out["i2cAddress"] = formatI2cAddress(oc.i2cAddress);
+      }
+      out["scale"] = oc.scale;
+      out["offset"] = oc.offset;
+      out["active"] = oc.active;
+    }
+    String payload;
+    serializeJson(respDoc, payload);
+    srv->send(200, "application/json", payload);
     return;
   }
-  logIoDelta(previousConfig, config);
-  logConfigSummary("Applied IO");
-  logMessage("IO configuration verification succeeded");
-  logMessage("IO configuration update saved; reboot required");
-  DynamicJsonDocument respDoc(2048);
-  respDoc["status"] = "ok";
-  respDoc["saved"] = true;
-  respDoc["verified"] = true;
-  respDoc["requiresReboot"] = true;
-  JsonObject modulesObj = respDoc.createNestedObject("modules");
-  modulesObj["ads1115"] = config.modules.ads1115;
-  modulesObj["pwm010"] = config.modules.pwm010;
-  modulesObj["mcp4725"] = config.modules.mcp4725;
-  modulesObj["zmpt"] = config.modules.zmpt;
-  modulesObj["zmct"] = config.modules.zmct;
-  modulesObj["div"] = config.modules.div;
-  JsonArray inputsArr = respDoc.createNestedArray("inputs");
-  for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
-    JsonObject out = inputsArr.createNestedObject();
-    const InputConfig &ic = config.inputs[i];
-    out["name"] = ic.name;
-    out["type"] = inputTypeToString(ic.type);
-    if (ic.type == INPUT_ADC || ic.type == INPUT_DIV || ic.type == INPUT_ZMPT ||
-        ic.type == INPUT_ZMCT) {
-      out["pin"] = pinToString(ic.pin);
-    }
-    if (ic.type == INPUT_ADS1115) {
-      out["adsChannel"] = ic.adsChannel;
-    }
-    if (ic.type == INPUT_REMOTE) {
-      out["remoteNode"] = ic.remoteNode;
-      out["remoteName"] = ic.remoteName;
-    }
-    out["scale"] = ic.scale;
-    out["offset"] = ic.offset;
-    out["unit"] = ic.unit;
-    out["active"] = ic.active;
-  }
-  JsonArray outputsArr = respDoc.createNestedArray("outputs");
-  for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
-    JsonObject out = outputsArr.createNestedObject();
-    const OutputConfig &oc = config.outputs[i];
-    out["name"] = oc.name;
-    out["type"] = outputTypeToString(oc.type);
-    if (oc.type == OUTPUT_PWM010 || oc.type == OUTPUT_GPIO) {
-      out["pin"] = pinToString(oc.pin);
-    }
-    if (oc.type == OUTPUT_PWM010) {
-      out["pwmFreq"] = oc.pwmFreq;
-    }
-    if (oc.type == OUTPUT_MCP4725) {
-      out["i2cAddress"] = formatI2cAddress(oc.i2cAddress);
-    }
-    out["scale"] = oc.scale;
-    out["offset"] = oc.offset;
-    out["active"] = oc.active;
-  }
-  String payload;
-  serializeJson(respDoc, payload);
-  srv->send(200, "application/json", payload);
 }
 
 template <typename ServerT>
@@ -2985,76 +3081,106 @@ static void handleInterfaceConfigSetRequest(ServerT *srv, const String &body) {
     return;
   }
   size_t docCapacity = configJsonCapacityForPayload(body.length());
-  DynamicJsonDocument doc(docCapacity);
-  DeserializationError parseErr = deserializeJson(doc, body);
-  if (parseErr) {
-    logJsonParseFailure("Interface configuration", body, docCapacity, parseErr);
-    DynamicJsonDocument errDoc(256);
-    errDoc["error"] = "invalid_json";
-    errDoc["detail"] = parseErr.c_str();
-    errDoc["bytes"] = static_cast<uint32_t>(body.length());
-    errDoc["capacity"] = static_cast<uint32_t>(docCapacity);
-    if (parseErr == DeserializationError::NoMemory) {
-      errDoc["hint"] = "payload_too_large";
+  while (true) {
+    DynamicJsonDocument doc(docCapacity);
+    DeserializationError parseErr = deserializeJson(doc, body);
+    if (parseErr == DeserializationError::NoMemory &&
+        docCapacity < CONFIG_JSON_MAX_CAPACITY) {
+      size_t nextCapacity = growConfigJsonCapacity(docCapacity);
+      if (nextCapacity == docCapacity) {
+        logJsonParseFailure("Interface configuration", body, docCapacity,
+                            parseErr);
+        DynamicJsonDocument errDoc(256);
+        errDoc["error"] = "invalid_json";
+        errDoc["detail"] = parseErr.c_str();
+        errDoc["bytes"] = static_cast<uint32_t>(body.length());
+        errDoc["capacity"] = static_cast<uint32_t>(docCapacity);
+        errDoc["hint"] = "payload_too_large";
+        String errPayload;
+        serializeJson(errDoc, errPayload);
+        srv->send(400, "application/json", errPayload);
+        return;
+      }
+      logPrintf(
+          "Interface configuration JSON parse exceeded %u bytes; retrying with %u",
+          static_cast<unsigned>(docCapacity),
+          static_cast<unsigned>(nextCapacity));
+      docCapacity = nextCapacity;
+      continue;
     }
-    String errPayload;
-    serializeJson(errDoc, errPayload);
-    srv->send(400, "application/json", errPayload);
-    return;
-  }
-  logPrintf("Interface configuration update received (%u bytes)",
-            static_cast<unsigned>(body.length()));
-  logConfigJson("Received interface", doc);
-  Config previousConfig = config;
-  parseConfigFromJson(doc, config, &previousConfig, false,
-                      CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS);
-  if (!saveInterfaceConfig()) {
-    config = previousConfig;
-    logMessage("Interface configuration update failed to save; changes reverted");
-    srv->send(500, "application/json", R"({"error":"save_failed"})");
-    return;
-  }
-  String verifyError;
-  if (!verifyConfigStored(config, INTERFACE_CONFIG_FILE_PATH,
-                          CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS,
-                          verifyError)) {
-    logPrintf("Interface configuration verification failed: %s",
-              verifyError.c_str());
-    config = previousConfig;
+    if (parseErr) {
+      logJsonParseFailure("Interface configuration", body, docCapacity,
+                          parseErr);
+      DynamicJsonDocument errDoc(256);
+      errDoc["error"] = "invalid_json";
+      errDoc["detail"] = parseErr.c_str();
+      errDoc["bytes"] = static_cast<uint32_t>(body.length());
+      errDoc["capacity"] = static_cast<uint32_t>(docCapacity);
+      if (parseErr == DeserializationError::NoMemory) {
+        errDoc["hint"] = "payload_too_large";
+      }
+      String errPayload;
+      serializeJson(errDoc, errPayload);
+      srv->send(400, "application/json", errPayload);
+      return;
+    }
+    logPrintf("Interface configuration update received (%u bytes)",
+              static_cast<unsigned>(body.length()));
+    logConfigJson("Received interface", doc);
+    Config previousConfig = config;
+    parseConfigFromJson(doc, config, &previousConfig, false,
+                        CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS);
     if (!saveInterfaceConfig()) {
-      logMessage("Failed to restore interface configuration after verification failure");
+      config = previousConfig;
+      logMessage(
+          "Interface configuration update failed to save; changes reverted");
+      srv->send(500, "application/json", R"({"error":"save_failed"})");
+      return;
     }
-    DynamicJsonDocument errDoc(256);
-    errDoc["error"] = "verify_failed";
-    if (verifyError.length() > 0) {
-      errDoc["detail"] = verifyError;
+    String verifyError;
+    if (!verifyConfigStored(config, INTERFACE_CONFIG_FILE_PATH,
+                            CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS,
+                            verifyError)) {
+      logPrintf("Interface configuration verification failed: %s",
+                verifyError.c_str());
+      config = previousConfig;
+      if (!saveInterfaceConfig()) {
+        logMessage(
+            "Failed to restore interface configuration after verification failure");
+      }
+      DynamicJsonDocument errDoc(256);
+      errDoc["error"] = "verify_failed";
+      if (verifyError.length() > 0) {
+        errDoc["detail"] = verifyError;
+      }
+      String errPayload;
+      serializeJson(errDoc, errPayload);
+      srv->send(500, "application/json", errPayload);
+      return;
     }
-    String errPayload;
-    serializeJson(errDoc, errPayload);
-    srv->send(500, "application/json", errPayload);
+    logConfigSummary("Applied interface");
+    logMessage("Interface configuration update saved; rebooting");
+    DynamicJsonDocument respDoc(1024);
+    respDoc["status"] = "ok";
+    respDoc["verified"] = true;
+    respDoc["nodeId"] = config.nodeId;
+    JsonObject wifiObj = respDoc.createNestedObject("wifi");
+    wifiObj["mode"] = config.wifi.mode;
+    wifiObj["ssid"] = config.wifi.ssid;
+    wifiObj["pass"] = config.wifi.pass;
+    JsonArray peersArr = respDoc.createNestedArray("peers");
+    for (uint8_t i = 0; i < config.peerCount && i < MAX_PEERS; ++i) {
+      JsonObject peer = peersArr.createNestedObject();
+      peer["nodeId"] = config.peers[i].nodeId;
+      peer["pin"] = config.peers[i].pin;
+    }
+    String payload;
+    serializeJson(respDoc, payload);
+    srv->send(200, "application/json", payload);
+    delay(100);
+    ESP.restart();
     return;
   }
-  logConfigSummary("Applied interface");
-  logMessage("Interface configuration update saved; rebooting");
-  DynamicJsonDocument respDoc(1024);
-  respDoc["status"] = "ok";
-  respDoc["verified"] = true;
-  respDoc["nodeId"] = config.nodeId;
-  JsonObject wifiObj = respDoc.createNestedObject("wifi");
-  wifiObj["mode"] = config.wifi.mode;
-  wifiObj["ssid"] = config.wifi.ssid;
-  wifiObj["pass"] = config.wifi.pass;
-  JsonArray peersArr = respDoc.createNestedArray("peers");
-  for (uint8_t i = 0; i < config.peerCount && i < MAX_PEERS; ++i) {
-    JsonObject peer = peersArr.createNestedObject();
-    peer["nodeId"] = config.peers[i].nodeId;
-    peer["pin"] = config.peers[i].pin;
-  }
-  String payload;
-  serializeJson(respDoc, payload);
-  srv->send(200, "application/json", payload);
-  delay(100);
-  ESP.restart();
 }
 
 // Parse a configuration from a JSON document.  This helper reads
