@@ -67,35 +67,6 @@
     .modal-info h3 { margin: 0 0 0.35em; font-size: 1em; }
     .modal-info ul { margin: 0.4em 0 0 1.2em; padding: 0; }
     .modal-info li { margin-bottom: 0.3em; }
-    .io-log-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center; z-index: 1500; padding: 1.5em; box-sizing: border-box; overflow-y: auto; }
-    .io-log-overlay.hidden { display: none; }
-    .io-log-panel { width: min(420px, 92vw); max-height: 70vh; display: flex; flex-direction: column; background: #ffffff; border-radius: 14px; box-shadow: 0 18px 35px rgba(0,0,0,0.25); border: 1px solid rgba(0,0,0,0.1); overflow: hidden; }
-    .io-log-panel[data-pinned="true"] { border-color: #1f3a93; box-shadow: 0 18px 35px rgba(31,58,147,0.35); }
-    .io-log-header { display: flex; align-items: center; justify-content: space-between; gap: 0.75em; background: linear-gradient(135deg, #1f3a93, #3a539b); color: #fff; padding: 0.7em 1em; font-weight: bold; font-size: 0.95em; }
-    .io-log-title { flex: 1 1 auto; }
-    .io-log-actions { display: flex; align-items: center; gap: 0.6em; font-weight: normal; }
-    .io-log-pin-toggle { display: inline-flex; align-items: center; gap: 0.3em; font-size: 0.8em; cursor: pointer; }
-    .io-log-body { display: flex; flex-direction: column; gap: 0.6em; padding: 1em 1.15em; flex: 1 1 auto; min-height: 0; box-sizing: border-box; }
-    .io-log-controls { display: flex; align-items: center; justify-content: space-between; gap: 0.5em; }
-    .io-log-copy-status { font-size: 0.75em; color: #2c3e50; min-height: 1.2em; }
-    .io-log-copy-status.success { color: #1f7a3d; }
-    .io-log-copy-status.error { color: #c0392b; }
-    .io-log-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.65em; overflow-y: auto; flex: 1 1 auto; padding-right: 0.25em; }
-    .io-log-step { display: flex; gap: 0.6em; align-items: flex-start; font-size: 0.9em; color: #2c3e50; }
-    .io-log-icon { flex: 0 0 auto; width: 1.4em; height: 1.4em; border-radius: 50%; border: 2px solid #95a5a6; display: inline-flex; align-items: center; justify-content: center; font-weight: bold; font-size: 0.85em; color: #7f8c8d; background: #ecf0f1; margin-top: 0.2em; }
-    .io-log-step.pending .io-log-icon { border-color: #95a5a6; color: #7f8c8d; background: #ecf0f1; }
-    .io-log-step.completed .io-log-icon { border-color: #27ae60; background: #27ae60; color: #fff; }
-    .io-log-step.aborted .io-log-icon { border-color: #c0392b; background: #c0392b; color: #fff; }
-    .io-log-content { display: flex; flex-direction: column; gap: 0.3em; }
-    .io-log-message { font-weight: 600; }
-    .io-log-step.completed .io-log-message { color: #1f7a3d; }
-    .io-log-step.aborted .io-log-message { color: #c0392b; }
-    .io-log-detail { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 0.75em; background: #f4f6f8; border-radius: 5px; padding: 0.35em 0.5em; white-space: pre-wrap; word-break: break-word; color: #2c3e50; }
-    .io-log-step.completed .io-log-detail { background: #e9f7ef; color: #1f7a3d; }
-    .io-log-step.aborted .io-log-detail { background: #fdecea; color: #96281b; }
-    .io-log-highlight { background: rgba(39, 174, 96, 0.12); border-radius: 8px; padding: 0.4em 0.5em; }
-    button.icon-button { background: transparent; border: none; color: inherit; font-size: 1.2em; line-height: 1; cursor: pointer; padding: 0.1em; }
-    button.icon-button:hover { color: #f1f1f1; }
     button.small { padding: 0.35em 0.75em; font-size: 0.85em; }
   </style>
   <script src="auth.js"></script>
@@ -195,26 +166,6 @@
         <button type="submit">Enregistrer</button>
       </div>
     </form>
-  </div>
-</div>
-
-<div id="ioLogOverlay" class="io-log-overlay hidden" aria-hidden="true" role="presentation">
-  <div id="ioLogPanel" class="io-log-panel" role="dialog" aria-modal="true" aria-live="polite" tabindex="-1">
-    <div class="io-log-header">
-      <span id="ioLogTitle" class="io-log-title">Suivi de la configuration</span>
-      <div class="io-log-actions">
-        <label class="io-log-pin-toggle"><input type="checkbox" id="ioLogPin"> Garder ouvert</label>
-        <button type="button" id="ioLogCopyBtn" class="secondary small">Copier le journal</button>
-        <button type="button" id="ioLogCloseBtn" class="icon-button" aria-label="Fermer le suivi">×</button>
-      </div>
-    </div>
-    <div class="io-log-body">
-      <div class="io-log-controls">
-        <div class="io-log-copy-status" id="ioLogCopyStatus" aria-live="polite"></div>
-        <span class="counter" id="ioLogStepCounter">0 étape</span>
-      </div>
-      <ol id="ioLogList" class="io-log-list"></ol>
-    </div>
   </div>
 </div>
 
@@ -442,11 +393,12 @@ const moduleState = {
   div: false
 };
 let modalState = null;
+
+const IO_LOG_SOURCE = 'io-config';
+const IO_LOG_ENDPOINT = '/api/logs/append';
 let ioLogSession = null;
-let ioLogHideTimer = null;
-let ioLogPinned = false;
-let ioLogCopyStatusTimer = null;
-const IO_LOG_AUTO_HIDE_DELAY = 4500;
+const ioLogQueue = [];
+let ioLogSending = false;
 
 const STATUS_SYNCED = 'synced';
 const STATUS_PENDING = 'pending';
@@ -507,305 +459,118 @@ function markRebootPrompt(active) {
   }
 }
 
-function logIoStep(message, detail) {
+function recordIoLogEvent(event, message, detail, { stepIncrement = false, force = false } = {}) {
+  const session = ioLogSession;
+  const shouldLog = force || (session && session.kind === 'save');
+  if (!shouldLog) {
+    if (session && stepIncrement) {
+      if (typeof session.step !== 'number') {
+        session.step = 0;
+      }
+      session.step += 1;
+    }
+    return;
+  }
+  const payload = {
+    source: IO_LOG_SOURCE,
+    event,
+    message: message || '',
+    timestamp: Date.now()
+  };
   if (detail !== undefined) {
-    console.log(`[IO] ${message}`, detail);
-  } else {
-    console.log(`[IO] ${message}`);
+    payload.detail = detail;
   }
-  if (ioLogSession) {
-    appendIoLogStep(message, detail);
+  if (session) {
+    if (typeof session.step !== 'number') {
+      session.step = 0;
+    }
+    if (stepIncrement) {
+      session.step += 1;
+    }
+    payload.session = {
+      kind: session.kind,
+      title: session.title
+    };
+    payload.step = session.step;
   }
+  ioLogQueue.push(payload);
+  triggerIoLogFlush();
 }
 
-function updateIoLogPanelPinnedState() {
-  const pin = document.getElementById('ioLogPin');
-  if (pin) {
-    pin.checked = ioLogPinned;
+function triggerIoLogFlush() {
+  if (ioLogSending || ioLogQueue.length === 0) {
+    return;
   }
-  const panel = document.getElementById('ioLogPanel');
-  if (panel) {
-    panel.dataset.pinned = ioLogPinned ? 'true' : 'false';
-  }
-}
-
-function updateIoLogStepCounter() {
-  const counter = document.getElementById('ioLogStepCounter');
-  if (!counter) return;
-  const list = document.getElementById('ioLogList');
-  const count = list ? list.querySelectorAll('.io-log-step').length : 0;
-  counter.textContent = count <= 1 ? `${count} étape` : `${count} étapes`;
-}
-
-function showIoLogPanel() {
-  const overlay = document.getElementById('ioLogOverlay');
-  const panel = document.getElementById('ioLogPanel');
-  if (overlay) {
-    overlay.classList.remove('hidden');
-    overlay.setAttribute('aria-hidden', 'false');
-  }
-  if (panel) {
-    panel.setAttribute('aria-hidden', 'false');
+  ioLogSending = true;
+  (async () => {
     try {
-      panel.focus({ preventScroll: true });
-    } catch (_) {
-      panel.focus();
-    }
-  }
-  updateIoLogPanelPinnedState();
-}
-
-function hideIoLogPanel(force = false) {
-  if (!force && ioLogPinned) {
-    return;
-  }
-  if (ioLogHideTimer) {
-    clearTimeout(ioLogHideTimer);
-    ioLogHideTimer = null;
-  }
-  const overlay = document.getElementById('ioLogOverlay');
-  const panel = document.getElementById('ioLogPanel');
-  if (overlay) {
-    overlay.classList.add('hidden');
-    overlay.setAttribute('aria-hidden', 'true');
-  }
-  if (panel) {
-    panel.setAttribute('aria-hidden', 'true');
-  }
-}
-
-function scheduleIoLogHide() {
-  if (ioLogPinned) {
-    return;
-  }
-  if (ioLogHideTimer) {
-    clearTimeout(ioLogHideTimer);
-  }
-  ioLogHideTimer = setTimeout(() => {
-    if (!ioLogPinned) {
-      hideIoLogPanel();
-    }
-    ioLogHideTimer = null;
-  }, IO_LOG_AUTO_HIDE_DELAY);
-}
-
-function updateIoLogCopyStatus(message, variant = 'info') {
-  const statusEl = document.getElementById('ioLogCopyStatus');
-  if (!statusEl) return;
-  if (ioLogCopyStatusTimer) {
-    clearTimeout(ioLogCopyStatusTimer);
-    ioLogCopyStatusTimer = null;
-  }
-  const baseClass = 'io-log-copy-status';
-  statusEl.className = message && variant !== 'info' ? `${baseClass} ${variant}` : baseClass;
-  statusEl.textContent = message || '';
-  if (message) {
-    ioLogCopyStatusTimer = setTimeout(() => {
-      statusEl.textContent = '';
-      statusEl.className = baseClass;
-      ioLogCopyStatusTimer = null;
-    }, 4000);
-  }
-}
-
-function setIoLogPinned(pinned) {
-  ioLogPinned = !!pinned;
-  updateIoLogPanelPinnedState();
-  if (ioLogPinned && ioLogHideTimer) {
-    clearTimeout(ioLogHideTimer);
-    ioLogHideTimer = null;
-  }
-  if (!ioLogPinned && !ioLogSession) {
-    scheduleIoLogHide();
-  }
-}
-
-function exportIoLog() {
-  const list = document.getElementById('ioLogList');
-  if (!list) return '';
-  const items = Array.from(list.querySelectorAll('.io-log-step'));
-  if (!items.length) {
-    return '';
-  }
-  return items
-    .map((item, idx) => {
-      const state = item.dataset.state || 'pending';
-      const messageEl = item.querySelector('.io-log-message');
-      const detailEl = item.querySelector('.io-log-detail');
-      const stateLabel = state === 'completed' ? 'OK' : state === 'aborted' ? 'ERREUR' : 'EN COURS';
-      let text = `${idx + 1}. [${stateLabel}] ${messageEl ? messageEl.textContent : ''}`;
-      if (detailEl && detailEl.textContent) {
-        text += `\n    ${detailEl.textContent.split('\n').join('\n    ')}`;
+      while (ioLogQueue.length) {
+        const entry = ioLogQueue.shift();
+        try {
+          await authFetch(IO_LOG_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(entry)
+          });
+        } catch (err) {
+          console.warn('Impossible d\'envoyer un événement de configuration', err);
+        }
       }
-      return text;
-    })
-    .join('\n');
-}
-
-async function copyIoLogToClipboard() {
-  const text = exportIoLog();
-  if (!text) {
-    updateIoLogCopyStatus('Aucune étape à copier pour le moment.');
-    return;
-  }
-  try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      const textarea = document.createElement('textarea');
-      textarea.value = text;
-      textarea.setAttribute('readonly', '');
-      textarea.style.position = 'fixed';
-      textarea.style.top = '-1000px';
-      textarea.style.opacity = '0';
-      document.body.appendChild(textarea);
-      textarea.select();
-      const successful = document.execCommand('copy');
-      document.body.removeChild(textarea);
-      if (!successful) {
-        throw new Error('execCommand copy failed');
+    } finally {
+      ioLogSending = false;
+      if (ioLogQueue.length) {
+        triggerIoLogFlush();
       }
     }
-    updateIoLogCopyStatus('Journal copié dans le presse-papiers.', 'success');
-  } catch (err) {
-    console.warn('Impossible de copier le journal IO', err);
-    updateIoLogCopyStatus('Copie impossible. Consultez la console pour le journal.', 'error');
-    console.log('--- Journal IO ---\n' + text);
-  }
+  })();
 }
 
 function startIoLogSession(kind, options = {}) {
-  const list = document.getElementById('ioLogList');
-  const titleEl = document.getElementById('ioLogTitle');
-  if (!list || !titleEl) return;
-  if (ioLogHideTimer) {
-    clearTimeout(ioLogHideTimer);
-    ioLogHideTimer = null;
-  }
-  const mode = options.mode || (kind === 'save' ? 'save' : 'add');
   const defaultTitle = kind === 'input'
     ? 'Ajout d’une entrée'
     : kind === 'output'
       ? 'Ajout d’une sortie'
       : 'Suivi de la configuration';
   const title = options.title || defaultTitle;
-  ioLogSession = { kind, mode };
-  list.innerHTML = '';
-  titleEl.textContent = title;
-  updateIoLogCopyStatus('');
-  updateIoLogStepCounter();
-  showIoLogPanel();
+  const mode = options.mode || (kind === 'save' ? 'save' : 'add');
+  ioLogSession = { kind, title, mode, step: 0 };
+  console.log(`[IO] ${title} démarrée`);
+  recordIoLogEvent('start', `${title} démarrée`, undefined, {
+    force: kind === 'save'
+  });
 }
 
-function appendIoLogStep(message, detail) {
-  if (!ioLogSession) return null;
-  const list = document.getElementById('ioLogList');
-  if (!list) return null;
-  const pendingItems = list.querySelectorAll('.io-log-step.pending');
-  pendingItems.forEach(item => markIoLogStepCompleted(item));
-  const item = document.createElement('li');
-  item.className = 'io-log-step pending';
-  item.dataset.state = 'pending';
-  const icon = document.createElement('span');
-  icon.className = 'io-log-icon';
-  icon.textContent = '…';
-  icon.setAttribute('aria-hidden', 'true');
-  const content = document.createElement('div');
-  content.className = 'io-log-content';
-  const messageEl = document.createElement('div');
-  messageEl.className = 'io-log-message';
-  messageEl.textContent = message;
-  content.appendChild(messageEl);
+function logIoStep(message, detail) {
   if (detail !== undefined) {
-    const detailEl = document.createElement('div');
-    detailEl.className = 'io-log-detail';
-    let detailText;
-    if (typeof detail === 'object') {
-      try {
-        detailText = JSON.stringify(detail, null, 2);
-      } catch (err) {
-        detailText = String(detail);
-      }
-    } else {
-      detailText = String(detail);
-    }
-    detailEl.textContent = detailText;
-    content.appendChild(detailEl);
+    console.log(`[IO] ${message}`, detail);
+  } else {
+    console.log(`[IO] ${message}`);
   }
-  item.appendChild(icon);
-  item.appendChild(content);
-  list.appendChild(item);
-  list.scrollTop = list.scrollHeight;
-  showIoLogPanel();
-  if (ioLogHideTimer) {
-    clearTimeout(ioLogHideTimer);
-    ioLogHideTimer = null;
-  }
-  updateIoLogStepCounter();
-  updateIoLogCopyStatus('');
-  return item;
-}
-
-function markIoLogStepCompleted(item, highlight = false) {
-  if (!item || item.classList.contains('completed')) return;
-  item.classList.remove('pending');
-  item.classList.remove('aborted');
-  item.classList.add('completed');
-  item.dataset.state = 'completed';
-  if (highlight) {
-    item.classList.add('io-log-highlight');
-  }
-  const icon = item.querySelector('.io-log-icon');
-  if (icon) {
-    icon.textContent = '✓';
-    icon.setAttribute('aria-hidden', 'true');
-  }
-}
-
-function markIoLogStepAborted(item) {
-  if (!item || item.classList.contains('aborted')) return;
-  item.classList.remove('pending');
-  item.classList.add('aborted');
-  item.dataset.state = 'aborted';
-  const icon = item.querySelector('.io-log-icon');
-  if (icon) {
-    icon.textContent = '✕';
-    icon.setAttribute('aria-hidden', 'true');
-  }
+  recordIoLogEvent('step', message, detail, { stepIncrement: true });
 }
 
 function completeIoLogSession(finalMessage) {
   if (!ioLogSession) return;
-  const list = document.getElementById('ioLogList');
-  if (list) {
-    const pendingItems = list.querySelectorAll('.io-log-step.pending');
-    pendingItems.forEach(item => markIoLogStepCompleted(item));
-    if (finalMessage) {
-      const finalItem = appendIoLogStep(finalMessage);
-      if (finalItem) {
-        markIoLogStepCompleted(finalItem, true);
-      }
-    }
-  }
+  const sessionTitle = ioLogSession.title || 'Séquence';
+  const isSave = ioLogSession.kind === 'save';
+  recordIoLogEvent('complete', finalMessage || 'Séquence terminée', undefined, {
+    stepIncrement: true,
+    force: isSave
+  });
+  recordIoLogEvent('end', `${sessionTitle} terminée`, undefined, { force: isSave });
   ioLogSession = null;
-  scheduleIoLogHide();
 }
 
 function cancelIoLogSession(reason) {
   if (!ioLogSession) return;
-  const list = document.getElementById('ioLogList');
-  if (list) {
-    const pendingItems = list.querySelectorAll('.io-log-step.pending');
-    pendingItems.forEach(item => markIoLogStepAborted(item));
-    if (reason) {
-      const cancelItem = appendIoLogStep(reason);
-      if (cancelItem) {
-        markIoLogStepAborted(cancelItem);
-      }
-    }
-  }
+  const sessionTitle = ioLogSession.title || 'Séquence';
+  const isSave = ioLogSession.kind === 'save';
+  recordIoLogEvent('cancel', reason || 'Séquence interrompue', undefined, {
+    stepIncrement: true,
+    force: isSave
+  });
+  recordIoLogEvent('end', `${sessionTitle} interrompue`, undefined, { force: isSave });
   ioLogSession = null;
-  scheduleIoLogHide();
 }
 
 function getSnapshotMap(kind) {
@@ -2080,49 +1845,10 @@ window.addEventListener('DOMContentLoaded', () => {
     });
   }
   window.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape') {
-      if (modalState) {
-        closeIoModal(true);
-      } else if (!ioLogPinned) {
-        hideIoLogPanel(true);
-      }
+    if (ev.key === 'Escape' && modalState) {
+      closeIoModal(true);
     }
   });
-  const ioLogCopyBtn = document.getElementById('ioLogCopyBtn');
-  if (ioLogCopyBtn) {
-    ioLogCopyBtn.addEventListener('click', () => {
-      copyIoLogToClipboard();
-    });
-  }
-  const ioLogPinCheckbox = document.getElementById('ioLogPin');
-  if (ioLogPinCheckbox) {
-    ioLogPinCheckbox.addEventListener('change', (event) => {
-      setIoLogPinned(!!event.target.checked);
-    });
-  }
-  const ioLogCloseBtn = document.getElementById('ioLogCloseBtn');
-  if (ioLogCloseBtn) {
-    ioLogCloseBtn.addEventListener('click', () => {
-      setIoLogPinned(false);
-      hideIoLogPanel(true);
-    });
-  }
-  const ioLogOverlay = document.getElementById('ioLogOverlay');
-  if (ioLogOverlay) {
-    ioLogOverlay.addEventListener('click', (ev) => {
-      if (ev.target === ioLogOverlay && !ioLogPinned) {
-        hideIoLogPanel(true);
-      }
-    });
-  }
-  const ioLogPanelEl = document.getElementById('ioLogPanel');
-  if (ioLogPanelEl) {
-    ioLogPanelEl.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-    });
-  }
-  updateIoLogPanelPinnedState();
-  updateIoLogStepCounter();
   renderIoList('input');
   renderIoList('output');
   ensureSession()

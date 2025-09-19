@@ -554,6 +554,24 @@ static void logPrintf(const char *fmt, ...) {
   logMessage(String(buf));
 }
 
+static String summariseLogDetail(JsonVariantConst detail) {
+  if (detail.isNull()) {
+    return String();
+  }
+  String output;
+  if (detail.is<JsonObjectConst>() || detail.is<JsonArrayConst>()) {
+    serializeJson(detail, output);
+  } else {
+    output = detail.as<String>();
+  }
+  static const size_t kMaxLogDetailLength = 512;
+  if (output.length() > kMaxLogDetailLength) {
+    output.remove(kMaxLogDetailLength);
+    output += F("...");
+  }
+  return output;
+}
+
 static bool otaUploadAuthorized = false;
 static bool otaUploadInProgress = false;
 static bool otaUploadSuccess = false;
@@ -2866,15 +2884,18 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
   logPrintf("IO configuration update received (%u bytes)",
             static_cast<unsigned>(body.length()));
   logConfigJson("Received IO", doc);
+  logMessage("IO configuration payload parsed; applying runtime changes");
   Config previousConfig = config;
   parseConfigFromJson(doc, config, &previousConfig, false,
                       CONFIG_SECTION_MODULES | CONFIG_SECTION_IO);
+  logMessage("IO configuration ready to be written to storage");
   if (!saveIoConfig()) {
     config = previousConfig;
     logMessage("IO configuration update failed to save; changes reverted");
     srv->send(500, "application/json", R"({"error":"save_failed"})");
     return;
   }
+  logMessage("IO configuration saved; verifying integrity");
   String verifyError;
   if (!verifyConfigStored(config, IO_CONFIG_FILE_PATH,
                           CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
@@ -2897,6 +2918,7 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
   }
   logIoDelta(previousConfig, config);
   logConfigSummary("Applied IO");
+  logMessage("IO configuration verification succeeded");
   logMessage("IO configuration update saved; reboot required");
   DynamicJsonDocument respDoc(2048);
   respDoc["status"] = "ok";
@@ -4085,6 +4107,79 @@ void registerRoutes(ServerT &server) {
     }
     srv->streamFile(f, "text/plain");
     f.close();
+  });
+
+  server.on("/api/logs/append", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    if (body.length() == 0) {
+      srv->send(400, "application/json", R"({"error":"empty_body"})");
+      return;
+    }
+    DynamicJsonDocument doc(2048);
+    DeserializationError err = deserializeJson(doc, body);
+    if (err) {
+      DynamicJsonDocument errDoc(192);
+      errDoc["error"] = "invalid_json";
+      errDoc["detail"] = err.c_str();
+      String payload;
+      serializeJson(errDoc, payload);
+      srv->send(400, "application/json", payload);
+      return;
+    }
+    String source = doc["source"].as<String>();
+    if (source.length() == 0) {
+      source = F("client");
+    }
+    String eventType = doc["event"].as<String>();
+    if (eventType.length() == 0) {
+      eventType = F("message");
+    }
+    String message = doc["message"].as<String>();
+    uint32_t step = doc["step"] | 0;
+    JsonVariantConst detailVar = doc["detail"];
+    String detailText = summariseLogDetail(detailVar);
+    JsonVariantConst sessionVar = doc["session"];
+    String sessionKind;
+    String sessionTitle;
+    if (!sessionVar.isNull()) {
+      sessionKind = sessionVar["kind"].as<String>();
+      sessionTitle = sessionVar["title"].as<String>();
+    }
+    String line;
+    line.reserve(128 + detailText.length());
+    line += '[';
+    line += source;
+    if (sessionKind.length() > 0) {
+      line += '/';
+      line += sessionKind;
+    }
+    line += "] ";
+    if (sessionTitle.length() > 0) {
+      line += sessionTitle;
+      if (step > 0) {
+        line += F(" - etape ");
+        line += step;
+      }
+      line += F(" : ");
+    } else if (step > 0) {
+      line += F("Etape ");
+      line += step;
+      line += F(" : ");
+    }
+    if (message.length() > 0) {
+      line += message;
+    } else {
+      line += F("evenement ");
+      line += eventType;
+    }
+    if (detailText.length() > 0) {
+      line += F(" | ");
+      line += detailText;
+    }
+    logMessage(line);
+    srv->send(200, "application/json", R"({"status":"ok"})");
   });
 
   server.on("/api/files/list", HTTP_GET, [&server]() {
