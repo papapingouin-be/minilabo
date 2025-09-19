@@ -446,7 +446,7 @@ function scheduleIoLogHide() {
   }, 4500);
 }
 
-function startIoLogSession(kind) {
+function startIoLogSession(kind, options = {}) {
   const list = document.getElementById('ioLogList');
   const titleEl = document.getElementById('ioLogTitle');
   if (!list || !titleEl) return;
@@ -454,9 +454,16 @@ function startIoLogSession(kind) {
     clearTimeout(ioLogHideTimer);
     ioLogHideTimer = null;
   }
-  ioLogSession = { kind, mode: 'add' };
+  const mode = options.mode || (kind === 'save' ? 'save' : 'add');
+  const defaultTitle = kind === 'input'
+    ? 'Ajout d’une entrée'
+    : kind === 'output'
+      ? 'Ajout d’une sortie'
+      : 'Suivi de la configuration';
+  const title = options.title || defaultTitle;
+  ioLogSession = { kind, mode };
   list.innerHTML = '';
-  titleEl.textContent = kind === 'input' ? 'Ajout d’une entrée' : 'Ajout d’une sortie';
+  titleEl.textContent = title;
   showIoLogPanel();
 }
 
@@ -1524,6 +1531,7 @@ async function loadConfig() {
 
 // Serialize form to config JSON and post to server
 async function saveConfig() {
+  startIoLogSession('save', { title: 'Sauvegarde de la configuration', mode: 'save' });
   refreshModuleStateFromForm();
   logIoStep('Début de sauvegarde de la configuration', { ...moduleState });
   const cfg = {};
@@ -1589,6 +1597,8 @@ async function saveConfig() {
     headers: { 'Content-Type': 'text/plain' },
     body: JSON.stringify(cfg)
   };
+  let currentEndpoint = '/api/config/io/set';
+  logIoStep('Transmission de la configuration au serveur', { endpoint: currentEndpoint });
 
   async function sendConfigRequest(url) {
     const response = await authFetch(url, requestOptions);
@@ -1610,15 +1620,18 @@ async function saveConfig() {
   }
 
   try {
-    let attempt = await sendConfigRequest('/api/config/io/set');
+    let attempt = await sendConfigRequest(currentEndpoint);
     let legacyEndpointUsed = false;
     if (attempt.response.status === 404) {
       logIoStep('Point de terminaison /api/config/io/set indisponible, tentative via /api/config/set.');
       legacyEndpointUsed = true;
-      attempt = await sendConfigRequest('/api/config/set');
+      currentEndpoint = '/api/config/set';
+      logIoStep('Transmission de la configuration au serveur', { endpoint: currentEndpoint, mode: 'compatibilité' });
+      attempt = await sendConfigRequest(currentEndpoint);
     }
 
     const { response: resp, raw, parsed } = attempt;
+    logIoStep('Analyse de la réponse du serveur', { status: resp.status, endpoint: currentEndpoint });
     if (resp.ok) {
       if (parsed && parsed.applied) {
         applyServerSnapshots('input', parsed.applied.inputs || []);
@@ -1636,6 +1649,10 @@ async function saveConfig() {
           ? 'Sauvegarde vérifiée (mode compatibilité), redémarrage...'
           : 'Sauvegarde vérifiée, redémarrage...';
       }
+      const finalMessage = legacyEndpointUsed
+        ? 'Séquence d’enregistrement validée (compatibilité)'
+        : 'Séquence d’enregistrement validée';
+      completeIoLogSession(finalMessage);
     } else {
       let message = 'Erreur lors de la sauvegarde';
       if (parsed && parsed.error) {
@@ -1654,6 +1671,7 @@ async function saveConfig() {
       if (statusEl) {
         statusEl.textContent = message;
       }
+      cancelIoLogSession('Séquence d’enregistrement interrompue');
     }
   } catch (err) {
     console.error(err);
@@ -1661,6 +1679,7 @@ async function saveConfig() {
     if (statusEl) {
       statusEl.textContent = 'Erreur lors de la sauvegarde';
     }
+    cancelIoLogSession('Séquence d’enregistrement interrompue');
   }
 }
 
