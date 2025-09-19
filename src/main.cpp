@@ -2101,7 +2101,7 @@ static bool loadConfigFromPath(const char *path,
   DeserializationError err = deserializeJson(doc, buf.get(), read);
   if (err) {
     String context = String(label) + " config";
-    String payload(buf.get(), read);
+    String payload(buf.get());
     logJsonParseFailure(context.c_str(), payload, docCapacity, err);
     return false;
   }
@@ -2777,8 +2777,8 @@ static bool verifyConfigStored(const Config &expected,
   DeserializationError err = deserializeJson(doc, buf.get());
   if (err) {
     errorDetail = String("json parse failed: ") + err.c_str();
-    String context = String(label) + " verify";
-    String payload(buf.get(), read);
+    String context = String(path) + " verify";
+    String payload(buf.get());
     logJsonParseFailure(context.c_str(), payload, docCapacity, err);
     return false;
   }
