@@ -1768,13 +1768,29 @@ async function saveConfig() {
     inputs: cfg.inputs.length,
     outputs: cfg.outputs.length
   });
+  const statusEl = document.getElementById('status');
+  let payload;
+  try {
+    payload = JSON.stringify(cfg);
+  } catch (err) {
+    logIoStep('Erreur lors de la sérialisation JSON locale', { message: err.message });
+    if (statusEl) {
+      statusEl.textContent = 'Erreur lors de la préparation de la configuration.';
+    }
+    cancelIoLogSession('Séquence d’enregistrement interrompue');
+    return;
+  }
+  const payloadPreview = payload.length > 800 ? `${payload.slice(0, 800)}…` : payload;
+  logIoStep('JSON de configuration généré', {
+    octets: payload.length,
+    aperçu: payloadPreview
+  });
 
   // Post config
-  const statusEl = document.getElementById('status');
   const requestOptions = {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain' },
-    body: JSON.stringify(cfg)
+    body: payload
   };
   let currentEndpoint = '/api/config/io/set';
   logIoStep('Transmission de la configuration au serveur', { endpoint: currentEndpoint });
@@ -1845,6 +1861,16 @@ async function saveConfig() {
       }
       if (legacyEndpointUsed) {
         message += ' — tentative via /api/config/set.';
+      }
+      if (parsed) {
+        logIoStep('Réponse JSON du serveur', { status: resp.status, json: parsed });
+      } else if (raw && raw.length) {
+        const responsePreview = raw.length > 800 ? `${raw.slice(0, 800)}…` : raw;
+        logIoStep('Réponse texte du serveur', {
+          status: resp.status,
+          octets: raw.length,
+          aperçu: responsePreview
+        });
       }
       logIoStep('Échec de la sauvegarde', { status: resp.status, message });
       if (statusEl) {

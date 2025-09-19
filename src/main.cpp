@@ -208,6 +208,21 @@ static const char *VIRTUAL_CONFIG_TEMP_FILE_PATH = "/private/virtual_config.tmp"
 static const char *VIRTUAL_CONFIG_BACKUP_STAGING_PATH = "/private/virtual_config.bak.tmp";
 static const char *LEGACY_CONFIG_FILE_PATH = "/config.json";
 static const size_t CONFIG_JSON_CAPACITY = 16384;
+static const size_t CONFIG_JSON_MAX_CAPACITY = 28672;
+
+static size_t configJsonCapacityForPayload(size_t payloadSize) {
+  size_t capacity = CONFIG_JSON_CAPACITY;
+  if (payloadSize > 0) {
+    size_t desired = payloadSize + 1024;
+    if (desired > capacity) {
+      capacity = desired;
+    }
+  }
+  if (capacity > CONFIG_JSON_MAX_CAPACITY) {
+    capacity = CONFIG_JSON_MAX_CAPACITY;
+  }
+  return capacity;
+}
 static const char SAMPLE_FILE_CONTENT[] = R"rawliteral(
 <!DOCTYPE html>
 <html lang="fr">
@@ -1947,6 +1962,30 @@ static void logConfigSummary(const char *prefix) {
       static_cast<unsigned>(config.peerCount));
 }
 
+static void logJsonParseFailure(const char *context,
+                                const String &payload,
+                                size_t capacity,
+                                DeserializationError err) {
+  logPrintf("%s JSON parse failed (%u bytes, capacity=%u): %s", context,
+            static_cast<unsigned>(payload.length()),
+            static_cast<unsigned>(capacity), err.c_str());
+  if (payload.length() == 0) {
+    return;
+  }
+  size_t previewLen = payload.length();
+  if (previewLen > 160) {
+    previewLen = 160;
+  }
+  String preview = payload.substring(0, previewLen);
+  preview.replace("\r", "\\r");
+  preview.replace("\n", "\\n");
+  if (payload.length() > previewLen) {
+    preview += "…";
+  }
+  logPrintf("%s JSON preview (%u chars): %s", context,
+            static_cast<unsigned>(preview.length()), preview.c_str());
+}
+
 static void logConfigJson(const char *context, JsonDocument &doc) {
   JsonObject wifiObj = doc["wifi"].as<JsonObject>();
   bool hadPass = false;
@@ -2057,10 +2096,13 @@ static bool loadConfigFromPath(const char *path,
     logPrintf("Warning: short read on %s (expected %u bytes, got %u)", path,
               static_cast<unsigned>(size), static_cast<unsigned>(read));
   }
-  DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
+  size_t docCapacity = configJsonCapacityForPayload(read);
+  DynamicJsonDocument doc(docCapacity);
   DeserializationError err = deserializeJson(doc, buf.get(), read);
   if (err) {
-    logPrintf("Failed to parse %s config JSON: %s", label, err.c_str());
+    String context = String(label) + " config";
+    String payload(buf.get(), read);
+    logJsonParseFailure(context.c_str(), payload, docCapacity, err);
     return false;
   }
   parseConfigFromJson(doc, config, sections);
@@ -2730,10 +2772,14 @@ static bool verifyConfigStored(const Config &expected,
   f.close();
   buf[read] = '\0';
 
-  DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
+  size_t docCapacity = configJsonCapacityForPayload(read);
+  DynamicJsonDocument doc(docCapacity);
   DeserializationError err = deserializeJson(doc, buf.get());
   if (err) {
     errorDetail = String("json parse failed: ") + err.c_str();
+    String context = String(label) + " verify";
+    String payload(buf.get(), read);
+    logJsonParseFailure(context.c_str(), payload, docCapacity, err);
     return false;
   }
   Config reloaded = expected;
@@ -2799,9 +2845,22 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
     srv->send(400, "application/json", R"({"error":"No body"})");
     return;
   }
-  DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
-  if (deserializeJson(doc, body)) {
-    srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+  size_t docCapacity = configJsonCapacityForPayload(body.length());
+  DynamicJsonDocument doc(docCapacity);
+  DeserializationError parseErr = deserializeJson(doc, body);
+  if (parseErr) {
+    logJsonParseFailure("IO configuration", body, docCapacity, parseErr);
+    DynamicJsonDocument errDoc(256);
+    errDoc["error"] = "invalid_json";
+    errDoc["detail"] = parseErr.c_str();
+    errDoc["bytes"] = static_cast<uint32_t>(body.length());
+    errDoc["capacity"] = static_cast<uint32_t>(docCapacity);
+    if (parseErr == DeserializationError::NoMemory) {
+      errDoc["hint"] = "payload_too_large";
+    }
+    String errPayload;
+    serializeJson(errDoc, errPayload);
+    srv->send(400, "application/json", errPayload);
     return;
   }
   logPrintf("IO configuration update received (%u bytes)",
@@ -2903,9 +2962,22 @@ static void handleInterfaceConfigSetRequest(ServerT *srv, const String &body) {
     srv->send(400, "application/json", R"({"error":"No body"})");
     return;
   }
-  DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
-  if (deserializeJson(doc, body)) {
-    srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+  size_t docCapacity = configJsonCapacityForPayload(body.length());
+  DynamicJsonDocument doc(docCapacity);
+  DeserializationError parseErr = deserializeJson(doc, body);
+  if (parseErr) {
+    logJsonParseFailure("Interface configuration", body, docCapacity, parseErr);
+    DynamicJsonDocument errDoc(256);
+    errDoc["error"] = "invalid_json";
+    errDoc["detail"] = parseErr.c_str();
+    errDoc["bytes"] = static_cast<uint32_t>(body.length());
+    errDoc["capacity"] = static_cast<uint32_t>(docCapacity);
+    if (parseErr == DeserializationError::NoMemory) {
+      errDoc["hint"] = "payload_too_large";
+    }
+    String errPayload;
+    serializeJson(errDoc, errPayload);
+    srv->send(400, "application/json", errPayload);
     return;
   }
   logPrintf("Interface configuration update received (%u bytes)",
