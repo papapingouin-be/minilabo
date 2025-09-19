@@ -737,6 +737,530 @@ static Adafruit_MCP4725 mcp4725Drivers[MAX_OUTPUTS];
 static bool mcp4725Ready[MAX_OUTPUTS] = {false};
 static uint8_t mcp4725Addresses[MAX_OUTPUTS] = {0};
 
+// Forward references required by the IO configuration helpers defined below.
+int parsePin(const String &p);
+static String describePinValue(int pin);
+static String describeOptionalInt(int value);
+static uint8_t parseI2cAddress(const String &s);
+static String formatI2cAddress(uint8_t address);
+
+// ---------------------------------------------------------------------------
+// Helper utilities for robust IO configuration parsing.
+// These helpers ensure that configuration documents are always expanded
+// into a consistent in-memory representation with exhaustive logging.
+// ---------------------------------------------------------------------------
+
+static InputConfig makeDefaultInputSlot(uint8_t index) {
+  InputConfig ic;
+  ic.name = String("IN") + String(index + 1);
+  ic.type = INPUT_DISABLED;
+  ic.pin = -1;
+  ic.adsChannel = -1;
+  ic.remoteNode = "";
+  ic.remoteName = "";
+  ic.scale = 1.0f;
+  ic.offset = 0.0f;
+  ic.unit = "";
+  ic.active = false;
+  ic.value = NAN;
+  return ic;
+}
+
+static OutputConfig makeDefaultOutputSlot(uint8_t index) {
+  OutputConfig oc;
+  oc.name = String("OUT") + String(index + 1);
+  oc.type = OUTPUT_DISABLED;
+  oc.pin = -1;
+  oc.pwmFreq = 2000;
+  oc.i2cAddress = 0x60;
+  oc.scale = 1.0f;
+  oc.offset = 0.0f;
+  oc.active = false;
+  oc.value = 0.0f;
+  return oc;
+}
+
+static void resetInputSlots(Config &cfg) {
+  cfg.inputCount = 0;
+  for (uint8_t i = 0; i < MAX_INPUTS; ++i) {
+    cfg.inputs[i] = makeDefaultInputSlot(i);
+  }
+}
+
+static void resetOutputSlots(Config &cfg) {
+  cfg.outputCount = 0;
+  for (uint8_t i = 0; i < MAX_OUTPUTS; ++i) {
+    cfg.outputs[i] = makeDefaultOutputSlot(i);
+  }
+}
+
+static bool hasDuplicateName(const std::vector<String> &names,
+                             const String &candidate) {
+  for (const String &value : names) {
+    if (value == candidate) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void logParsedInput(const InputConfig &ic, const String &entryTag) {
+  String tag = entryTag;
+  if (tag.length() == 0) {
+    tag = ic.name;
+  }
+  logPrintf(
+      "Input %s => name=%s type=%s pin=%s adsChannel=%s remote=%s/%s scale=%s offset=%s unit=%s active=%s",
+      tag.c_str(), ic.name.c_str(), inputTypeToString(ic.type).c_str(),
+      describePinValue(ic.pin).c_str(),
+      describeOptionalInt(ic.adsChannel).c_str(), ic.remoteNode.c_str(),
+      ic.remoteName.c_str(), String(ic.scale, 4).c_str(),
+      String(ic.offset, 4).c_str(), ic.unit.c_str(),
+      ic.active ? "true" : "false");
+}
+
+static void logParsedOutput(const OutputConfig &oc, const String &entryTag) {
+  String tag = entryTag;
+  if (tag.length() == 0) {
+    tag = oc.name;
+  }
+  logPrintf(
+      "Output %s => name=%s type=%s pin=%s pwm=%s addr=%s scale=%s offset=%s active=%s value=%s",
+      tag.c_str(), oc.name.c_str(), outputTypeToString(oc.type).c_str(),
+      describePinValue(oc.pin).c_str(),
+      describeOptionalInt(oc.pwmFreq).c_str(),
+      formatI2cAddress(oc.i2cAddress).c_str(), String(oc.scale, 4).c_str(),
+      String(oc.offset, 4).c_str(), oc.active ? "true" : "false",
+      String(oc.value, 4).c_str());
+}
+
+static bool parsePinVariant(JsonVariantConst variant, int &pinOut, String &rawOut) {
+  if (variant.is<const char *>()) {
+    rawOut = variant.as<String>();
+  } else if (variant.is<int>() || variant.is<long>() || variant.is<unsigned long>() ||
+             variant.is<unsigned int>()) {
+    rawOut = String(variant.as<long>());
+  } else {
+    return false;
+  }
+  rawOut.trim();
+  int parsed = parsePin(rawOut);
+  if (parsed == -1) {
+    return false;
+  }
+  pinOut = parsed;
+  return true;
+}
+
+static bool parseI2cAddressVariant(JsonVariantConst variant,
+                                   uint8_t &addressOut,
+                                   String &rawOut) {
+  if (variant.is<const char *>()) {
+    rawOut = variant.as<String>();
+  } else if (variant.is<int>() || variant.is<long>() || variant.is<unsigned long>() ||
+             variant.is<unsigned int>()) {
+    rawOut = String(variant.as<long>(), 10);
+  } else {
+    return false;
+  }
+  rawOut.trim();
+  addressOut = parseI2cAddress(rawOut);
+  return true;
+}
+
+static bool populateInputFromObject(JsonObjectConst obj,
+                                    InputConfig &ic,
+                                    const String &entryTag) {
+  String fallbackName = ic.name;
+  String tag = entryTag.length() > 0 ? entryTag : fallbackName;
+
+  if (obj.containsKey("name")) {
+    String provided = obj["name"].as<String>();
+    provided.trim();
+    if (provided.length() > 0) {
+      ic.name = provided;
+    } else {
+      logPrintf("Input %s provided empty name; using %s", tag.c_str(),
+                fallbackName.c_str());
+      ic.name = fallbackName;
+    }
+  } else if (entryTag.length() > 0 && !entryTag.startsWith("#")) {
+    ic.name = entryTag;
+    logPrintf("Input %s missing 'name', using map key '%s'", tag.c_str(),
+              entryTag.c_str());
+  } else {
+    logPrintf("Input %s missing 'name', using default %s", tag.c_str(),
+              fallbackName.c_str());
+  }
+
+  if (obj.containsKey("type")) {
+    String typeStr = obj["type"].as<String>();
+    typeStr.trim();
+    InputType parsed = parseInputType(typeStr);
+    ic.type = parsed;
+    String lower = typeStr;
+    lower.toLowerCase();
+    if (parsed == INPUT_DISABLED && lower.length() > 0 && lower != "disabled") {
+      logPrintf("Input %s has unsupported type '%s', defaulting to disabled",
+                ic.name.c_str(), typeStr.c_str());
+    }
+  } else {
+    logPrintf("Input %s missing type, defaulting to disabled",
+              ic.name.c_str());
+    ic.type = INPUT_DISABLED;
+  }
+
+  if (obj.containsKey("pin")) {
+    String rawPin;
+    int parsedPin = -1;
+    if (!parsePinVariant(obj["pin"], parsedPin, rawPin)) {
+      logPrintf("Input %s has invalid pin specification '%s'", ic.name.c_str(),
+                rawPin.c_str());
+    } else {
+      ic.pin = parsedPin;
+    }
+  } else if (ic.type == INPUT_ADC) {
+    ic.pin = A0;
+    logPrintf("Input %s missing pin for ADC type, defaulting to A0",
+              ic.name.c_str());
+  } else if (ic.type == INPUT_DIV || ic.type == INPUT_ZMPT ||
+             ic.type == INPUT_ZMCT) {
+    logPrintf("Input %s missing pin for %s sensor", ic.name.c_str(),
+              inputTypeToString(ic.type).c_str());
+  }
+
+  if (obj.containsKey("adsChannel")) {
+    int channel = obj["adsChannel"].as<int>();
+    ic.adsChannel = channel;
+    if (channel < 0 || channel > 3) {
+      logPrintf("Input %s has out-of-range adsChannel %d (expected 0-3)",
+                ic.name.c_str(), channel);
+    }
+  } else if (ic.type == INPUT_ADS1115) {
+    logPrintf("Input %s missing 'adsChannel' for ADS1115", ic.name.c_str());
+  }
+
+  if (obj.containsKey("remoteNode")) {
+    ic.remoteNode = obj["remoteNode"].as<String>();
+    ic.remoteNode.trim();
+  }
+  if (obj.containsKey("remoteName")) {
+    ic.remoteName = obj["remoteName"].as<String>();
+    ic.remoteName.trim();
+  }
+  if (ic.type == INPUT_REMOTE) {
+    if (ic.remoteNode.length() == 0) {
+      logPrintf("Input %s of type remote missing 'remoteNode'", ic.name.c_str());
+    }
+    if (ic.remoteName.length() == 0) {
+      ic.remoteName = ic.name;
+      logPrintf("Input %s of type remote missing 'remoteName', using %s",
+                ic.name.c_str(), ic.name.c_str());
+    }
+  }
+
+  ic.scale = obj.containsKey("scale") ? obj["scale"].as<float>() : 1.0f;
+  ic.offset = obj.containsKey("offset") ? obj["offset"].as<float>() : 0.0f;
+  ic.unit = obj.containsKey("unit") ? obj["unit"].as<String>() : String();
+  ic.unit.trim();
+  bool hadActive = obj.containsKey("active");
+  ic.active = hadActive ? obj["active"].as<bool>() : (ic.type != INPUT_DISABLED);
+  if (!hadActive && ic.type != INPUT_DISABLED) {
+    logPrintf("Input %s missing 'active', defaulting to true", ic.name.c_str());
+  }
+  if (obj.containsKey("value")) {
+    ic.value = obj["value"].as<float>();
+  }
+
+  logParsedInput(ic, tag);
+  return true;
+}
+
+static bool populateOutputFromObject(JsonObjectConst obj,
+                                     OutputConfig &oc,
+                                     const String &entryTag) {
+  String fallbackName = oc.name;
+  String tag = entryTag.length() > 0 ? entryTag : fallbackName;
+
+  if (obj.containsKey("name")) {
+    String provided = obj["name"].as<String>();
+    provided.trim();
+    if (provided.length() > 0) {
+      oc.name = provided;
+    } else {
+      logPrintf("Output %s provided empty name; using %s", tag.c_str(),
+                fallbackName.c_str());
+      oc.name = fallbackName;
+    }
+  } else if (entryTag.length() > 0 && !entryTag.startsWith("#")) {
+    oc.name = entryTag;
+    logPrintf("Output %s missing 'name', using map key '%s'", tag.c_str(),
+              entryTag.c_str());
+  } else {
+    logPrintf("Output %s missing 'name', using default %s", tag.c_str(),
+              fallbackName.c_str());
+  }
+
+  if (obj.containsKey("type")) {
+    String typeStr = obj["type"].as<String>();
+    typeStr.trim();
+    OutputType parsed = parseOutputType(typeStr);
+    oc.type = parsed;
+    String lower = typeStr;
+    lower.toLowerCase();
+    if (parsed == OUTPUT_DISABLED && lower.length() > 0 && lower != "disabled") {
+      logPrintf("Output %s has unsupported type '%s', defaulting to disabled",
+                oc.name.c_str(), typeStr.c_str());
+    }
+  } else {
+    logPrintf("Output %s missing type, defaulting to disabled",
+              oc.name.c_str());
+    oc.type = OUTPUT_DISABLED;
+  }
+
+  if (obj.containsKey("pin")) {
+    String rawPin;
+    int parsedPin = -1;
+    if (!parsePinVariant(obj["pin"], parsedPin, rawPin)) {
+      logPrintf("Output %s has invalid pin specification '%s'", oc.name.c_str(),
+                rawPin.c_str());
+    } else {
+      oc.pin = parsedPin;
+    }
+  } else if (oc.type == OUTPUT_PWM010 || oc.type == OUTPUT_GPIO) {
+    logPrintf("Output %s missing pin for %s", oc.name.c_str(),
+              outputTypeToString(oc.type).c_str());
+  }
+
+  oc.pwmFreq = obj.containsKey("pwmFreq") ? obj["pwmFreq"].as<int>() : oc.pwmFreq;
+
+  if (obj.containsKey("i2cAddress")) {
+    String rawAddr;
+    uint8_t parsedAddr = oc.i2cAddress;
+    if (!parseI2cAddressVariant(obj["i2cAddress"], parsedAddr, rawAddr)) {
+      logPrintf("Output %s has invalid i2cAddress specification '%s'",
+                oc.name.c_str(), rawAddr.c_str());
+    } else {
+      oc.i2cAddress = parsedAddr;
+    }
+  } else if (oc.type == OUTPUT_MCP4725) {
+    logPrintf("Output %s missing i2cAddress for MCP4725", oc.name.c_str());
+  }
+
+  oc.scale = obj.containsKey("scale") ? obj["scale"].as<float>() : 1.0f;
+  oc.offset = obj.containsKey("offset") ? obj["offset"].as<float>() : 0.0f;
+  bool hadActive = obj.containsKey("active");
+  oc.active = hadActive ? obj["active"].as<bool>() : (oc.type != OUTPUT_DISABLED);
+  if (!hadActive && oc.type != OUTPUT_DISABLED) {
+    logPrintf("Output %s missing 'active', defaulting to true", oc.name.c_str());
+  }
+  oc.value = obj.containsKey("value") ? obj["value"].as<float>() : oc.value;
+
+  logParsedOutput(oc, tag);
+  return true;
+}
+
+static bool decodeInputs(JsonVariantConst inputsVar,
+                         std::vector<InputConfig> &parsed) {
+  std::vector<String> seenNames;
+  bool processed = false;
+  auto handleArray = [&](JsonArrayConst arr) {
+    processed = true;
+    size_t total = arr.size();
+    if (total > MAX_INPUTS) {
+      logPrintf(
+          "Input array provides %u entries but only %u are supported; extra entries will be ignored",
+          static_cast<unsigned>(total), static_cast<unsigned>(MAX_INPUTS));
+    }
+    uint16_t index = 0;
+    for (JsonVariantConst entry : arr) {
+      if (parsed.size() >= MAX_INPUTS) {
+        logPrintf("Ignoring additional input definitions beyond %u entries",
+                  static_cast<unsigned>(MAX_INPUTS));
+        break;
+      }
+      JsonObjectConst entryObj = entry.as<JsonObjectConst>();
+      if (entryObj.isNull()) {
+        logPrintf("Input entry %u is not an object; skipping",
+                  static_cast<unsigned>(index));
+        ++index;
+        continue;
+      }
+      InputConfig candidate = makeDefaultInputSlot(parsed.size());
+      String entryTag = String("#") + String(index);
+      populateInputFromObject(entryObj, candidate, entryTag);
+      if (hasDuplicateName(seenNames, candidate.name)) {
+        logPrintf("Duplicate input name '%s' encountered; ignoring entry %s",
+                  candidate.name.c_str(), entryTag.c_str());
+      } else {
+        parsed.push_back(candidate);
+        seenNames.push_back(candidate.name);
+      }
+      ++index;
+    }
+  };
+  auto handleObject = [&](JsonObjectConst obj) {
+    processed = true;
+    size_t total = obj.size();
+    if (total > MAX_INPUTS) {
+      logPrintf(
+          "Input map provides %u entries but only %u are supported; extra entries will be ignored",
+          static_cast<unsigned>(total), static_cast<unsigned>(MAX_INPUTS));
+    }
+    for (JsonPairConst kv : obj) {
+      if (parsed.size() >= MAX_INPUTS) {
+        logPrintf("Ignoring additional input definitions beyond %u entries",
+                  static_cast<unsigned>(MAX_INPUTS));
+        break;
+      }
+      JsonVariantConst value = kv.value();
+      JsonObjectConst entryObj = value.as<JsonObjectConst>();
+      if (entryObj.isNull()) {
+        logPrintf("Input entry '%s' is not an object; skipping",
+                  kv.key().c_str());
+        continue;
+      }
+      InputConfig candidate = makeDefaultInputSlot(parsed.size());
+      String entryTag = String(kv.key().c_str());
+      populateInputFromObject(entryObj, candidate, entryTag);
+      if (hasDuplicateName(seenNames, candidate.name)) {
+        logPrintf("Duplicate input name '%s' encountered; ignoring entry '%s'",
+                  candidate.name.c_str(), entryTag.c_str());
+      } else {
+        parsed.push_back(candidate);
+        seenNames.push_back(candidate.name);
+      }
+    }
+  };
+
+  if (!inputsVar.isNull()) {
+    JsonArrayConst arr = inputsVar.as<JsonArrayConst>();
+    if (!arr.isNull()) {
+      handleArray(arr);
+    } else {
+      JsonObjectConst obj = inputsVar.as<JsonObjectConst>();
+      if (!obj.isNull()) {
+        handleObject(obj);
+      }
+    }
+    if (!processed && inputsVar.is<const char *>()) {
+      processed = parseJsonContainerString(inputsVar.as<String>(), handleArray,
+                                          handleObject, "input configuration");
+    }
+    if (!processed) {
+      String serialized;
+      serializeJson(inputsVar, serialized);
+      if (serialized.length() > 0) {
+        processed = parseJsonContainerString(serialized, handleArray,
+                                            handleObject,
+                                            "input configuration");
+      }
+    }
+  }
+  return processed;
+}
+
+static bool decodeOutputs(JsonVariantConst outputsVar,
+                          std::vector<OutputConfig> &parsed) {
+  std::vector<String> seenNames;
+  bool processed = false;
+  auto handleArray = [&](JsonArrayConst arr) {
+    processed = true;
+    size_t total = arr.size();
+    if (total > MAX_OUTPUTS) {
+      logPrintf(
+          "Output array provides %u entries but only %u are supported; extra entries will be ignored",
+          static_cast<unsigned>(total), static_cast<unsigned>(MAX_OUTPUTS));
+    }
+    uint16_t index = 0;
+    for (JsonVariantConst entry : arr) {
+      if (parsed.size() >= MAX_OUTPUTS) {
+        logPrintf("Ignoring additional output definitions beyond %u entries",
+                  static_cast<unsigned>(MAX_OUTPUTS));
+        break;
+      }
+      JsonObjectConst entryObj = entry.as<JsonObjectConst>();
+      if (entryObj.isNull()) {
+        logPrintf("Output entry %u is not an object; skipping",
+                  static_cast<unsigned>(index));
+        ++index;
+        continue;
+      }
+      OutputConfig candidate = makeDefaultOutputSlot(parsed.size());
+      String entryTag = String("#") + String(index);
+      populateOutputFromObject(entryObj, candidate, entryTag);
+      if (hasDuplicateName(seenNames, candidate.name)) {
+        logPrintf("Duplicate output name '%s' encountered; ignoring entry %s",
+                  candidate.name.c_str(), entryTag.c_str());
+      } else {
+        parsed.push_back(candidate);
+        seenNames.push_back(candidate.name);
+      }
+      ++index;
+    }
+  };
+  auto handleObject = [&](JsonObjectConst obj) {
+    processed = true;
+    size_t total = obj.size();
+    if (total > MAX_OUTPUTS) {
+      logPrintf(
+          "Output map provides %u entries but only %u are supported; extra entries will be ignored",
+          static_cast<unsigned>(total), static_cast<unsigned>(MAX_OUTPUTS));
+    }
+    for (JsonPairConst kv : obj) {
+      if (parsed.size() >= MAX_OUTPUTS) {
+        logPrintf("Ignoring additional output definitions beyond %u entries",
+                  static_cast<unsigned>(MAX_OUTPUTS));
+        break;
+      }
+      JsonVariantConst value = kv.value();
+      JsonObjectConst entryObj = value.as<JsonObjectConst>();
+      if (entryObj.isNull()) {
+        logPrintf("Output entry '%s' is not an object; skipping",
+                  kv.key().c_str());
+        continue;
+      }
+      OutputConfig candidate = makeDefaultOutputSlot(parsed.size());
+      String entryTag = String(kv.key().c_str());
+      populateOutputFromObject(entryObj, candidate, entryTag);
+      if (hasDuplicateName(seenNames, candidate.name)) {
+        logPrintf("Duplicate output name '%s' encountered; ignoring entry '%s'",
+                  candidate.name.c_str(), entryTag.c_str());
+      } else {
+        parsed.push_back(candidate);
+        seenNames.push_back(candidate.name);
+      }
+    }
+  };
+
+  if (!outputsVar.isNull()) {
+    JsonArrayConst arr = outputsVar.as<JsonArrayConst>();
+    if (!arr.isNull()) {
+      handleArray(arr);
+    } else {
+      JsonObjectConst obj = outputsVar.as<JsonObjectConst>();
+      if (!obj.isNull()) {
+        handleObject(obj);
+      }
+    }
+    if (!processed && outputsVar.is<const char *>()) {
+      processed = parseJsonContainerString(outputsVar.as<String>(),
+                                          handleArray, handleObject,
+                                          "output configuration");
+    }
+    if (!processed) {
+      String serialized;
+      serializeJson(outputsVar, serialized);
+      if (serialized.length() > 0) {
+        processed = parseJsonContainerString(serialized, handleArray,
+                                            handleObject,
+                                            "output configuration");
+      }
+    }
+  }
+  return processed;
+}
+
 // Remote value cache.  When a broadcast packet is received from another
 // node, each measurement is stored in this table.  Inputs configured
 // as type remote look up their value here.
@@ -788,16 +1312,11 @@ void processUdp();
 void sendBroadcast();
 void updateRemoteValue(const String &nodeId, const String &inputName, float val);
 float getRemoteValue(const String &nodeId, const String &inputName);
-int parsePin(const String &p);
 String pinToString(int pin);
 static const InputConfig *findInputByName(const Config &cfg, const String &name);
 static const OutputConfig *findOutputByName(const Config &cfg, const String &name);
-static String describePinValue(int pin);
-static String describeOptionalInt(int value);
 static String diffInputConfig(const InputConfig &before, const InputConfig &after);
 static String diffOutputConfig(const OutputConfig &before, const OutputConfig &after);
-static uint8_t parseI2cAddress(const String &s);
-static String formatI2cAddress(uint8_t address);
 static const char *describeJsonType(const JsonVariantConst &value);
 static void logIoDelta(const Config &before, const Config &after);
 static bool verifyConfigStored(const Config &expected, String &errorDetail);
@@ -1045,400 +1564,93 @@ void parseConfigFromJson(const JsonDocument &doc,
   }
   if (doc.containsKey("wifi")) {
     JsonObjectConst w = doc["wifi"].as<JsonObjectConst>();
-    if (w.containsKey("mode")) target.wifi.mode = w["mode"].as<String>();
-    if (w.containsKey("ssid")) target.wifi.ssid = w["ssid"].as<String>();
-    if (w.containsKey("pass")) target.wifi.pass = w["pass"].as<String>();
+    if (!w.isNull()) {
+      if (w.containsKey("mode")) target.wifi.mode = w["mode"].as<String>();
+      if (w.containsKey("ssid")) target.wifi.ssid = w["ssid"].as<String>();
+      if (w.containsKey("pass")) target.wifi.pass = w["pass"].as<String>();
+    }
   }
   if (doc.containsKey("modules")) {
     JsonObjectConst m = doc["modules"].as<JsonObjectConst>();
-    target.modules.ads1115 = m["ads1115"].as<bool>();
-    target.modules.pwm010  = m["pwm010"].as<bool>();
-    target.modules.zmpt    = m["zmpt"].as<bool>();
-    target.modules.zmct    = m["zmct"].as<bool>();
-    target.modules.div     = m["div"].as<bool>();
-    target.modules.mcp4725 = m["mcp4725"].as<bool>();
+    if (!m.isNull()) {
+      if (m.containsKey("ads1115")) target.modules.ads1115 = m["ads1115"].as<bool>();
+      if (m.containsKey("pwm010")) target.modules.pwm010 = m["pwm010"].as<bool>();
+      if (m.containsKey("zmpt")) target.modules.zmpt = m["zmpt"].as<bool>();
+      if (m.containsKey("zmct")) target.modules.zmct = m["zmct"].as<bool>();
+      if (m.containsKey("div")) target.modules.div = m["div"].as<bool>();
+      if (m.containsKey("mcp4725")) target.modules.mcp4725 = m["mcp4725"].as<bool>();
+    }
   }
-  for (uint8_t i = 0; i < MAX_INPUTS; i++) {
-    target.inputs[i] = {String("IN") + String(i + 1), INPUT_DISABLED, -1, -1,
-                        "", "", 1.0f, 0.0f, "", false, NAN};
+
+  resetInputSlots(target);
+  resetOutputSlots(target);
+  if (!previous) {
+    clearVirtualMultimeterConfig(target.virtualMultimeter);
   }
-  target.inputCount = 0;
-  const Config *diffSource = (logIoChanges && previous) ? previous : nullptr;
+
+  std::vector<InputConfig> parsedInputs;
   JsonVariantConst inputsVar = doc["inputs"];
-  auto parseInputEntry = [&](JsonObjectConst o, const String &entryLabel,
-                             int indexForLog) {
-    if (target.inputCount >= MAX_INPUTS) {
-      return;
-    }
-    InputConfig &ic = target.inputs[target.inputCount];
-    String defaultName = ic.name;
-    String entryTag;
-    if (indexForLog >= 0) {
-      entryTag = String("#") + String(indexForLog);
-    } else if (entryLabel.length() > 0) {
-      entryTag = String("\"") + entryLabel + "\"";
-    } else {
-      entryTag = String("#") + String(target.inputCount);
-    }
-    if (o.containsKey("name")) {
-      ic.name = o["name"].as<String>();
-    } else if (entryLabel.length() > 0) {
-      ic.name = entryLabel;
-      logPrintf("Input entry %s missing 'name', using key %s",
-                entryTag.c_str(), entryLabel.c_str());
-    } else {
-      logPrintf("Input entry %s missing 'name', keeping default %s",
-                entryTag.c_str(), defaultName.c_str());
-      ic.name = defaultName;
-    }
-    if (o.containsKey("type")) {
-      String typeStr = o["type"].as<String>();
-      InputType parsedType = parseInputType(typeStr);
-      ic.type = parsedType;
-      String lower = typeStr;
-      lower.toLowerCase();
-      if (parsedType == INPUT_DISABLED && lower.length() > 0 &&
-          lower != "disabled") {
-        logPrintf("Input %s has unsupported type '%s', defaulting to disabled",
-                  ic.name.c_str(), typeStr.c_str());
-      }
-    } else {
-      logPrintf("Input %s missing type, defaulting to disabled",
-                ic.name.c_str());
-      ic.type = INPUT_DISABLED;
-    }
-    if (o.containsKey("pin")) {
-      String pinStr = o["pin"].as<String>();
-      int parsedPin = parsePin(pinStr);
-      if (parsedPin == -1) {
-        logPrintf("Input %s has invalid pin '%s'; leaving unassigned",
-                  ic.name.c_str(), pinStr.c_str());
-      } else {
-        ic.pin = parsedPin;
-      }
-    } else if (ic.type == INPUT_ADC && ic.pin == -1) {
-      logPrintf("Input %s missing pin, defaulting to A0", ic.name.c_str());
-      ic.pin = A0;
-    }
-    if (o.containsKey("adsChannel")) {
-      int channel = o["adsChannel"].as<int>();
-      ic.adsChannel = channel;
-      if (channel < 0 || channel > 3) {
-        logPrintf("Input %s has out-of-range adsChannel %d (expected 0-3)",
-                  ic.name.c_str(), channel);
-      }
-    }
-    if (o.containsKey("remoteNode"))
-      ic.remoteNode = o["remoteNode"].as<String>();
-    if (o.containsKey("remoteName"))
-      ic.remoteName = o["remoteName"].as<String>();
-    if (o.containsKey("scale")) ic.scale = o["scale"].as<float>();
-    if (o.containsKey("offset")) ic.offset = o["offset"].as<float>();
-    if (o.containsKey("unit")) ic.unit = o["unit"].as<String>();
-    if (o.containsKey("active")) ic.active = o["active"].as<bool>();
-    if (diffSource) {
-      const InputConfig *previousEntry = findInputByName(*diffSource, ic.name);
-      if (!previousEntry) {
-        String typeStr = inputTypeToString(ic.type);
-        String pinStr = describePinValue(ic.pin);
-        String channelStr = describeOptionalInt(ic.adsChannel);
-        logPrintf("Input added: %s (type=%s, pin=%s, adsChannel=%s, active=%s)",
-                  ic.name.c_str(), typeStr.c_str(), pinStr.c_str(),
-                  channelStr.c_str(), ic.active ? "true" : "false");
-      } else {
-        String diff = diffInputConfig(*previousEntry, ic);
-        if (diff.length() > 0) {
-          logPrintf("Input updated: %s {%s}", ic.name.c_str(), diff.c_str());
-        }
-      }
-    }
-    target.inputCount++;
-  };
-  auto handleInputArray = [&](JsonArrayConst arr) {
-    size_t totalInputs = arr.size();
-    if (totalInputs > MAX_INPUTS) {
-      logPrintf(
-          "Configuration provides %u inputs but only %u are supported; ignoring extras",
-          static_cast<unsigned>(totalInputs),
-          static_cast<unsigned>(MAX_INPUTS));
-    }
-    uint8_t desired = static_cast<uint8_t>(totalInputs);
-    if (desired > MAX_INPUTS) {
-      desired = MAX_INPUTS;
-    }
-    for (uint8_t idx = 0; idx < desired; ++idx) {
-      JsonVariantConst entry = arr[idx];
-      JsonObjectConst entryObj = entry.as<JsonObjectConst>();
-      if (entryObj.isNull()) {
-        logPrintf("Input entry %u is not an object; skipping",
-                  static_cast<unsigned>(idx));
-        continue;
-      }
-      parseInputEntry(entryObj, String(), idx);
-    }
-  };
-  auto handleInputObject = [&](JsonObjectConst obj) {
-    size_t totalInputs = obj.size();
-    if (totalInputs > MAX_INPUTS) {
-      logPrintf(
-          "Input map provides %u entries but only %u are supported; ignoring extras",
-          static_cast<unsigned>(totalInputs),
-          static_cast<unsigned>(MAX_INPUTS));
-    }
-    uint8_t processed = 0;
-    for (JsonPairConst kv : obj) {
-      if (target.inputCount >= MAX_INPUTS) {
-        break;
-      }
-      JsonVariantConst value = kv.value();
-      JsonObjectConst valueObj = value.as<JsonObjectConst>();
-      if (valueObj.isNull()) {
-        logPrintf("Input entry '%s' is not an object; skipping",
-                  kv.key().c_str());
-        continue;
-      }
-      parseInputEntry(valueObj, String(kv.key().c_str()), -1);
-      processed++;
-    }
-    if (processed == 0) {
-      logMessage("Input configuration object contained no usable entries");
-    }
-  };
-  if (doc.containsKey("inputs")) {
-    bool parsedInputs = false;
-    JsonArrayConst arr = inputsVar.as<JsonArrayConst>();
-    if (!arr.isNull()) {
-      handleInputArray(arr);
-      parsedInputs = true;
-    } else {
-      JsonObjectConst obj = inputsVar.as<JsonObjectConst>();
-      if (!obj.isNull()) {
-        handleInputObject(obj);
-        parsedInputs = true;
-      }
-    }
-    if (!parsedInputs) {
-      bool parsedFromString = false;
-      if (inputsVar.is<const char *>()) {
-        parsedFromString =
-            parseJsonContainerString(inputsVar.as<String>(), handleInputArray,
-                                     handleInputObject, "input configuration");
-      }
-      if (!parsedFromString) {
-        String serialized;
-        serializeJson(inputsVar, serialized);
-        if (serialized.length() > 0) {
-          parsedFromString = parseJsonContainerString(
-              serialized, handleInputArray, handleInputObject,
-              "input configuration");
-        }
-      }
-      parsedInputs = parsedFromString;
-    }
-    if (!parsedInputs) {
-      logPrintf("Input configuration malformed: expected array but found %s",
+  if (!inputsVar.isNull()) {
+    if (!decodeInputs(inputsVar, parsedInputs)) {
+      logPrintf("Input configuration malformed: expected array or object but found %s",
                 describeJsonType(inputsVar));
-      logMessage("Input configuration malformed: expected array");
+      logMessage("Input configuration malformed: expected array or object");
     }
+  } else {
+    logPrintf("Configuration JSON missing 'inputs'; keeping defaults");
   }
-  if (diffSource) {
-    for (uint8_t i = 0; i < diffSource->inputCount && i < MAX_INPUTS; i++) {
-      const InputConfig &prevInput = diffSource->inputs[i];
-      if (!findInputByName(target, prevInput.name)) {
-        logPrintf("Input removed: %s", prevInput.name.c_str());
-      }
+
+  if (!parsedInputs.empty()) {
+    uint8_t applied = static_cast<uint8_t>(parsedInputs.size());
+    if (applied > MAX_INPUTS) {
+      applied = MAX_INPUTS;
     }
+    for (uint8_t i = 0; i < applied; ++i) {
+      target.inputs[i] = parsedInputs[i];
+    }
+    target.inputCount = applied;
+  } else {
+    target.inputCount = 0;
   }
-  for (uint8_t i = 0; i < MAX_OUTPUTS; i++) {
-    target.outputs[i] = {String("OUT") + String(i + 1), OUTPUT_DISABLED, -1,
-                         2000, 0x60, 1.0f, 0.0f, false, 0.0f};
-  }
-  target.outputCount = 0;
+  logPrintf("Applied %u input configuration entries",
+            static_cast<unsigned>(target.inputCount));
+
+  std::vector<OutputConfig> parsedOutputs;
   JsonVariantConst outputsVar = doc["outputs"];
-  auto parseOutputEntry = [&](JsonObjectConst o, const String &entryLabel,
-                              int indexForLog) {
-    if (target.outputCount >= MAX_OUTPUTS) {
-      return;
-    }
-    OutputConfig &oc = target.outputs[target.outputCount];
-    String defaultName = oc.name;
-    String entryTag;
-    if (indexForLog >= 0) {
-      entryTag = String("#") + String(indexForLog);
-    } else if (entryLabel.length() > 0) {
-      entryTag = String("\"") + entryLabel + "\"";
-    } else {
-      entryTag = String("#") + String(target.outputCount);
-    }
-    if (o.containsKey("name")) {
-      oc.name = o["name"].as<String>();
-    } else if (entryLabel.length() > 0) {
-      oc.name = entryLabel;
-      logPrintf("Output entry %s missing 'name', using key %s",
-                entryTag.c_str(), entryLabel.c_str());
-    } else {
-      logPrintf("Output entry %s missing 'name', keeping default %s",
-                entryTag.c_str(), defaultName.c_str());
-      oc.name = defaultName;
-    }
-    if (o.containsKey("type")) {
-      String typeStr = o["type"].as<String>();
-      OutputType parsedType = parseOutputType(typeStr);
-      oc.type = parsedType;
-      String lower = typeStr;
-      lower.toLowerCase();
-      if (parsedType == OUTPUT_DISABLED && lower.length() > 0 &&
-          lower != "disabled") {
-        logPrintf(
-            "Output %s has unsupported type '%s', defaulting to disabled",
-            oc.name.c_str(), typeStr.c_str());
-      }
-    } else {
-      logPrintf("Output %s missing type, defaulting to disabled",
-                oc.name.c_str());
-      oc.type = OUTPUT_DISABLED;
-    }
-    if (o.containsKey("pin")) {
-      String pinStr = o["pin"].as<String>();
-      int parsedPin = parsePin(pinStr);
-      if (parsedPin == -1) {
-        logPrintf("Output %s has invalid pin '%s'; leaving unassigned",
-                  oc.name.c_str(), pinStr.c_str());
-      } else {
-        oc.pin = parsedPin;
-      }
-    }
-    if (o.containsKey("pwmFreq")) oc.pwmFreq = o["pwmFreq"].as<int>();
-    if (o.containsKey("i2cAddress"))
-      oc.i2cAddress = parseI2cAddress(o["i2cAddress"].as<String>());
-    if (o.containsKey("scale")) oc.scale = o["scale"].as<float>();
-    if (o.containsKey("offset")) oc.offset = o["offset"].as<float>();
-    if (o.containsKey("active")) oc.active = o["active"].as<bool>();
-    if (o.containsKey("value")) {
-      oc.value = o["value"].as<float>();
-    } else {
-      oc.value = 0.0f;
-    }
-    if (diffSource) {
-      const OutputConfig *previousEntry = findOutputByName(*diffSource, oc.name);
-      if (!previousEntry) {
-        String typeStr = outputTypeToString(oc.type);
-        String pinStr = describePinValue(oc.pin);
-        String addrStr = formatI2cAddress(oc.i2cAddress);
-        logPrintf("Output added: %s (type=%s, pin=%s, pwm=%d, addr=%s, active=%s)",
-                  oc.name.c_str(), typeStr.c_str(), pinStr.c_str(), oc.pwmFreq,
-                  addrStr.c_str(), oc.active ? "true" : "false");
-      } else {
-        String diff = diffOutputConfig(*previousEntry, oc);
-        if (diff.length() > 0) {
-          logPrintf("Output updated: %s {%s}", oc.name.c_str(), diff.c_str());
-        }
-      }
-    }
-    target.outputCount++;
-  };
-  auto handleOutputArray = [&](JsonArrayConst arr) {
-    size_t totalOutputs = arr.size();
-    if (totalOutputs > MAX_OUTPUTS) {
-      logPrintf(
-          "Configuration provides %u outputs but only %u are supported; ignoring extras",
-          static_cast<unsigned>(totalOutputs),
-          static_cast<unsigned>(MAX_OUTPUTS));
-    }
-    uint8_t desired = static_cast<uint8_t>(totalOutputs);
-    if (desired > MAX_OUTPUTS) {
-      desired = MAX_OUTPUTS;
-    }
-    for (uint8_t idx = 0; idx < desired; ++idx) {
-      JsonVariantConst entry = arr[idx];
-      JsonObjectConst entryObj = entry.as<JsonObjectConst>();
-      if (entryObj.isNull()) {
-        logPrintf("Output entry %u is not an object; skipping",
-                  static_cast<unsigned>(idx));
-        continue;
-      }
-      parseOutputEntry(entryObj, String(), idx);
-    }
-  };
-  auto handleOutputObject = [&](JsonObjectConst obj) {
-    size_t totalOutputs = obj.size();
-    if (totalOutputs > MAX_OUTPUTS) {
-      logPrintf(
-          "Output map provides %u entries but only %u are supported; ignoring extras",
-          static_cast<unsigned>(totalOutputs),
-          static_cast<unsigned>(MAX_OUTPUTS));
-    }
-    uint8_t processed = 0;
-    for (JsonPairConst kv : obj) {
-      if (target.outputCount >= MAX_OUTPUTS) {
-        break;
-      }
-      JsonVariantConst value = kv.value();
-      JsonObjectConst valueObj = value.as<JsonObjectConst>();
-      if (valueObj.isNull()) {
-        logPrintf("Output entry '%s' is not an object; skipping",
-                  kv.key().c_str());
-        continue;
-      }
-      parseOutputEntry(valueObj, String(kv.key().c_str()), -1);
-      processed++;
-    }
-    if (processed == 0) {
-      logMessage("Output configuration object contained no usable entries");
-    }
-  };
-  if (doc.containsKey("outputs")) {
-    bool parsedOutputs = false;
-    JsonArrayConst arr = outputsVar.as<JsonArrayConst>();
-    if (!arr.isNull()) {
-      handleOutputArray(arr);
-      parsedOutputs = true;
-    } else {
-      JsonObjectConst obj = outputsVar.as<JsonObjectConst>();
-      if (!obj.isNull()) {
-        handleOutputObject(obj);
-        parsedOutputs = true;
-      }
-    }
-    if (!parsedOutputs) {
-      bool parsedFromString = false;
-      if (outputsVar.is<const char *>()) {
-        parsedFromString = parseJsonContainerString(outputsVar.as<String>(),
-                                                   handleOutputArray,
-                                                   handleOutputObject,
-                                                   "output configuration");
-      }
-      if (!parsedFromString) {
-        String serialized;
-        serializeJson(outputsVar, serialized);
-        if (serialized.length() > 0) {
-          parsedFromString = parseJsonContainerString(
-              serialized, handleOutputArray, handleOutputObject,
-              "output configuration");
-        }
-      }
-      parsedOutputs = parsedFromString;
-    }
-    if (!parsedOutputs) {
-      logPrintf("Output configuration malformed: expected array but found %s",
+  if (!outputsVar.isNull()) {
+    if (!decodeOutputs(outputsVar, parsedOutputs)) {
+      logPrintf("Output configuration malformed: expected array or object but found %s",
                 describeJsonType(outputsVar));
-      logMessage("Output configuration malformed: expected array");
+      logMessage("Output configuration malformed: expected array or object");
     }
+  } else {
+    logPrintf("Configuration JSON missing 'outputs'; keeping defaults");
   }
-  if (diffSource) {
-    for (uint8_t i = 0; i < diffSource->outputCount && i < MAX_OUTPUTS; i++) {
-      const OutputConfig &prevOutput = diffSource->outputs[i];
-      if (!findOutputByName(target, prevOutput.name)) {
-        logPrintf("Output removed: %s", prevOutput.name.c_str());
-      }
+
+  if (!parsedOutputs.empty()) {
+    uint8_t applied = static_cast<uint8_t>(parsedOutputs.size());
+    if (applied > MAX_OUTPUTS) {
+      applied = MAX_OUTPUTS;
     }
+    for (uint8_t i = 0; i < applied; ++i) {
+      target.outputs[i] = parsedOutputs[i];
+    }
+    target.outputCount = applied;
+  } else {
+    target.outputCount = 0;
   }
+  logPrintf("Applied %u output configuration entries",
+            static_cast<unsigned>(target.outputCount));
+
   JsonVariantConst meterVar = doc["virtualMultimeter"];
   if (!meterVar.isNull()) {
     parseVirtualMultimeterVariant(meterVar, target.virtualMultimeter);
   } else if (previous) {
     target.virtualMultimeter = previous->virtualMultimeter;
+  } else {
+    clearVirtualMultimeterConfig(target.virtualMultimeter);
   }
+
   target.peerCount = 0;
   JsonVariantConst peersVar = doc["peers"];
   auto parsePeerEntry = [&](JsonObjectConst o, const String &entryLabel,
@@ -1526,7 +1738,7 @@ void parseConfigFromJson(const JsonDocument &doc,
       parsePeerEntry(valueObj, String(kv.key().c_str()), -1);
     }
   };
-  if (doc.containsKey("peers")) {
+  if (!peersVar.isNull()) {
     bool parsedPeers = false;
     JsonArrayConst arr = peersVar.as<JsonArrayConst>();
     if (!arr.isNull()) {
@@ -1543,9 +1755,9 @@ void parseConfigFromJson(const JsonDocument &doc,
       bool parsedFromString = false;
       if (peersVar.is<const char *>()) {
         parsedFromString = parseJsonContainerString(peersVar.as<String>(),
-                                                   handlePeerArray,
-                                                   handlePeerObject,
-                                                   "peer configuration");
+                                                    handlePeerArray,
+                                                    handlePeerObject,
+                                                    "peer configuration");
       }
       if (!parsedFromString) {
         String serialized;
@@ -1568,6 +1780,10 @@ void parseConfigFromJson(const JsonDocument &doc,
   for (uint8_t i = target.peerCount; i < MAX_PEERS; i++) {
     target.peers[i].nodeId = "";
     target.peers[i].pin = "";
+  }
+
+  if (logIoChanges && previous) {
+    logIoDelta(*previous, target);
   }
 }
 
@@ -1829,19 +2045,10 @@ void setDefaultConfig() {
   config.modules.div     = false;
   config.modules.mcp4725 = false;
 
-  // Start with no inputs configured.  Populate the backing array with disabled
-  // placeholders so indexes remain valid until the UI adds channels.
-  config.inputCount = 0;
-  for (uint8_t i = 0; i < MAX_INPUTS; i++) {
-    config.inputs[i] = {String("IN") + String(i + 1), INPUT_DISABLED, -1, -1, "", "", 1.0f, 0.0f, "", false, NAN};
-  }
-
-  // Likewise start with no outputs.  Disabled placeholders keep a predictable
-  // naming scheme that can be reused when the user creates new channels.
-  config.outputCount = 0;
-  for (uint8_t i = 0; i < MAX_OUTPUTS; i++) {
-    config.outputs[i] = {String("OUT") + String(i + 1), OUTPUT_DISABLED, -1, 2000, 0x60, 1.0f, 0.0f, false, 0.0f};
-  }
+  // Reset IO slots to safe defaults.  Names are pre-filled so indexes remain
+  // stable when the UI creates or removes channels.
+  resetInputSlots(config);
+  resetOutputSlots(config);
 
   config.virtualMultimeter.channelCount = 0;
   for (uint8_t i = 0; i < MAX_METER_CHANNELS; ++i) {
