@@ -18,6 +18,8 @@
     .hidden { display: none; }
     label.inline { display: inline-block; margin-right: 0.5em; }
     button { padding: 0.5em 1em; font-size: 1em; }
+    button.primary { background: #1f3a93; border: none; color: #fff; }
+    button.primary:hover { background: #152d6d; color: #fff; }
     #cacheAceStatus { margin-top: 0.5em; color: #555; font-size: 0.9em; }
     #cacheAceStatus.error { color: #c0392b; }
     .hint { font-size: 0.9em; color: #555; margin-top: 0.3em; }
@@ -47,6 +49,9 @@
     button.danger { background: #c0392b; border: none; color: #fff; }
     button.secondary:hover { background: #e6e6e6; }
     button.danger:hover { background: #a93124; }
+    button.attention { background: #27ae60; border: none; color: #fff; }
+    button.attention:hover { background: #1e8449; color: #fff; }
+    .form-actions { display: flex; align-items: center; gap: 0.75em; margin-top: 1.2em; flex-wrap: wrap; }
     .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center; z-index: 1000; }
     .modal.hidden { display: none; }
     .modal-content { background: #fff; padding: 1.4em 1.6em; border-radius: 10px; width: min(500px, 90%); max-height: 90vh; overflow-y: auto; box-shadow: 0 18px 40px rgba(0,0,0,0.2); }
@@ -144,12 +149,15 @@
     Version actuelle : <span id="fwVersion">?</span><br><br>
     <input type="file" id="fwFile">
     <button type="button" id="fwUploadBtn">Mettre à jour</button>
-    <button type="button" id="rebootBtn">Redémarrer</button>
+    <button type="button" id="fwRebootBtn">Redémarrer</button>
     <span id="fwStatus" style="margin-left:1em;"></span>
   </fieldset>
 
-  <button id="saveBtn">Enregistrer et redémarrer</button>
-  <span id="status" style="margin-left:1em;"></span>
+  <div class="form-actions">
+    <button type="button" id="saveBtn" class="primary">Enregistrer</button>
+    <button type="button" id="rebootBtn" class="secondary">Redémarrer</button>
+    <span id="status" style="margin-left:1em;"></span>
+  </div>
 </form>
 
 <div id="ioModal" class="modal hidden" role="dialog" aria-modal="true">
@@ -444,6 +452,60 @@ const STATUS_SYNCED = 'synced';
 const STATUS_PENDING = 'pending';
 let lastAppliedInputs = new Map();
 let lastAppliedOutputs = new Map();
+let saveInProgress = false;
+
+function normaliseErrorForLog(err) {
+  if (err instanceof Error) {
+    return { message: err.message, stack: err.stack };
+  }
+  if (err && typeof err === 'object') {
+    const out = {};
+    if (typeof err.message === 'string' && err.message.length) {
+      out.message = err.message;
+    }
+    if (typeof err.code === 'string' && err.code.length) {
+      out.code = err.code;
+    }
+    if (typeof err.status === 'number') {
+      out.status = err.status;
+    }
+    return Object.keys(out).length ? out : err;
+  }
+  if (err !== undefined && err !== null) {
+    return { message: String(err) };
+  }
+  return { message: 'unknown error' };
+}
+
+function describeErrorMessage(err, fallback) {
+  if (!err) return fallback;
+  if (typeof err === 'string') {
+    return err;
+  }
+  if (err instanceof Error && err.message) {
+    return err.message;
+  }
+  if (typeof err.message === 'string' && err.message.length) {
+    return err.message;
+  }
+  if (typeof err.status === 'number') {
+    return `code ${err.status}`;
+  }
+  if (typeof err.code === 'string' && err.code.length) {
+    return err.code;
+  }
+  return fallback;
+}
+
+function markRebootPrompt(active) {
+  const rebootBtn = document.getElementById('rebootBtn');
+  if (!rebootBtn) return;
+  if (active) {
+    rebootBtn.classList.add('attention');
+  } else {
+    rebootBtn.classList.remove('attention');
+  }
+}
 
 function logIoStep(message, detail) {
   if (detail !== undefined) {
@@ -864,6 +926,7 @@ function ensureTypeAvailability(kind) {
 
 function handleModuleStateChange() {
   refreshModuleStateFromForm();
+  markRebootPrompt(false);
   logIoStep('Mise à jour des modules optionnels', {
     ads1115: moduleState.ads1115,
     pwm010: moduleState.pwm010,
@@ -966,11 +1029,13 @@ function recordPendingSnapshot(kind, snapshot, previousKey) {
   } else {
     map.set(snapshot.name, { state: STATUS_PENDING, signature, saved: savedSignature });
   }
+  markRebootPrompt(false);
 }
 
 function removeSnapshot(kind, key) {
   const map = getSnapshotMap(kind);
   map.delete(key);
+  markRebootPrompt(false);
 }
 
 function resetSnapshotsFromConfig(kind, list) {
@@ -1700,6 +1765,7 @@ async function loadConfig() {
     resetSnapshotsFromConfig('output', outputs);
     renderIoList('input');
     renderIoList('output');
+    markRebootPrompt(false);
     logIoStep('Configuration appliquée', { inputs: inputs.length, outputs: outputs.length });
   } catch (err) {
     console.error(err);
@@ -1710,111 +1776,167 @@ async function loadConfig() {
 
 // Serialize form to config JSON and post to server
 async function saveConfig() {
+  const statusEl = document.getElementById('status');
+  if (saveInProgress) {
+    if (statusEl) {
+      statusEl.textContent = 'Une sauvegarde est déjà en cours...';
+    }
+    logIoStep('Tentative de sauvegarde ignorée car une autre sauvegarde est en cours.');
+    return;
+  }
+
+  const saveBtn = document.getElementById('saveBtn');
+  const rebootBtn = document.getElementById('rebootBtn');
+  const originalSaveLabel = saveBtn ? (saveBtn.dataset.label || saveBtn.textContent) : '';
+  if (saveBtn && !saveBtn.dataset.label) {
+    saveBtn.dataset.label = originalSaveLabel;
+  }
+  const initialRebootDisabled = rebootBtn ? rebootBtn.disabled : false;
+  let rebootShouldBeEnabled = false;
+
+  const restoreUi = () => {
+    if (saveBtn) {
+      saveBtn.disabled = false;
+      const label = saveBtn.dataset.label || originalSaveLabel || 'Enregistrer';
+      saveBtn.textContent = label;
+    }
+    if (rebootBtn) {
+      rebootBtn.disabled = rebootShouldBeEnabled ? false : initialRebootDisabled;
+    }
+    markRebootPrompt(rebootShouldBeEnabled);
+    saveInProgress = false;
+  };
+
+  saveInProgress = true;
   startIoLogSession('save', { title: 'Sauvegarde de la configuration', mode: 'save' });
   refreshModuleStateFromForm();
   logIoStep('Début de sauvegarde de la configuration', { ...moduleState });
-  const cfg = {};
-  cfg.modules = {
-    ads1115: document.getElementById('modAds').checked,
-    pwm010:  document.getElementById('modPwm').checked,
-    mcp4725: document.getElementById('modDac').checked,
-    zmpt:    document.getElementById('modZmpt').checked,
-    zmct:    document.getElementById('modZmct').checked,
-    div:     document.getElementById('modDiv').checked
-  };
-  cfg.inputs = inputs.slice(0, MAX_INPUTS).map((item, idx) => {
-    const obj = {
-      name: item.name || `IN${idx + 1}`,
-      type: item.type,
-      scale: Number.isFinite(item.scale) ? item.scale : 1,
-      offset: Number.isFinite(item.offset) ? item.offset : 0,
-      unit: item.unit || '',
-      active: !!item.active
-    };
-    if (['adc','div','zmpt','zmct'].includes(item.type)) {
-      obj.pin = item.pin || '';
-    }
-    if (item.type === 'ads1115') {
-      obj.adsChannel = Number.isFinite(item.adsChannel) ? parseInt(item.adsChannel, 10) : 0;
-    }
-    if (item.type === 'remote') {
-      obj.remoteNode = item.remoteNode || '';
-      obj.remoteName = item.remoteName || '';
-    }
-    return obj;
-  });
-  cfg.inputCount = cfg.inputs.length;
-  cfg.outputs = outputs.slice(0, MAX_OUTPUTS).map((item, idx) => {
-    const obj = {
-      name: item.name || `OUT${idx + 1}`,
-      type: item.type,
-      scale: Number.isFinite(item.scale) ? item.scale : 1,
-      offset: Number.isFinite(item.offset) ? item.offset : 0,
-      active: !!item.active
-    };
-    if (['pwm010','gpio'].includes(item.type)) {
-      obj.pin = item.pin || '';
-    }
-    if (item.type === 'pwm010') {
-      obj.pwmFreq = Number.isFinite(item.pwmFreq) ? Math.max(1, Math.round(item.pwmFreq)) : 2000;
-    }
-    if (item.type === 'mcp4725') {
-      obj.i2cAddress = item.i2cAddress && item.i2cAddress.length ? item.i2cAddress : '0x60';
-    }
-    return obj;
-  });
-  cfg.outputCount = cfg.outputs.length;
-  logIoStep('Configuration assemblée avant envoi', {
-    inputs: cfg.inputs.length,
-    outputs: cfg.outputs.length
-  });
-  const statusEl = document.getElementById('status');
-  let payload;
-  try {
-    payload = JSON.stringify(cfg);
-  } catch (err) {
-    logIoStep('Erreur lors de la sérialisation JSON locale', { message: err.message });
-    if (statusEl) {
-      statusEl.textContent = 'Erreur lors de la préparation de la configuration.';
-    }
-    cancelIoLogSession('Séquence d’enregistrement interrompue');
-    return;
+  markRebootPrompt(false);
+  if (saveBtn) {
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Sauvegarde...';
   }
-  const payloadPreview = payload.length > 800 ? `${payload.slice(0, 800)}…` : payload;
-  logIoStep('JSON de configuration généré', {
-    octets: payload.length,
-    aperçu: payloadPreview
-  });
+  if (rebootBtn) {
+    rebootBtn.disabled = true;
+  }
+  if (statusEl) {
+    statusEl.textContent = 'Sauvegarde en cours...';
+  }
 
-  // Post config
-  const requestOptions = {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain' },
-    body: payload
-  };
-  let currentEndpoint = '/api/config/io/set';
-  logIoStep('Transmission de la configuration au serveur', { endpoint: currentEndpoint });
-
-  async function sendConfigRequest(url) {
-    const response = await authFetch(url, requestOptions);
-    let raw = '';
+  try {
     try {
-      raw = await response.text();
-    } catch (_) {
-      raw = '';
-    }
-    let parsed = null;
-    if (raw && raw.length) {
-      try {
-        parsed = JSON.parse(raw);
-      } catch (_) {
-        parsed = null;
+      logIoStep('Validation de la session d’authentification avant sauvegarde.');
+      await ensureSession();
+      logIoStep('Session d’authentification confirmée.');
+    } catch (authErr) {
+      logIoStep('Échec de la validation de la session', normaliseErrorForLog(authErr));
+      if (statusEl) {
+        statusEl.textContent = describeErrorMessage(authErr, 'Authentification requise pour sauvegarder.');
       }
+      cancelIoLogSession('Séquence d’enregistrement interrompue');
+      return;
     }
-    return { response, raw, parsed };
-  }
 
-  try {
+    const cfg = {};
+    cfg.modules = {
+      ads1115: document.getElementById('modAds').checked,
+      pwm010:  document.getElementById('modPwm').checked,
+      mcp4725: document.getElementById('modDac').checked,
+      zmpt:    document.getElementById('modZmpt').checked,
+      zmct:    document.getElementById('modZmct').checked,
+      div:     document.getElementById('modDiv').checked
+    };
+    cfg.inputs = inputs.slice(0, MAX_INPUTS).map((item, idx) => {
+      const obj = {
+        name: item.name || `IN${idx + 1}`,
+        type: item.type,
+        scale: Number.isFinite(item.scale) ? item.scale : 1,
+        offset: Number.isFinite(item.offset) ? item.offset : 0,
+        unit: item.unit || '',
+        active: !!item.active
+      };
+      if (['adc','div','zmpt','zmct'].includes(item.type)) {
+        obj.pin = item.pin || '';
+      }
+      if (item.type === 'ads1115') {
+        obj.adsChannel = Number.isFinite(item.adsChannel) ? parseInt(item.adsChannel, 10) : 0;
+      }
+      if (item.type === 'remote') {
+        obj.remoteNode = item.remoteNode || '';
+        obj.remoteName = item.remoteName || '';
+      }
+      return obj;
+    });
+    cfg.inputCount = cfg.inputs.length;
+    cfg.outputs = outputs.slice(0, MAX_OUTPUTS).map((item, idx) => {
+      const obj = {
+        name: item.name || `OUT${idx + 1}`,
+        type: item.type,
+        scale: Number.isFinite(item.scale) ? item.scale : 1,
+        offset: Number.isFinite(item.offset) ? item.offset : 0,
+        active: !!item.active
+      };
+      if (['pwm010','gpio'].includes(item.type)) {
+        obj.pin = item.pin || '';
+      }
+      if (item.type === 'pwm010') {
+        obj.pwmFreq = Number.isFinite(item.pwmFreq) ? Math.max(1, Math.round(item.pwmFreq)) : 2000;
+      }
+      if (item.type === 'mcp4725') {
+        obj.i2cAddress = item.i2cAddress && item.i2cAddress.length ? item.i2cAddress : '0x60';
+      }
+      return obj;
+    });
+    cfg.outputCount = cfg.outputs.length;
+    logIoStep('Configuration assemblée avant envoi', {
+      inputs: cfg.inputs.length,
+      outputs: cfg.outputs.length
+    });
+
+    let payload;
+    try {
+      payload = JSON.stringify(cfg);
+    } catch (err) {
+      logIoStep('Erreur lors de la sérialisation JSON locale', { message: err.message });
+      if (statusEl) {
+        statusEl.textContent = 'Erreur lors de la préparation de la configuration.';
+      }
+      cancelIoLogSession('Séquence d’enregistrement interrompue');
+      return;
+    }
+    const payloadPreview = payload.length > 800 ? `${payload.slice(0, 800)}…` : payload;
+    logIoStep('JSON de configuration généré', {
+      octets: payload.length,
+      aperçu: payloadPreview
+    });
+
+    const requestOptions = {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: payload
+    };
+    let currentEndpoint = '/api/config/io/set';
+    logIoStep('Transmission de la configuration au serveur', { endpoint: currentEndpoint });
+
+    async function sendConfigRequest(url) {
+      const response = await authFetch(url, requestOptions);
+      let raw = '';
+      try {
+        raw = await response.text();
+      } catch (_) {
+        raw = '';
+      }
+      let parsed = null;
+      if (raw && raw.length) {
+        try {
+          parsed = JSON.parse(raw);
+        } catch (_) {
+          parsed = null;
+        }
+      }
+      return { response, raw, parsed };
+    }
+
     let attempt = await sendConfigRequest(currentEndpoint);
     let legacyEndpointUsed = false;
     if (attempt.response.status === 404) {
@@ -1839,10 +1961,19 @@ async function saveConfig() {
       } else {
         logIoStep('Configuration sauvegardée avec succès');
       }
+      const successStatus = legacyEndpointUsed
+        ? 'Sauvegarde vérifiée (mode compatibilité). Veuillez redémarrer pour appliquer les changements.'
+        : 'Sauvegarde vérifiée. Veuillez redémarrer pour appliquer les changements.';
       if (statusEl) {
-        statusEl.textContent = legacyEndpointUsed
-          ? 'Sauvegarde vérifiée (mode compatibilité), redémarrage...'
-          : 'Sauvegarde vérifiée, redémarrage...';
+        statusEl.textContent = successStatus;
+      }
+      rebootShouldBeEnabled = true;
+      try {
+        logIoStep('Relecture de la configuration depuis le serveur pour validation.');
+        await loadConfig();
+        logIoStep('Configuration rechargée après sauvegarde.');
+      } catch (reloadErr) {
+        logIoStep('La relecture de la configuration après sauvegarde a rencontré une erreur', normaliseErrorForLog(reloadErr));
       }
       const finalMessage = legacyEndpointUsed
         ? 'Séquence d’enregistrement validée (compatibilité)'
@@ -1877,14 +2008,40 @@ async function saveConfig() {
         statusEl.textContent = message;
       }
       cancelIoLogSession('Séquence d’enregistrement interrompue');
+      return;
     }
   } catch (err) {
     console.error(err);
-    logIoStep('Exception lors de la sauvegarde', err);
+    logIoStep('Exception lors de la sauvegarde', normaliseErrorForLog(err));
     if (statusEl) {
-      statusEl.textContent = 'Erreur lors de la sauvegarde';
+      const message = describeErrorMessage(err, 'Erreur lors de la sauvegarde');
+      statusEl.textContent = message.startsWith('Erreur')
+        ? message
+        : `Erreur lors de la sauvegarde (${message})`;
     }
     cancelIoLogSession('Séquence d’enregistrement interrompue');
+  } finally {
+    restoreUi();
+  }
+}
+
+async function requestReboot(statusTarget) {
+  const target = statusTarget || document.getElementById('status');
+  if (target) {
+    target.textContent = 'Redémarrage en cours...';
+  }
+  try {
+    await authFetch('/api/reboot', { method: 'POST' });
+    if (target) {
+      target.textContent = 'Redémarrage demandé. L’équipement va redémarrer.';
+    }
+    return true;
+  } catch (err) {
+    if (target) {
+      const message = describeErrorMessage(err, 'erreur inconnue');
+      target.textContent = `Échec du redémarrage (${message})`;
+    }
+    return false;
   }
 }
 
@@ -1975,14 +2132,48 @@ window.addEventListener('DOMContentLoaded', () => {
     .catch(err => {
       console.error(err);
     });
-  document.getElementById('saveBtn').addEventListener('click', () => {
-    document.getElementById('status').textContent = 'Sauvegarde...';
-    saveConfig();
-  });
-  document.getElementById('rebootBtn').addEventListener('click', () => {
-    document.getElementById('fwStatus').textContent = 'Redémarrage...';
-    authFetch('/api/reboot', {method: 'POST'});
-  });
+  const saveBtnEl = document.getElementById('saveBtn');
+  if (saveBtnEl) {
+    saveBtnEl.addEventListener('click', () => {
+      saveConfig();
+    });
+  }
+  const rebootBtnEl = document.getElementById('rebootBtn');
+  if (rebootBtnEl) {
+    rebootBtnEl.addEventListener('click', async () => {
+      const statusEl = document.getElementById('status');
+      if (saveInProgress) {
+        if (statusEl) {
+          statusEl.textContent = 'Sauvegarde en cours, redémarrage différé.';
+        }
+        return;
+      }
+      rebootBtnEl.disabled = true;
+      let rebootSucceeded = false;
+      try {
+        rebootSucceeded = await requestReboot(statusEl);
+      } finally {
+        rebootBtnEl.disabled = saveInProgress;
+      }
+      if (rebootSucceeded) {
+        markRebootPrompt(false);
+      }
+    });
+  }
+  const fwRebootBtn = document.getElementById('fwRebootBtn');
+  if (fwRebootBtn) {
+    fwRebootBtn.addEventListener('click', async () => {
+      fwRebootBtn.disabled = true;
+      try {
+        const succeeded = await requestReboot(document.getElementById('fwStatus'));
+        if (succeeded) {
+          markRebootPrompt(false);
+        }
+      } finally {
+        fwRebootBtn.disabled = false;
+      }
+    });
+  }
   document.getElementById('fwUploadBtn').addEventListener('click', async () => {
     const file = document.getElementById('fwFile').files[0];
     const st = document.getElementById('fwStatus');
