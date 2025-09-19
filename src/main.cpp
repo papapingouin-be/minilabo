@@ -1686,133 +1686,134 @@ void parseConfigFromJson(const JsonDocument &doc,
   if (sections & CONFIG_SECTION_PEERS) {
     target.peerCount = 0;
     JsonVariantConst peersVar = doc["peers"];
-  auto parsePeerEntry = [&](JsonObjectConst o, const String &entryLabel,
-                            int indexForLog) {
-    if (target.peerCount >= MAX_PEERS) {
-      return;
-    }
-    PeerAuth &pa = target.peers[target.peerCount];
-    if (o.containsKey("nodeId")) {
-      pa.nodeId = o["nodeId"].as<String>();
-    } else if (entryLabel.length() > 0) {
-      pa.nodeId = entryLabel;
-    } else {
-      pa.nodeId = "";
-    }
-    if (pa.nodeId.length() == 0) {
-      if (entryLabel.length() > 0) {
-        logPrintf("Peer entry '%s' missing nodeId", entryLabel.c_str());
-      } else if (indexForLog >= 0) {
-        logPrintf("Peer entry %u missing nodeId",
-                  static_cast<unsigned>(indexForLog));
-      } else {
-        logPrintf("Peer entry #%u missing nodeId",
-                  static_cast<unsigned>(target.peerCount));
-      }
-    }
-    if (o.containsKey("pin")) {
-      pa.pin = o["pin"].as<String>();
-    } else {
-      pa.pin = "";
-    }
-    if (pa.pin.length() == 0) {
-      if (entryLabel.length() > 0) {
-        logPrintf("Peer entry '%s' missing pin", entryLabel.c_str());
-      } else if (indexForLog >= 0) {
-        logPrintf("Peer entry %u missing pin",
-                  static_cast<unsigned>(indexForLog));
-      } else {
-        logPrintf("Peer entry #%u missing pin",
-                  static_cast<unsigned>(target.peerCount));
-      }
-    }
-    target.peerCount++;
-  };
-  auto handlePeerArray = [&](JsonArrayConst arr) {
-    size_t totalPeers = arr.size();
-    if (totalPeers > MAX_PEERS) {
-      logPrintf(
-          "Configuration provides %u peers but only %u are supported; ignoring extras",
-          static_cast<unsigned>(totalPeers),
-          static_cast<unsigned>(MAX_PEERS));
-    }
-    uint8_t desired = static_cast<uint8_t>(totalPeers);
-    if (desired > MAX_PEERS) desired = MAX_PEERS;
-    for (uint8_t idx = 0; idx < desired; ++idx) {
-      JsonVariantConst entry = arr[idx];
-      JsonObjectConst entryObj = entry.as<JsonObjectConst>();
-      if (entryObj.isNull()) {
-        logPrintf("Peer entry %u is not an object; skipping",
-                  static_cast<unsigned>(idx));
-        continue;
-      }
-      parsePeerEntry(entryObj, String(), idx);
-    }
-  };
-  auto handlePeerObject = [&](JsonObjectConst obj) {
-    size_t totalPeers = obj.size();
-    if (totalPeers > MAX_PEERS) {
-      logPrintf(
-          "Peer map provides %u entries but only %u are supported; ignoring extras",
-          static_cast<unsigned>(totalPeers),
-          static_cast<unsigned>(MAX_PEERS));
-    }
-    for (JsonPairConst kv : obj) {
+    auto parsePeerEntry = [&](JsonObjectConst o, const String &entryLabel,
+                              int indexForLog) {
       if (target.peerCount >= MAX_PEERS) {
-        break;
+        return;
       }
-      JsonVariantConst value = kv.value();
-      JsonObjectConst valueObj = value.as<JsonObjectConst>();
-      if (valueObj.isNull()) {
-        logPrintf("Peer entry '%s' is not an object; skipping",
-                  kv.key().c_str());
-        continue;
+      PeerAuth &pa = target.peers[target.peerCount];
+      if (o.containsKey("nodeId")) {
+        pa.nodeId = o["nodeId"].as<String>();
+      } else if (entryLabel.length() > 0) {
+        pa.nodeId = entryLabel;
+      } else {
+        pa.nodeId = "";
       }
-      parsePeerEntry(valueObj, String(kv.key().c_str()), -1);
-    }
-  };
-  if (!peersVar.isNull()) {
-    bool parsedPeers = false;
-    JsonArrayConst arr = peersVar.as<JsonArrayConst>();
-    if (!arr.isNull()) {
-      handlePeerArray(arr);
-      parsedPeers = true;
-    } else {
-      JsonObjectConst obj = peersVar.as<JsonObjectConst>();
-      if (!obj.isNull()) {
-        handlePeerObject(obj);
-        parsedPeers = true;
-      }
-    }
-    if (!parsedPeers) {
-      bool parsedFromString = false;
-      if (peersVar.is<const char *>()) {
-        parsedFromString = parseJsonContainerString(peersVar.as<String>(),
-                                                    handlePeerArray,
-                                                    handlePeerObject,
-                                                    "peer configuration");
-      }
-      if (!parsedFromString) {
-        String serialized;
-        serializeJson(peersVar, serialized);
-        if (serialized.length() > 0) {
-          parsedFromString = parseJsonContainerString(
-              serialized, handlePeerArray, handlePeerObject,
-              "peer configuration");
+      if (pa.nodeId.length() == 0) {
+        if (entryLabel.length() > 0) {
+          logPrintf("Peer entry '%s' missing nodeId", entryLabel.c_str());
+        } else if (indexForLog >= 0) {
+          logPrintf("Peer entry %u missing nodeId",
+                    static_cast<unsigned>(indexForLog));
+        } else {
+          logPrintf("Peer entry #%u missing nodeId",
+                    static_cast<unsigned>(target.peerCount));
         }
       }
-      parsedPeers = parsedFromString;
+      if (o.containsKey("pin")) {
+        pa.pin = o["pin"].as<String>();
+      } else {
+        pa.pin = "";
+      }
+      if (pa.pin.length() == 0) {
+        if (entryLabel.length() > 0) {
+          logPrintf("Peer entry '%s' missing pin", entryLabel.c_str());
+        } else if (indexForLog >= 0) {
+          logPrintf("Peer entry %u missing pin",
+                    static_cast<unsigned>(indexForLog));
+        } else {
+          logPrintf("Peer entry #%u missing pin",
+                    static_cast<unsigned>(target.peerCount));
+        }
+      }
+      target.peerCount++;
+    };
+    auto handlePeerArray = [&](JsonArrayConst arr) {
+      size_t totalPeers = arr.size();
+      if (totalPeers > MAX_PEERS) {
+        logPrintf(
+            "Configuration provides %u peers but only %u are supported; ignoring extras",
+            static_cast<unsigned>(totalPeers),
+            static_cast<unsigned>(MAX_PEERS));
+      }
+      uint8_t desired = static_cast<uint8_t>(totalPeers);
+      if (desired > MAX_PEERS) desired = MAX_PEERS;
+      for (uint8_t idx = 0; idx < desired; ++idx) {
+        JsonVariantConst entry = arr[idx];
+        JsonObjectConst entryObj = entry.as<JsonObjectConst>();
+        if (entryObj.isNull()) {
+          logPrintf("Peer entry %u is not an object; skipping",
+                    static_cast<unsigned>(idx));
+          continue;
+        }
+        parsePeerEntry(entryObj, String(), idx);
+      }
+    };
+    auto handlePeerObject = [&](JsonObjectConst obj) {
+      size_t totalPeers = obj.size();
+      if (totalPeers > MAX_PEERS) {
+        logPrintf(
+            "Peer map provides %u entries but only %u are supported; ignoring extras",
+            static_cast<unsigned>(totalPeers),
+            static_cast<unsigned>(MAX_PEERS));
+      }
+      for (JsonPairConst kv : obj) {
+        if (target.peerCount >= MAX_PEERS) {
+          break;
+        }
+        JsonVariantConst value = kv.value();
+        JsonObjectConst valueObj = value.as<JsonObjectConst>();
+        if (valueObj.isNull()) {
+          logPrintf("Peer entry '%s' is not an object; skipping",
+                    kv.key().c_str());
+          continue;
+        }
+        parsePeerEntry(valueObj, String(kv.key().c_str()), -1);
+      }
+    };
+    if (!peersVar.isNull()) {
+      bool parsedPeers = false;
+      JsonArrayConst arr = peersVar.as<JsonArrayConst>();
+      if (!arr.isNull()) {
+        handlePeerArray(arr);
+        parsedPeers = true;
+      } else {
+        JsonObjectConst obj = peersVar.as<JsonObjectConst>();
+        if (!obj.isNull()) {
+          handlePeerObject(obj);
+          parsedPeers = true;
+        }
+      }
+      if (!parsedPeers) {
+        bool parsedFromString = false;
+        if (peersVar.is<const char *>()) {
+          parsedFromString = parseJsonContainerString(peersVar.as<String>(),
+                                                      handlePeerArray,
+                                                      handlePeerObject,
+                                                      "peer configuration");
+        }
+        if (!parsedFromString) {
+          String serialized;
+          serializeJson(peersVar, serialized);
+          if (serialized.length() > 0) {
+            parsedFromString = parseJsonContainerString(
+                serialized, handlePeerArray, handlePeerObject,
+                "peer configuration");
+          }
+        }
+        parsedPeers = parsedFromString;
+      }
+      if (!parsedPeers) {
+        logPrintf("Peer configuration malformed: expected array but found %s",
+                  describeJsonType(peersVar));
+        logMessage("Peer configuration malformed: expected array");
+        target.peerCount = 0;
+      }
     }
-    if (!parsedPeers) {
-      logPrintf("Peer configuration malformed: expected array but found %s",
-                describeJsonType(peersVar));
-      logMessage("Peer configuration malformed: expected array");
-      target.peerCount = 0;
+    for (uint8_t i = target.peerCount; i < MAX_PEERS; i++) {
+      target.peers[i].nodeId = "";
+      target.peers[i].pin = "";
     }
-  }
-  for (uint8_t i = target.peerCount; i < MAX_PEERS; i++) {
-    target.peers[i].nodeId = "";
-    target.peers[i].pin = "";
   }
 
   if ((sections & CONFIG_SECTION_IO) && logIoChanges && previous) {
