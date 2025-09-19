@@ -62,6 +62,18 @@
     .modal-info h3 { margin: 0 0 0.35em; font-size: 1em; }
     .modal-info ul { margin: 0.4em 0 0 1.2em; padding: 0; }
     .modal-info li { margin-bottom: 0.3em; }
+    .io-log-panel { position: fixed; bottom: 1.5em; right: 1.5em; width: min(360px, 90vw); max-height: 60vh; display: flex; flex-direction: column; background: #ffffff; border-radius: 12px; box-shadow: 0 18px 35px rgba(0,0,0,0.25); border: 1px solid rgba(0,0,0,0.08); z-index: 1500; overflow: hidden; }
+    .io-log-header { background: linear-gradient(135deg, #1f3a93, #3a539b); color: #fff; padding: 0.7em 1em; font-weight: bold; font-size: 0.95em; }
+    .io-log-list { list-style: none; margin: 0; padding: 0.9em 1.1em; display: flex; flex-direction: column; gap: 0.65em; overflow-y: auto; }
+    .io-log-step { display: flex; gap: 0.6em; align-items: flex-start; font-size: 0.9em; color: #2c3e50; }
+    .io-log-icon { flex: 0 0 auto; width: 1.4em; height: 1.4em; border-radius: 50%; border: 2px solid #95a5a6; display: inline-flex; align-items: center; justify-content: center; font-weight: bold; font-size: 0.85em; color: #7f8c8d; background: #ecf0f1; margin-top: 0.2em; }
+    .io-log-step.pending .io-log-icon { border-color: #95a5a6; color: #7f8c8d; background: #ecf0f1; }
+    .io-log-step.completed .io-log-icon { border-color: #27ae60; background: #27ae60; color: #fff; }
+    .io-log-step.aborted .io-log-icon { border-color: #c0392b; background: #c0392b; color: #fff; }
+    .io-log-content { display: flex; flex-direction: column; gap: 0.3em; }
+    .io-log-message { font-weight: 600; }
+    .io-log-detail { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 0.75em; background: #f4f6f8; border-radius: 5px; padding: 0.35em 0.5em; white-space: pre-wrap; word-break: break-word; color: #2c3e50; }
+    .io-log-highlight { background: rgba(39, 174, 96, 0.12); border-radius: 8px; padding: 0.4em 0.5em; }
   </style>
   <script src="auth.js"></script>
 </head>
@@ -158,6 +170,11 @@
       </div>
     </form>
   </div>
+</div>
+
+<div id="ioLogPanel" class="io-log-panel hidden" aria-live="polite" aria-hidden="true">
+  <div class="io-log-header"><span id="ioLogTitle">Suivi IO</span></div>
+  <ol id="ioLogList" class="io-log-list"></ol>
 </div>
 
 <script>
@@ -384,6 +401,8 @@ const moduleState = {
   div: false
 };
 let modalState = null;
+let ioLogSession = null;
+let ioLogHideTimer = null;
 
 const STATUS_SYNCED = 'synced';
 const STATUS_PENDING = 'pending';
@@ -396,6 +415,149 @@ function logIoStep(message, detail) {
   } else {
     console.log(`[IO] ${message}`);
   }
+  if (ioLogSession) {
+    appendIoLogStep(message, detail);
+  }
+}
+
+function showIoLogPanel() {
+  const panel = document.getElementById('ioLogPanel');
+  if (panel) {
+    panel.classList.remove('hidden');
+    panel.setAttribute('aria-hidden', 'false');
+  }
+}
+
+function hideIoLogPanel() {
+  const panel = document.getElementById('ioLogPanel');
+  if (panel) {
+    panel.classList.add('hidden');
+    panel.setAttribute('aria-hidden', 'true');
+  }
+}
+
+function scheduleIoLogHide() {
+  if (ioLogHideTimer) {
+    clearTimeout(ioLogHideTimer);
+  }
+  ioLogHideTimer = setTimeout(() => {
+    hideIoLogPanel();
+    ioLogHideTimer = null;
+  }, 4500);
+}
+
+function startIoLogSession(kind) {
+  const list = document.getElementById('ioLogList');
+  const titleEl = document.getElementById('ioLogTitle');
+  if (!list || !titleEl) return;
+  if (ioLogHideTimer) {
+    clearTimeout(ioLogHideTimer);
+    ioLogHideTimer = null;
+  }
+  ioLogSession = { kind, mode: 'add' };
+  list.innerHTML = '';
+  titleEl.textContent = kind === 'input' ? 'Ajout d’une entrée' : 'Ajout d’une sortie';
+  showIoLogPanel();
+}
+
+function appendIoLogStep(message, detail) {
+  if (!ioLogSession) return null;
+  const list = document.getElementById('ioLogList');
+  if (!list) return null;
+  const pendingItems = list.querySelectorAll('.io-log-step.pending');
+  pendingItems.forEach(item => markIoLogStepCompleted(item));
+  const item = document.createElement('li');
+  item.className = 'io-log-step pending';
+  const icon = document.createElement('span');
+  icon.className = 'io-log-icon';
+  icon.textContent = '…';
+  const content = document.createElement('div');
+  content.className = 'io-log-content';
+  const messageEl = document.createElement('div');
+  messageEl.className = 'io-log-message';
+  messageEl.textContent = message;
+  content.appendChild(messageEl);
+  if (detail !== undefined) {
+    const detailEl = document.createElement('div');
+    detailEl.className = 'io-log-detail';
+    if (typeof detail === 'object') {
+      try {
+        detailEl.textContent = JSON.stringify(detail, null, 2);
+      } catch (err) {
+        detailEl.textContent = String(detail);
+      }
+    } else {
+      detailEl.textContent = String(detail);
+    }
+    content.appendChild(detailEl);
+  }
+  item.appendChild(icon);
+  item.appendChild(content);
+  list.appendChild(item);
+  list.scrollTop = list.scrollHeight;
+  showIoLogPanel();
+  if (ioLogHideTimer) {
+    clearTimeout(ioLogHideTimer);
+    ioLogHideTimer = null;
+  }
+  return item;
+}
+
+function markIoLogStepCompleted(item, highlight = false) {
+  if (!item || item.classList.contains('completed')) return;
+  item.classList.remove('pending');
+  item.classList.add('completed');
+  if (highlight) {
+    item.classList.add('io-log-highlight');
+  }
+  const icon = item.querySelector('.io-log-icon');
+  if (icon) {
+    icon.textContent = '✓';
+  }
+}
+
+function markIoLogStepAborted(item) {
+  if (!item || item.classList.contains('aborted')) return;
+  item.classList.remove('pending');
+  item.classList.add('aborted');
+  const icon = item.querySelector('.io-log-icon');
+  if (icon) {
+    icon.textContent = '✕';
+  }
+}
+
+function completeIoLogSession(finalMessage) {
+  if (!ioLogSession) return;
+  const list = document.getElementById('ioLogList');
+  if (list) {
+    const pendingItems = list.querySelectorAll('.io-log-step.pending');
+    pendingItems.forEach(item => markIoLogStepCompleted(item));
+    if (finalMessage) {
+      const finalItem = appendIoLogStep(finalMessage);
+      if (finalItem) {
+        markIoLogStepCompleted(finalItem, true);
+      }
+    }
+  }
+  ioLogSession = null;
+  scheduleIoLogHide();
+}
+
+function cancelIoLogSession(reason) {
+  if (!ioLogSession) return;
+  const list = document.getElementById('ioLogList');
+  if (list) {
+    const pendingItems = list.querySelectorAll('.io-log-step.pending');
+    pendingItems.forEach(item => markIoLogStepAborted(item));
+    if (reason) {
+      const cancelItem = appendIoLogStep(reason);
+      if (cancelItem) {
+        markIoLogStepAborted(cancelItem);
+      }
+    }
+  }
+  ioLogSession = null;
+  scheduleIoLogHide();
 }
 
 function getSnapshotMap(kind) {
@@ -956,10 +1118,13 @@ function openIoModal(kind, index) {
   modal.classList.remove('hidden');
 }
 
-function closeIoModal() {
+function closeIoModal(cancelled = false) {
   const modal = document.getElementById('ioModal');
   if (modal) {
     modal.classList.add('hidden');
+  }
+  if (cancelled && ioLogSession && ioLogSession.mode === 'add') {
+    cancelIoLogSession('Ajout annulé');
   }
   modalState = null;
 }
@@ -1242,6 +1407,7 @@ function handleModalSubmit(event) {
   event.preventDefault();
   if (!modalState) return;
   const { kind, index, data } = modalState;
+  const isNew = index == null;
   if (!data.name || !data.name.trim()) {
     alert('Veuillez indiquer un nom.');
     return;
@@ -1293,7 +1459,10 @@ function handleModalSubmit(event) {
     }
     renderIoList('output');
   }
-  closeIoModal();
+  if (isNew && ioLogSession && ioLogSession.kind === kind) {
+    completeIoLogSession(kind === 'input' ? 'Entrée vérifiée' : 'Sortie vérifiée');
+  }
+  closeIoModal(false);
 }
 
 function addInput() {
@@ -1301,6 +1470,7 @@ function addInput() {
     alert(`Nombre maximum d'entrées atteint (${MAX_INPUTS}).`);
     return;
   }
+  startIoLogSession('input');
   logIoStep('Initialisation de l\'ajout d\'une nouvelle entrée.');
   openIoModal('input', null);
 }
@@ -1310,6 +1480,7 @@ function addOutput() {
     alert(`Nombre maximum de sorties atteint (${MAX_OUTPUTS}).`);
     return;
   }
+  startIoLogSession('output');
   logIoStep('Initialisation de l\'ajout d\'une nouvelle sortie.');
   openIoModal('output', null);
 }
@@ -1517,19 +1688,19 @@ window.addEventListener('DOMContentLoaded', () => {
   }
   const modalCancel = document.getElementById('modalCancel');
   if (modalCancel) {
-    modalCancel.addEventListener('click', closeIoModal);
+    modalCancel.addEventListener('click', () => closeIoModal(true));
   }
   const modal = document.getElementById('ioModal');
   if (modal) {
     modal.addEventListener('click', (ev) => {
       if (ev.target === modal) {
-        closeIoModal();
+        closeIoModal(true);
       }
     });
   }
   window.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape' && modalState) {
-      closeIoModal();
+      closeIoModal(true);
     }
   });
   renderIoList('input');
