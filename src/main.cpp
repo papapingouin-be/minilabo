@@ -207,13 +207,18 @@ static const char *VIRTUAL_CONFIG_BACKUP_FILE_PATH = "/private/virtual_config.ba
 static const char *VIRTUAL_CONFIG_TEMP_FILE_PATH = "/private/virtual_config.tmp";
 static const char *VIRTUAL_CONFIG_BACKUP_STAGING_PATH = "/private/virtual_config.bak.tmp";
 static const char *LEGACY_CONFIG_FILE_PATH = "/config.json";
-static const size_t CONFIG_JSON_CAPACITY = 16384;
+static const size_t CONFIG_JSON_MIN_CAPACITY = 1024;
+static const size_t CONFIG_JSON_SAFETY_MARGIN = 512;
 static const size_t CONFIG_JSON_MAX_CAPACITY = 28672;
 
 static size_t configJsonCapacityForPayload(size_t payloadSize) {
-  size_t capacity = CONFIG_JSON_CAPACITY;
+  size_t capacity = CONFIG_JSON_MIN_CAPACITY;
   if (payloadSize > 0) {
-    size_t desired = payloadSize + 1024;
+    size_t margin = payloadSize / 4;
+    if (margin < CONFIG_JSON_SAFETY_MARGIN) {
+      margin = CONFIG_JSON_SAFETY_MARGIN;
+    }
+    size_t desired = payloadSize + margin;
     if (desired > capacity) {
       capacity = desired;
     }
@@ -1141,7 +1146,13 @@ static bool parseJsonContainerString(const String &rawValue,
     if (trimmed.length() == 0) {
       return false;
     }
-    DynamicJsonDocument nested(CONFIG_JSON_CAPACITY);
+    size_t nestedCapacity = configJsonCapacityForPayload(trimmed.length());
+    DynamicJsonDocument nested(nestedCapacity);
+    if (nestedCapacity > 0 && nested.capacity() == 0) {
+      logPrintf("Failed to allocate %u bytes to parse %s JSON string",
+                static_cast<unsigned>(nestedCapacity), contextLabel);
+      return false;
+    }
     DeserializationError err = deserializeJson(nested, trimmed);
     if (err) {
       logPrintf("Failed to parse %s JSON string: %s", contextLabel,
@@ -2106,6 +2117,78 @@ static void populateConfigJson(JsonDocument &doc,
   }
 }
 
+static bool buildConfigJsonPayload(String &payload,
+                                   uint8_t sections,
+                                   bool includeRuntimeFields,
+                                   const char *label,
+                                   bool logPayload,
+                                   void (*mutator)(JsonDocument &) = nullptr) {
+  const char *effectiveLabel = label ? label : "Config";
+  size_t docCapacity = configJsonCapacityForPayload(payload.length());
+  if (docCapacity == 0) {
+    docCapacity = configJsonCapacityForPayload(0);
+  }
+  while (true) {
+    DynamicJsonDocument doc(docCapacity);
+    if (docCapacity > 0 && doc.capacity() == 0) {
+      logPrintf("Failed to allocate %u bytes for %s config JSON",
+                static_cast<unsigned>(docCapacity), effectiveLabel);
+      if (docCapacity <= CONFIG_JSON_MIN_CAPACITY) {
+        return false;
+      }
+      size_t nextCapacity = docCapacity / 2;
+      if (nextCapacity < CONFIG_JSON_MIN_CAPACITY) {
+        nextCapacity = CONFIG_JSON_MIN_CAPACITY;
+      }
+      if (nextCapacity == docCapacity) {
+        return false;
+      }
+      docCapacity = nextCapacity;
+      continue;
+    }
+    populateConfigJson(doc, sections, includeRuntimeFields);
+    if (mutator) {
+      mutator(doc);
+    }
+    if (doc.overflowed()) {
+      if (docCapacity >= CONFIG_JSON_MAX_CAPACITY) {
+        logPrintf("%s config JSON exceeded maximum capacity (%u bytes)",
+                  effectiveLabel, static_cast<unsigned>(docCapacity));
+        return false;
+      }
+      size_t nextCapacity = growConfigJsonCapacity(docCapacity);
+      if (nextCapacity == docCapacity) {
+        logPrintf("%s config JSON could not grow beyond %u bytes",
+                  effectiveLabel, static_cast<unsigned>(docCapacity));
+        return false;
+      }
+      logPrintf("%s config JSON overflowed %u bytes; retrying with %u",
+                effectiveLabel, static_cast<unsigned>(docCapacity),
+                static_cast<unsigned>(nextCapacity));
+      docCapacity = nextCapacity;
+      continue;
+    }
+    if (logPayload) {
+      logConfigJson(effectiveLabel, doc);
+    }
+    payload.clear();
+    if (serializeJson(doc, payload) == 0) {
+      logMessage(String(effectiveLabel) + " config JSON encode failed");
+      return false;
+    }
+    return true;
+  }
+}
+
+static void appendIoConfigMetadata(JsonDocument &doc) {
+  JsonObject limits = doc.createNestedObject("limits");
+  limits["maxInputs"] = MAX_INPUTS;
+  limits["maxOutputs"] = MAX_OUTPUTS;
+  JsonObject metadata = doc.createNestedObject("metadata");
+  metadata["nodeId"] = config.nodeId;
+  metadata["fwVersion"] = getFirmwareVersion();
+}
+
 static bool loadConfigFromPath(const char *path,
                                const char *label,
                                uint8_t sections) {
@@ -2448,35 +2531,9 @@ static bool saveConfigSection(const char *label,
                               const char *tempPath,
                               const char *stagingPath) {
   logConfigSummary(label);
-  size_t docCapacity = CONFIG_JSON_CAPACITY;
   String payload;
-  while (true) {
-    DynamicJsonDocument doc(docCapacity);
-    populateConfigJson(doc, sections);
-    if (doc.overflowed()) {
-      if (docCapacity >= CONFIG_JSON_MAX_CAPACITY) {
-        logPrintf("%s config JSON exceeded maximum capacity (%u bytes)", label,
-                  static_cast<unsigned>(docCapacity));
-        return false;
-      }
-      size_t nextCapacity = growConfigJsonCapacity(docCapacity);
-      if (nextCapacity == docCapacity) {
-        logPrintf("%s config JSON could not grow beyond %u bytes", label,
-                  static_cast<unsigned>(docCapacity));
-        return false;
-      }
-      logPrintf("%s config JSON overflowed %u bytes; retrying with %u", label,
-                static_cast<unsigned>(docCapacity),
-                static_cast<unsigned>(nextCapacity));
-      docCapacity = nextCapacity;
-      continue;
-    }
-    logConfigJson(label, doc);
-    if (serializeJson(doc, payload) == 0) {
-      logMessage(String(label) + " config JSON encode failed");
-      return false;
-    }
-    break;
+  if (!buildConfigJsonPayload(payload, sections, false, label, true)) {
+    return false;
   }
   if (!ensureUserDirectory()) {
     logMessage(String(label) + " config directory unavailable");
@@ -3805,26 +3862,28 @@ void registerRoutes(ServerT &server) {
   server.on("/api/config/get", HTTP_GET, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
-    populateConfigJson(doc, CONFIG_SECTION_ALL, true);
     String payload;
-    serializeJson(doc, payload);
+    if (!buildConfigJsonPayload(payload, CONFIG_SECTION_ALL, true,
+                                "API config get", false)) {
+      srv->send(500, "application/json",
+                R"({"error":"encode_failed"})");
+      return;
+    }
     srv->send(200, "application/json", payload);
   });
 
   server.on("/api/config/io/get", HTTP_GET, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
-    populateConfigJson(doc, CONFIG_SECTION_MODULES | CONFIG_SECTION_IO);
-    JsonObject limits = doc.createNestedObject("limits");
-    limits["maxInputs"] = MAX_INPUTS;
-    limits["maxOutputs"] = MAX_OUTPUTS;
-    JsonObject metadata = doc.createNestedObject("metadata");
-    metadata["nodeId"] = config.nodeId;
-    metadata["fwVersion"] = getFirmwareVersion();
     String payload;
-    serializeJson(doc, payload);
+    if (!buildConfigJsonPayload(payload,
+                                CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
+                                false, "API IO config get", false,
+                                appendIoConfigMetadata)) {
+      srv->send(500, "application/json",
+                R"({"error":"encode_failed"})");
+      return;
+    }
     srv->send(200, "application/json", payload);
   });
 
@@ -3845,12 +3904,14 @@ void registerRoutes(ServerT &server) {
   server.on("/api/config/interface/get", HTTP_GET, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
-    populateConfigJson(doc,
-                       CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS,
-                       true);
     String payload;
-    serializeJson(doc, payload);
+    if (!buildConfigJsonPayload(
+            payload, CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS, true,
+            "API interface config get", false)) {
+      srv->send(500, "application/json",
+                R"({"error":"encode_failed"})");
+      return;
+    }
     srv->send(200, "application/json", payload);
   });
 
@@ -3869,77 +3930,104 @@ void registerRoutes(ServerT &server) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
     }
-    DynamicJsonDocument doc(CONFIG_JSON_CAPACITY);
-    if (deserializeJson(doc, body)) {
-      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
-      return;
+    size_t docCapacity = configJsonCapacityForPayload(body.length());
+    if (docCapacity == 0) {
+      docCapacity = configJsonCapacityForPayload(0);
     }
-    JsonVariantConst channelsVariant;
-    if (doc.containsKey("channels")) {
-      channelsVariant = doc["channels"];
-    } else if (doc.containsKey("virtualMultimeter")) {
-      channelsVariant = doc["virtualMultimeter"];
-    } else {
-      channelsVariant = doc.as<JsonVariantConst>();
-    }
-    VirtualMultimeterConfig newConfig;
-    clearVirtualMultimeterConfig(newConfig);
-    bool parsedChannels = false;
-    if (!channelsVariant.isNull()) {
-      JsonArrayConst arr = channelsVariant.as<JsonArrayConst>();
-      if (!arr.isNull()) {
-        parseMeterChannelArray(arr, newConfig);
-        parsedChannels = true;
-      } else {
-        JsonObjectConst obj = channelsVariant.as<JsonObjectConst>();
-        if (!obj.isNull()) {
-          parseMeterChannelObject(obj, newConfig);
-          parsedChannels = true;
+    while (true) {
+      DynamicJsonDocument doc(docCapacity);
+      if (docCapacity > 0 && doc.capacity() == 0) {
+        srv->send(500, "application/json",
+                  R"({"error":"alloc_failed"})");
+        return;
+      }
+      DeserializationError parseErr = deserializeJson(doc, body);
+      if (parseErr == DeserializationError::NoMemory &&
+          docCapacity < CONFIG_JSON_MAX_CAPACITY) {
+        size_t nextCapacity = growConfigJsonCapacity(docCapacity);
+        if (nextCapacity == docCapacity) {
+          srv->send(400, "application/json",
+                    R"({"error":"Invalid JSON"})");
+          return;
         }
+        docCapacity = nextCapacity;
+        continue;
       }
-    } else {
-      parsedChannels = true;
-    }
-    if (!parsedChannels) {
-      srv->send(400, "application/json", R"({"error":"invalid_channels"})");
-      return;
-    }
-    Config previousConfig = config;
-    config.virtualMultimeter = newConfig;
-    if (!saveVirtualConfig()) {
-      config.virtualMultimeter = previousConfig.virtualMultimeter;
-      srv->send(500, "application/json", R"({"error":"save_failed"})");
-      return;
-    }
-    String verifyError;
-    if (!verifyConfigStored(config, VIRTUAL_CONFIG_FILE_PATH,
-                            CONFIG_SECTION_VIRTUAL, verifyError)) {
-      logPrintf("Virtual multimeter verification failed: %s",
-                verifyError.c_str());
-      config.virtualMultimeter = previousConfig.virtualMultimeter;
+      if (parseErr) {
+        srv->send(400, "application/json",
+                  R"({"error":"Invalid JSON"})");
+        return;
+      }
+      JsonVariantConst channelsVariant;
+      if (doc.containsKey("channels")) {
+        channelsVariant = doc["channels"];
+      } else if (doc.containsKey("virtualMultimeter")) {
+        channelsVariant = doc["virtualMultimeter"];
+      } else {
+        channelsVariant = doc.as<JsonVariantConst>();
+      }
+      VirtualMultimeterConfig newConfig;
+      clearVirtualMultimeterConfig(newConfig);
+      bool parsedChannels = false;
+      if (!channelsVariant.isNull()) {
+        JsonArrayConst arr = channelsVariant.as<JsonArrayConst>();
+        if (!arr.isNull()) {
+          parseMeterChannelArray(arr, newConfig);
+          parsedChannels = true;
+        } else {
+          JsonObjectConst obj = channelsVariant.as<JsonObjectConst>();
+          if (!obj.isNull()) {
+            parseMeterChannelObject(obj, newConfig);
+            parsedChannels = true;
+          }
+        }
+      } else {
+        parsedChannels = true;
+      }
+      if (!parsedChannels) {
+        srv->send(400, "application/json",
+                  R"({"error":"invalid_channels"})");
+        return;
+      }
+      Config previousConfig = config;
+      config.virtualMultimeter = newConfig;
       if (!saveVirtualConfig()) {
-        logMessage(
-            "Failed to restore virtual configuration after verification failure");
+        config.virtualMultimeter = previousConfig.virtualMultimeter;
+        srv->send(500, "application/json",
+                  R"({"error":"save_failed"})");
+        return;
       }
-      DynamicJsonDocument errDoc(256);
-      errDoc["error"] = "verify_failed";
-      if (verifyError.length() > 0) {
-        errDoc["detail"] = verifyError;
+      String verifyError;
+      if (!verifyConfigStored(config, VIRTUAL_CONFIG_FILE_PATH,
+                              CONFIG_SECTION_VIRTUAL, verifyError)) {
+        logPrintf("Virtual multimeter verification failed: %s",
+                  verifyError.c_str());
+        config.virtualMultimeter = previousConfig.virtualMultimeter;
+        if (!saveVirtualConfig()) {
+          logMessage(
+              "Failed to restore virtual configuration after verification failure");
+        }
+        DynamicJsonDocument errDoc(256);
+        errDoc["error"] = "verify_failed";
+        if (verifyError.length() > 0) {
+          errDoc["detail"] = verifyError;
+        }
+        String errPayload;
+        serializeJson(errDoc, errPayload);
+        srv->send(500, "application/json", errPayload);
+        return;
       }
-      String errPayload;
-      serializeJson(errDoc, errPayload);
-      srv->send(500, "application/json", errPayload);
+      logPrintf("Virtual multimeter configuration updated (%u channels)",
+                static_cast<unsigned>(config.virtualMultimeter.channelCount));
+      DynamicJsonDocument resp(1024);
+      resp["status"] = "ok";
+      JsonObject applied = resp.createNestedObject("applied");
+      populateVirtualMultimeterJson(applied, config.virtualMultimeter);
+      String payload;
+      serializeJson(resp, payload);
+      srv->send(200, "application/json", payload);
       return;
     }
-    logPrintf("Virtual multimeter configuration updated (%u channels)",
-              static_cast<unsigned>(config.virtualMultimeter.channelCount));
-    DynamicJsonDocument resp(1024);
-    resp["status"] = "ok";
-    JsonObject applied = resp.createNestedObject("applied");
-    populateVirtualMultimeterJson(applied, config.virtualMultimeter);
-    String payload;
-    serializeJson(resp, payload);
-    srv->send(200, "application/json", payload);
   });
 
   server.on("/api/reboot", HTTP_POST, [&server]() {
