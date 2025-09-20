@@ -13,27 +13,18 @@
     {
       "name": "Tension_DC",
       "type": "div",
-      "unit": "V",
-      "scale": 0.001,
-      "offset": 0,
       "active": true,
       "pin": "A0"
     },
     {
       "name": "Courant_AC",
       "type": "zmct",
-      "unit": "A",
-      "scale": 0.05,
-      "offset": 0,
       "active": true,
       "pin": "ADC1"
     },
     {
       "name": "Tension_Distante",
       "type": "remote",
-      "unit": "V",
-      "scale": 1,
-      "offset": 0,
       "active": true,
       "remote": "nodeB/U_rms"
     }

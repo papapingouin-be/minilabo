@@ -149,18 +149,6 @@
       <div class="modal-form-row" id="modalActiveRow">
         <label class="toggle"><input type="checkbox" id="modalActive"> Activer cette voie</label>
       </div>
-      <div class="modal-form-row" id="modalScaleRow">
-        <label for="modalScale">Échelle</label>
-        <input type="number" step="any" id="modalScale">
-      </div>
-      <div class="modal-form-row" id="modalOffsetRow">
-        <label for="modalOffset">Décalage</label>
-        <input type="number" step="any" id="modalOffset">
-      </div>
-      <div class="modal-form-row" id="modalUnitRow">
-        <label for="modalUnit">Unité</label>
-        <input type="text" id="modalUnit">
-      </div>
       <div id="modalTypeFields"></div>
       <div class="modal-actions">
         <button type="button" class="secondary" id="modalCancel">Annuler</button>
@@ -214,8 +202,7 @@ const INPUT_TYPE_DETAILS = {
     physicalRange: '≈ 0 à 1,0 V sur A0 (atténuation intégrée).',
     rawTagSuffix: '_bits',
     notes: [
-      'Appliquez une échelle (ex. 0,001) pour convertir les bits en volts réels.',
-      'Le décalage compense un éventuel zéro non nul.'
+      'La valeur publiée correspond directement au code brut de l’ADC (0 à 1023).'
     ]
   },
   ads1115: {
@@ -226,7 +213,7 @@ const INPUT_TYPE_DETAILS = {
     physicalRange: '0 à 4,096 V pour le gain par défaut.',
     rawTagSuffix: '_bits',
     notes: [
-      'Chaque code représente environ 125 µV. Ajustez l’échelle pour exprimer la tension en volts.',
+      'Chaque code représente environ 125 µV avec le gain ×1.',
       'Assurez-vous d’avoir activé le module ADS1115 dans la configuration.'
     ]
   },
@@ -247,7 +234,7 @@ const INPUT_TYPE_DETAILS = {
     rawTagSuffix: '_bits',
     notes: [
       'La valeur brute correspond à l’écart autour de 512 (centre de l’ADC).',
-      'Calibrez l’échelle pour exprimer la tension efficace en volts.'
+      'Convertissez la valeur RMS en unités physiques dans vos scripts si nécessaire.'
     ]
   },
   zmct: {
@@ -258,8 +245,8 @@ const INPUT_TYPE_DETAILS = {
     physicalRange: 'Plage proportionnelle au courant AC selon la calibration du capteur.',
     rawTagSuffix: '_bits',
     notes: [
-      'Déterminez l’échelle à partir de la sensibilité du capteur (A/bit).',
-      'Un décalage positif peut compenser la dérive du zéro.'
+      'Utilisez la sensibilité du capteur pour convertir les codes RMS en ampères.',
+      'Un traitement logiciel supplémentaire peut compenser d’éventuels offsets.'
     ]
   },
   div: {
@@ -270,8 +257,8 @@ const INPUT_TYPE_DETAILS = {
     physicalRange: '≈ 0 à 1,0 V en entrée A0 avant application du rapport du pont.',
     rawTagSuffix: '_bits',
     notes: [
-      'Ajustez l’échelle selon le rapport du pont pour retrouver la tension réelle.',
-      'Le décalage corrige l’offset éventuel dû aux résistances.'
+      'Recalculez la tension réelle en appliquant le rapport du pont côté client.',
+      'Un traitement logiciel permet de corriger un éventuel offset.'
     ]
   },
   disabled: {
@@ -291,7 +278,7 @@ const OUTPUT_TYPE_DETAILS = {
     rawRange: '0 à 1023 (pour le rapport cyclique PWM).',
     physicalRange: '≈ 0 à 10 V après conversion.',
     notes: [
-      'Envoyez la consigne en volts ; l’échelle et le décalage adaptent la conversion en PWM.',
+      'La consigne attend une valeur comprise entre 0 et 1023 pour représenter le rapport cyclique.',
       'Ajustez la fréquence PWM en fonction des besoins de votre module 0–10 V.'
     ]
   },
@@ -312,7 +299,7 @@ const OUTPUT_TYPE_DETAILS = {
     rawRange: '0 à 4095 codes DAC.',
     physicalRange: '0 à VCC du module (souvent 5 V).',
     notes: [
-      'L’échelle traduit vos unités physiques en codes DAC (ex. 819 pour ≈1 V à 5 V).',
+      'La consigne doit être exprimée en codes DAC (0 à 4095).',
       'Vérifiez l’adresse I²C (0x60 ou 0x61) selon le cavalier matériel.'
     ]
   },
@@ -679,12 +666,7 @@ function ensureTypeAvailability(kind) {
     logIoStep(`Type ${item.type} indisponible pour ${kind === 'input' ? 'entrée' : 'sortie'} ${previousName || (kind === 'input' ? `IN${idx + 1}` : `OUT${idx + 1}`)} — passage en mode désactivé.`);
     const replacement = kind === 'input' ? newInputConfig('disabled') : newOutputConfig('disabled');
     replacement.name = previousName;
-    replacement.scale = item.scale;
-    replacement.offset = item.offset;
     replacement.active = false;
-    if (kind === 'input') {
-      replacement.unit = item.unit || '';
-    }
     source[idx] = replacement;
     const snapshot = kind === 'input' ? snapshotInput(replacement, idx) : snapshotOutput(replacement, idx);
     recordPendingSnapshot(kind, snapshot, previousName && previousName !== snapshot.name ? previousName : undefined);
@@ -723,10 +705,7 @@ function snapshotInput(item, idx) {
   const snapshot = {
     name,
     type: item.type || 'disabled',
-    active: !!item.active,
-    scale: Number.isFinite(item.scale) ? item.scale : 1,
-    offset: Number.isFinite(item.offset) ? item.offset : 0,
-    unit: item.unit || ''
+    active: !!item.active
   };
   if (['adc', 'div', 'zmpt', 'zmct'].includes(snapshot.type)) {
     snapshot.pin = item.pin || '';
@@ -747,9 +726,7 @@ function snapshotOutput(item, idx) {
   const snapshot = {
     name,
     type: item.type || 'disabled',
-    active: !!item.active,
-    scale: Number.isFinite(item.scale) ? item.scale : 1,
-    offset: Number.isFinite(item.offset) ? item.offset : 0
+    active: !!item.active
   };
   if (['pwm010', 'gpio'].includes(snapshot.type)) {
     snapshot.pin = item.pin || '';
@@ -874,10 +851,7 @@ function newInputConfig(type) {
     pin: '',
     adsChannel: 0,
     remoteNode: '',
-    remoteName: '',
-    scale: 1,
-    offset: 0,
-    unit: ''
+    remoteName: ''
   };
   if (ANALOG_TYPES.has(cfg.type)) {
     cfg.pin = 'A0';
@@ -899,9 +873,7 @@ function newOutputConfig(type) {
     active: true,
     pin: '',
     pwmFreq: 2000,
-    i2cAddress: '0x60',
-    scale: 1,
-    offset: 0
+    i2cAddress: '0x60'
   };
   if (cfg.type === 'pwm010') {
     cfg.pin = 'D2';
@@ -938,9 +910,6 @@ function normaliseInput(data) {
   base.adsChannel = Number.isFinite(channel) ? channel : base.adsChannel;
   base.remoteNode = data.remoteNode || '';
   base.remoteName = data.remoteName || '';
-  base.scale = toNumber(data.scale, 1);
-  base.offset = toNumber(data.offset, 0);
-  base.unit = data.unit || '';
   return base;
 }
 
@@ -956,8 +925,6 @@ function normaliseOutput(data) {
   base.pin = data.pin || base.pin;
   base.pwmFreq = Math.max(1, Math.round(toNumber(data.pwmFreq, base.pwmFreq)));
   base.i2cAddress = data.i2cAddress || base.i2cAddress;
-  base.scale = toNumber(data.scale, 1);
-  base.offset = toNumber(data.offset, 0);
   return base;
 }
 
@@ -984,15 +951,6 @@ function describeInput(item, index) {
     if (item.remoteNode) details.push(`Nœud distant : ${item.remoteNode}`);
     if (item.remoteName) details.push(`Nom distant : ${item.remoteName}`);
   }
-  if (item && Number.isFinite(item.scale)) {
-    details.push(`Échelle appliquée : ${item.scale}`);
-  }
-  if (item && Number.isFinite(item.offset)) {
-    details.push(`Décalage appliqué : ${item.offset}`);
-  }
-  if (item && item.unit) {
-    details.push(`Unité de restitution : ${item.unit}`);
-  }
   return details;
 }
 
@@ -1010,12 +968,6 @@ function describeOutput(item, index) {
   }
   if (item && item.type === 'mcp4725') {
     details.push(`Adresse I²C : ${item.i2cAddress}`);
-  }
-  if (item && Number.isFinite(item.scale)) {
-    details.push(`Échelle appliquée : ${item.scale}`);
-  }
-  if (item && Number.isFinite(item.offset)) {
-    details.push(`Décalage appliqué : ${item.offset}`);
   }
   return details;
 }
@@ -1161,11 +1113,6 @@ function applyTypeChange(kind, newType) {
   const defaults = kind === 'input' ? newInputConfig(newType) : newOutputConfig(newType);
   defaults.name = old.name;
   defaults.active = old.active;
-  if ('scale' in old) defaults.scale = old.scale;
-  if ('offset' in old) defaults.offset = old.offset;
-  if (kind === 'input') {
-    defaults.unit = old.unit;
-  }
   logIoStep(`Changement de type ${kind === 'input' ? 'entrée' : 'sortie'}: ${old.type} → ${newType}`);
   modalState.data = defaults;
 }
@@ -1356,20 +1303,14 @@ function renderModalForm() {
   const nameInput = document.getElementById('modalName');
   const typeSelect = document.getElementById('modalType');
   const activeRow = document.getElementById('modalActiveRow');
-  const scaleRow = document.getElementById('modalScaleRow');
-  const offsetRow = document.getElementById('modalOffsetRow');
   const activeCheckbox = document.getElementById('modalActive');
-  const scaleInput = document.getElementById('modalScale');
-  const offsetInput = document.getElementById('modalOffset');
-  const unitRow = document.getElementById('modalUnitRow');
-  const unitInput = document.getElementById('modalUnit');
-  if (!title || !description || !nameInput || !typeSelect || !activeRow || !scaleRow || !offsetRow || !activeCheckbox || !scaleInput || !offsetInput || !unitRow || !unitInput) {
+  if (!title || !description || !nameInput || !typeSelect || !activeRow || !activeCheckbox) {
     return;
   }
   title.textContent = index != null ? (kind === 'input' ? 'Modifier une entrée' : 'Modifier une sortie')
                                    : (kind === 'input' ? 'Ajouter une entrée' : 'Ajouter une sortie');
   description.textContent = kind === 'input'
-    ? "Choisissez le type de mesure et ajustez l'échelle pour correspondre à vos capteurs."
+    ? "Choisissez le type de mesure adapté à votre capteur."
     : "Sélectionnez le type de sortie et configurez les paramètres électriques adaptés à l'actionneur.";
   nameInput.value = data.name || '';
   nameInput.oninput = (ev) => {
@@ -1403,7 +1344,6 @@ function renderModalForm() {
     data.type = options[0].value;
   }
   typeSelect.value = data.type;
-  typeSelect.disabled = isNewInput;
   typeSelect.onchange = (ev) => {
     applyTypeChange(kind, ev.target.value);
     renderModalForm();
@@ -1412,41 +1352,15 @@ function renderModalForm() {
   activeCheckbox.onchange = (ev) => {
     modalState.data.active = ev.target.checked;
   };
-  scaleInput.value = data.scale != null ? data.scale : 1;
-  scaleInput.oninput = (ev) => {
-    const value = parseFloat(ev.target.value);
-    modalState.data.scale = Number.isFinite(value) ? value : 1;
-  };
-  offsetInput.value = data.offset != null ? data.offset : 0;
-  offsetInput.oninput = (ev) => {
-    const value = parseFloat(ev.target.value);
-    modalState.data.offset = Number.isFinite(value) ? value : 0;
-  };
   if (kind === 'input') {
     if (isNewInput) {
       activeRow.classList.add('hidden');
-      scaleRow.classList.add('hidden');
-      offsetRow.classList.add('hidden');
-      unitRow.classList.add('hidden');
       modalState.data.active = true;
-      modalState.data.scale = 1;
-      modalState.data.offset = 0;
-      modalState.data.unit = '';
     } else {
       activeRow.classList.remove('hidden');
-      scaleRow.classList.remove('hidden');
-      offsetRow.classList.remove('hidden');
-      unitRow.classList.remove('hidden');
-      unitInput.value = data.unit || '';
-      unitInput.oninput = (ev) => {
-        modalState.data.unit = ev.target.value;
-      };
     }
   } else {
     activeRow.classList.remove('hidden');
-    scaleRow.classList.remove('hidden');
-    offsetRow.classList.remove('hidden');
-    unitRow.classList.add('hidden');
   }
   renderTypeSpecificFields(modalState.data, kind);
   renderModalInfoPanel(kind, modalState.data, index);
@@ -1639,9 +1553,6 @@ async function saveConfig() {
       const obj = {
         name: item.name || `IN${idx + 1}`,
         type: item.type,
-        scale: Number.isFinite(item.scale) ? item.scale : 1,
-        offset: Number.isFinite(item.offset) ? item.offset : 0,
-        unit: item.unit || '',
         active: !!item.active
       };
       if (['adc','div','zmpt','zmct'].includes(item.type)) {
@@ -1661,8 +1572,6 @@ async function saveConfig() {
       const obj = {
         name: item.name || `OUT${idx + 1}`,
         type: item.type,
-        scale: Number.isFinite(item.scale) ? item.scale : 1,
-        offset: Number.isFinite(item.offset) ? item.offset : 0,
         active: !!item.active
       };
       if (['pwm010','gpio'].includes(item.type)) {
