@@ -145,14 +145,14 @@
         <label for="modalType">Type</label>
         <select id="modalType"></select>
       </div>
-      <div class="modal-form-row">
+      <div class="modal-form-row" id="modalActiveRow">
         <label class="toggle"><input type="checkbox" id="modalActive"> Activer cette voie</label>
       </div>
-      <div class="modal-form-row">
+      <div class="modal-form-row" id="modalScaleRow">
         <label for="modalScale">Échelle</label>
         <input type="number" step="any" id="modalScale">
       </div>
-      <div class="modal-form-row">
+      <div class="modal-form-row" id="modalOffsetRow">
         <label for="modalOffset">Décalage</label>
         <input type="number" step="any" id="modalOffset">
       </div>
@@ -650,7 +650,7 @@ function availablePinsForInput(data, index) {
   if (!ANALOG_TYPES.has(data.type)) {
     return [];
   }
-  const basePins = Array.from(new Set([...ANALOG_PINS, ...DIGITAL_PINS]));
+  const basePins = Array.from(new Set([...ANALOG_PINS]));
   const used = gatherUsedPins('input', ANALOG_TYPES, index);
   return basePins.filter(pin => !used.has(pin) || data.pin === pin);
 }
@@ -1174,7 +1174,7 @@ function renderTypeSpecificFields(data, kind) {
       const row = document.createElement('div');
       row.className = 'modal-form-row';
       const label = document.createElement('label');
-      label.textContent = 'Entrée analogique';
+      label.textContent = 'PIN';
       const select = document.createElement('select');
       const availablePins = availablePinsForInput(data, modalState ? modalState.index : -1);
       if (!data.pin || !availablePins.includes(data.pin)) {
@@ -1350,12 +1350,15 @@ function renderModalForm() {
   const description = document.getElementById('modalDescription');
   const nameInput = document.getElementById('modalName');
   const typeSelect = document.getElementById('modalType');
+  const activeRow = document.getElementById('modalActiveRow');
+  const scaleRow = document.getElementById('modalScaleRow');
+  const offsetRow = document.getElementById('modalOffsetRow');
   const activeCheckbox = document.getElementById('modalActive');
   const scaleInput = document.getElementById('modalScale');
   const offsetInput = document.getElementById('modalOffset');
   const unitRow = document.getElementById('modalUnitRow');
   const unitInput = document.getElementById('modalUnit');
-  if (!title || !description || !nameInput || !typeSelect || !activeCheckbox || !scaleInput || !offsetInput || !unitRow || !unitInput) {
+  if (!title || !description || !nameInput || !typeSelect || !activeRow || !scaleRow || !offsetRow || !activeCheckbox || !scaleInput || !offsetInput || !unitRow || !unitInput) {
     return;
   }
   title.textContent = index != null ? (kind === 'input' ? 'Modifier une entrée' : 'Modifier une sortie')
@@ -1370,6 +1373,13 @@ function renderModalForm() {
   };
   typeSelect.innerHTML = '';
   let options = typeOptionsForKind(kind);
+  const isNewInput = kind === 'input' && index == null;
+  if (isNewInput) {
+    options = options.filter(opt => opt.value === 'adc');
+    if (data.type !== 'adc') {
+      data.type = 'adc';
+    }
+  }
   if (!options.length) {
     options = [{ value: 'disabled', label: 'Désactivée' }];
   }
@@ -1388,6 +1398,7 @@ function renderModalForm() {
     data.type = options[0].value;
   }
   typeSelect.value = data.type;
+  typeSelect.disabled = isNewInput;
   typeSelect.onchange = (ev) => {
     applyTypeChange(kind, ev.target.value);
     renderModalForm();
@@ -1407,12 +1418,29 @@ function renderModalForm() {
     modalState.data.offset = Number.isFinite(value) ? value : 0;
   };
   if (kind === 'input') {
-    unitRow.classList.remove('hidden');
-    unitInput.value = data.unit || '';
-    unitInput.oninput = (ev) => {
-      modalState.data.unit = ev.target.value;
-    };
+    if (isNewInput) {
+      activeRow.classList.add('hidden');
+      scaleRow.classList.add('hidden');
+      offsetRow.classList.add('hidden');
+      unitRow.classList.add('hidden');
+      modalState.data.active = true;
+      modalState.data.scale = 1;
+      modalState.data.offset = 0;
+      modalState.data.unit = '';
+    } else {
+      activeRow.classList.remove('hidden');
+      scaleRow.classList.remove('hidden');
+      offsetRow.classList.remove('hidden');
+      unitRow.classList.remove('hidden');
+      unitInput.value = data.unit || '';
+      unitInput.oninput = (ev) => {
+        modalState.data.unit = ev.target.value;
+      };
+    }
   } else {
+    activeRow.classList.remove('hidden');
+    scaleRow.classList.remove('hidden');
+    offsetRow.classList.remove('hidden');
     unitRow.classList.add('hidden');
   }
   renderTypeSpecificFields(modalState.data, kind);

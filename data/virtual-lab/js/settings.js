@@ -1,167 +1,31 @@
 const MAX_METER_CHANNELS = 6;
 
-const MEASUREMENT_OPTIONS = [
-  { id: 'voltage', label: 'Tension (U)' },
-  { id: 'resistance', label: 'Résistance (R)' },
-  { id: 'current', label: 'Courant (I)' },
-  { id: 'frequency', label: 'Fréquence (f)' },
-  { id: 'capacitance', label: 'Capacité (C)' },
-  { id: 'inductance', label: 'Inductance (L)' },
+const DEFAULT_FORMULA = 'return raw * scale + offset;';
+
+const MEASUREMENT_DEFINITIONS = [
+  { id: 'voltageDC', label: 'Tension U (DC)', measurement: 'voltage', acMode: 'dc', defaultEnabled: true, defaultFormula: DEFAULT_FORMULA },
+  { id: 'voltageAC', label: 'Tension U (AC)', measurement: 'voltage', acMode: 'ac', defaultEnabled: false, defaultFormula: DEFAULT_FORMULA },
+  { id: 'frequency', label: 'Fréquence f', measurement: 'frequency', acMode: null, defaultEnabled: false, defaultFormula: 'return raw;' },
+  { id: 'current', label: 'Courant I', measurement: 'current', acMode: null, defaultEnabled: false, defaultFormula: DEFAULT_FORMULA },
+  { id: 'resistance', label: 'Résistance R', measurement: 'resistance', acMode: null, defaultEnabled: false, defaultFormula: DEFAULT_FORMULA },
+  { id: 'capacitance', label: 'Capacité C', measurement: 'capacitance', acMode: null, defaultEnabled: false, defaultFormula: DEFAULT_FORMULA },
+  { id: 'inductance', label: 'Inductance L', measurement: 'inductance', acMode: null, defaultEnabled: false, defaultFormula: DEFAULT_FORMULA },
 ];
 
-const DISPLAY_OPTIONS = [
-  { id: 'digital', label: 'Affichage numérique' },
-  { id: 'binary', label: 'Code binaire' },
-  { id: 'gauge', label: 'Cadran analogique' },
-];
-
-const MEASUREMENT_IDS = new Set(MEASUREMENT_OPTIONS.map((option) => option.id));
-const DISPLAY_IDS = new Set(DISPLAY_OPTIONS.map((option) => option.id));
+const MEASUREMENT_IDS = new Set(MEASUREMENT_DEFINITIONS.map((definition) => definition.id));
+const MEASUREMENT_DEFINITION_BY_ID = new Map(MEASUREMENT_DEFINITIONS.map((definition) => [definition.id, definition]));
+const MEASUREMENT_GROUPS = MEASUREMENT_DEFINITIONS.reduce((groups, definition) => {
+  if (!groups[definition.measurement]) {
+    groups[definition.measurement] = [];
+  }
+  groups[definition.measurement].push(definition);
+  return groups;
+}, {});
 
 const state = {
   channels: [],
   inputs: [],
 };
-
-function getInputInfoByName(name) {
-  if (!name) {
-    return null;
-  }
-  return state.inputs.find((item) => item.name === name) || null;
-}
-
-function isEsp8266AdcInput(inputInfo) {
-  if (!inputInfo) {
-    return false;
-  }
-  const pin = normaliseString(inputInfo.pin).toUpperCase();
-  const type = normaliseString(inputInfo.type).toLowerCase();
-  return pin === 'A0' || type === 'adc' || type === 'analog';
-}
-
-function buildEsp8266AdcScript() {
-  return `// Conversion complète depuis la broche A0 de l'ESP8266 (ADC interne 10 bits, 0-1 V).
-const {
-  raw = 0,
-  scale = 1,
-  offset = 0,
-  history = [],
-  timestamp = Date.now(),
-  measurement = 'voltage',
-  acMode = 'dc',
-} = context;
-
-const ADC_RESOLUTION = 1023;
-const ADC_VREF = 1.0; // Tension pleine échelle sur A0.
-
-// Tension instantanée issue de l'échantillon brut.
-const tensionInstantanee = (raw / ADC_RESOLUTION) * ADC_VREF;
-
-// Fenêtre d'échantillonnage en volts pour calculer moyenne, RMS et crêtes.
-const fenetre = [];
-for (let i = 0; i < history.length; i += 1) {
-  const point = history[i];
-  if (point && Number.isFinite(point.raw)) {
-    fenetre.push((point.raw / ADC_RESOLUTION) * ADC_VREF);
-  }
-}
-fenetre.push(tensionInstantanee);
-
-const tailleFenetre = fenetre.length || 1;
-const tensionMoyenne = fenetre.reduce((acc, valeur) => acc + valeur, 0) / tailleFenetre;
-const tensionRms = Math.sqrt(fenetre.reduce((acc, valeur) => acc + valeur * valeur, 0) / tailleFenetre);
-const creteMax = fenetre.reduce((acc, valeur) => (valeur > acc ? valeur : acc), fenetre[0]);
-const creteMin = fenetre.reduce((acc, valeur) => (valeur < acc ? valeur : acc), fenetre[0]);
-const amplitudeCreteAC = creteMax - creteMin;
-
-// Application de l'échelle/décalage configurés sur le canal.
-const mesureCalibree = tensionInstantanee * scale + offset;
-
-// Mode de mesure sélectionné sur le multimètre (tension, courant, etc.).
-const mode = typeof measurement === 'string' && measurement.length ? measurement : 'voltage';
-
-// Estimation de fréquence par passages par zéro sur la fenêtre d'échantillonnage.
-const marqueursTemps = [];
-for (let i = 0; i < history.length; i += 1) {
-  const point = history[i];
-  if (point && Number.isFinite(point.timestamp)) {
-    marqueursTemps.push(point.timestamp);
-  }
-}
-marqueursTemps.push(timestamp);
-let passages = 0;
-for (let i = 1; i < fenetre.length; i += 1) {
-  const precedent = fenetre[i - 1] - tensionMoyenne;
-  const courant = fenetre[i] - tensionMoyenne;
-  if ((precedent <= 0 && courant > 0) || (precedent >= 0 && courant < 0)) {
-    passages += 1;
-  }
-}
-const dureeFenetre = marqueursTemps.length > 1 ? (marqueursTemps[marqueursTemps.length - 1] - marqueursTemps[0]) / 1000 : 0;
-const frequenceEstimee = dureeFenetre > 0 ? (passages / 2) / dureeFenetre : 0;
-
-// Table de conversion pour chaque fonction de mesure disponible.
-const conversions = {
-  voltage: {
-    valeur: mesureCalibree,
-    unite: 'V',
-    symbole: 'U',
-    commentaire: "Tension instantanée calibrée (DC : moyenne, AC : RMS).",
-  },
-  current: {
-    valeur: mesureCalibree,
-    unite: 'A',
-    symbole: 'I',
-    commentaire: "Adapter scale = 1/Rshunt pour I = U/R.",
-  },
-  resistance: {
-    valeur: mesureCalibree,
-    unite: 'Ω',
-    symbole: 'R',
-    commentaire: "Injecter un courant connu et fixer scale = 1/Itest pour R = U/I.",
-  },
-  frequency: {
-    valeur: frequenceEstimee * scale + offset,
-    unite: 'Hz',
-    symbole: 'f',
-    commentaire: "Estimation par comptage des passages par zéro sur l'échantillonnage.",
-  },
-  capacitance: {
-    valeur: mesureCalibree,
-    unite: 'F',
-    symbole: 'C',
-    commentaire: "Utiliser l'échelon scale pour appliquer I = C·dU/dt.",
-  },
-  inductance: {
-    valeur: mesureCalibree,
-    unite: 'H',
-    symbole: 'L',
-    commentaire: "Utiliser l'échelon scale pour appliquer U = L·dI/dt.",
-  },
-};
-
-const mesureActive = conversions[mode] || conversions.voltage;
-
-// Synthèse des grandeurs utiles pour l'analyse (moyenne, RMS, crêtes).
-const synthese = {
-  moyenne: tensionMoyenne,
-  rms: tensionRms,
-  creteMax,
-  creteMin,
-  creteAC: amplitudeCreteAC,
-  acMode,
-};
-
-return {
-  value: mesureActive.valeur,
-  unit: mesureActive.unite,
-  symbol: mesureActive.symbole,
-  decimals: mode === 'voltage' ? 3 : 2,
-  measurementMode: mode,
-  details: synthese,
-  commentaire: mesureActive.commentaire,
-};`;
-}
 
 function normaliseString(value) {
   if (typeof value !== 'string') {
@@ -181,50 +45,126 @@ function normaliseNumber(value, fallback = null) {
   return num;
 }
 
-function getDefaultProcessingScript(profile, inputInfo = null) {
-  if (isEsp8266AdcInput(inputInfo)) {
-    return buildEsp8266AdcScript();
-  }
-  if (profile === 'frequency') {
-    return [
-      "// Estimation simple de la fréquence à partir d'un compteur cumulatif",
-      "// raw : valeur brute, scale : coefficient d'échelle, offset : décalage",
-      "// history : dernières mesures (raw, scaled, value, timestamp)",
-      "// L'objet Math de JavaScript est disponible.",
-      'if (!history.length) {',
-      '  return raw * scale + offset;',
-      '}',
-      'const previous = history[history.length - 1];',
-      'const dt = (timestamp - previous.timestamp) / 1000;',
-      'if (dt <= 0) {',
-      '  return previous.value ?? 0;',
-      '}',
-      'const delta = raw - previous.raw;',
-      'const estimate = Math.abs(delta) / dt;',
-      "// Pour personnaliser l'affichage, retournez un objet { value, unit, symbol }.",
-      '// Retourne une estimation en hertz.',
-      'return Number.isFinite(estimate) && estimate > 0 ? estimate : Math.max(previous.value ?? 0, 0);',
-    ].join('\n');
-  }
-  return [
-    "// raw : valeur brute provenant de l'entrée",
-    "// scale : coefficient multiplicatif • offset : décalage ajouté ensuite",
-    "// Retournez la valeur à afficher.",
-    "// L'objet Math de JavaScript est disponible.",
-    "// Il est aussi possible de retourner un objet { value, unit, symbol } pour ajuster l'affichage.",
-    'return raw * scale + offset;',
-  ].join('\n');
+function createDefaultMeasurements() {
+  const measurements = {};
+  MEASUREMENT_DEFINITIONS.forEach((definition) => {
+    measurements[definition.id] = {
+      enabled: !!definition.defaultEnabled,
+      min: null,
+      max: null,
+      formula: definition.defaultFormula || DEFAULT_FORMULA,
+    };
+  });
+  return measurements;
 }
 
-function clampBits(value) {
-  let bits = normaliseNumber(value, 10);
-  if (!Number.isFinite(bits)) {
-    bits = 10;
+function normaliseMeasurements(source) {
+  const measurements = createDefaultMeasurements();
+  if (!source || typeof source !== 'object') {
+    return measurements;
   }
-  bits = Math.round(bits);
-  if (bits < 1) bits = 1;
-  if (bits > 32) bits = 32;
-  return bits;
+  Object.entries(source).forEach(([key, value]) => {
+    if (!MEASUREMENT_IDS.has(key)) {
+      return;
+    }
+    const target = measurements[key];
+    const definition = MEASUREMENT_DEFINITION_BY_ID.get(key);
+    target.enabled = value && value.enabled === false ? false : true;
+    const min = normaliseNumber(value && (value.min ?? value.rangeMin), null);
+    target.min = Number.isFinite(min) ? min : null;
+    const max = normaliseNumber(value && (value.max ?? value.rangeMax), null);
+    target.max = Number.isFinite(max) ? max : null;
+    const formula = typeof value?.formula === 'string' ? value.formula : '';
+    target.formula = formula.trim().length
+      ? formula
+      : (definition?.defaultFormula || DEFAULT_FORMULA);
+  });
+  return measurements;
+}
+
+function ensureMeasurements(channel) {
+  if (!channel.measurements || typeof channel.measurements !== 'object') {
+    channel.measurements = createDefaultMeasurements();
+  }
+  return channel.measurements;
+}
+
+function updateChannelEnabled(channel) {
+  const measurements = ensureMeasurements(channel);
+  channel.enabled = Object.values(measurements).some((entry) => entry && entry.enabled);
+}
+
+function updateChannelRanges(channel) {
+  const measurements = ensureMeasurements(channel);
+  const dc = measurements.voltageDC;
+  const min = dc && Number.isFinite(dc.min) ? dc.min : null;
+  const max = dc && Number.isFinite(dc.max) ? dc.max : null;
+  channel.rangeMin = min;
+  channel.rangeMax = max;
+}
+
+function wrapFormulaForScript(formula, fallback) {
+  const body = typeof formula === 'string' && formula.trim().length
+    ? formula
+    : fallback;
+  const lines = body.split('\n').map((line) => line.replace(/\s+$/, ''));
+  const wrapped = [
+    '(() => {',
+    ...lines.map((line) => `      ${line}`),
+    '    })()',
+  ];
+  return wrapped.join('\n');
+}
+
+function buildProcessingFromMeasurements(channel) {
+  const measurements = ensureMeasurements(channel);
+  const lines = [
+    '// Script généré automatiquement à partir des formules configurées pour chaque grandeur.',
+    'const ctx = context || {};',
+    'const raw = Number.isFinite(ctx.raw) ? ctx.raw : 0;',
+    'const scale = Number.isFinite(ctx.scale) ? ctx.scale : 1;',
+    'const offset = Number.isFinite(ctx.offset) ? ctx.offset : 0;',
+    'const history = Array.isArray(ctx.history) ? ctx.history : [];',
+    'const timestamp = ctx.timestamp ?? Date.now();',
+    "const measurement = typeof ctx.measurement === 'string' ? ctx.measurement : 'voltage';",
+    "const acMode = ctx.acMode === 'ac' ? 'ac' : 'dc';",
+    '',
+    'switch (measurement) {',
+  ];
+
+  Object.entries(MEASUREMENT_GROUPS).forEach(([measurementKey, definitions]) => {
+    lines.push(`  case '${measurementKey}': {`);
+    definitions.forEach((definition) => {
+      const entry = measurements[definition.id];
+      if (!entry || !entry.enabled) {
+        return;
+      }
+      const fallbackFormula = definition.defaultFormula || DEFAULT_FORMULA;
+      const script = wrapFormulaForScript(entry.formula, fallbackFormula);
+      if (definition.acMode === 'ac') {
+        lines.push("    if (acMode === 'ac') {");
+        lines.push(`      return ${script};`);
+        lines.push('    }');
+      } else if (definition.acMode === 'dc') {
+        lines.push("    if (acMode !== 'ac') {");
+        lines.push(`      return ${script};`);
+        lines.push('    }');
+      } else {
+        lines.push(`    return ${script};`);
+      }
+    });
+    lines.push('    return null;');
+    lines.push('  }');
+  });
+
+  lines.push('  default:');
+  lines.push('    return null;');
+  lines.push('}');
+  return lines.join('
+}
+
+function updateChannelProcessing(channel) {
+  channel.processing = buildProcessingFromMeasurements(channel);
 }
 
 function normaliseChannel(entry, index) {
@@ -234,45 +174,36 @@ function normaliseChannel(entry, index) {
   const input = normaliseString(entry && entry.input);
   const unit = normaliseString(entry && entry.unit);
   const symbol = normaliseString(entry && entry.symbol);
-  const enabled = entry && entry.enabled === false ? false : true;
   const scale = normaliseNumber(entry && entry.scale, 1);
   const offset = normaliseNumber(entry && entry.offset, 0);
-  const rangeMin = entry && Object.prototype.hasOwnProperty.call(entry, 'rangeMin')
-    ? normaliseNumber(entry.rangeMin, null)
-    : null;
-  const rangeMax = entry && Object.prototype.hasOwnProperty.call(entry, 'rangeMax')
-    ? normaliseNumber(entry.rangeMax, null)
-    : null;
-  const bits = clampBits(entry && entry.bits);
-  let profile = normaliseString(entry && entry.profile);
-  if (!MEASUREMENT_IDS.has(profile)) {
-    profile = 'voltage';
-  }
-  let displayMode = normaliseString(entry && entry.displayMode);
-  if (!DISPLAY_IDS.has(displayMode)) {
-    displayMode = 'digital';
-  }
+  const bits = normaliseNumber(entry && entry.bits, 10);
+  const profile = normaliseString(entry && entry.profile) || 'voltage';
+  const displayMode = normaliseString(entry && entry.displayMode) || 'digital';
   const calibre = normaliseString(entry && entry.calibre);
-  const processing = typeof entry?.processing === 'string' ? entry.processing : '';
-  return {
+  const measurements = normaliseMeasurements(entry && entry.measurements);
+  const channel = {
     id,
     name,
     label,
     input,
     unit,
     symbol,
-    enabled,
-    scale,
-    offset,
-    rangeMin,
-    rangeMax,
-    bits,
+    enabled: entry && entry.enabled === false ? false : true,
+    scale: Number.isFinite(scale) ? scale : 1,
+    offset: Number.isFinite(offset) ? offset : 0,
+    rangeMin: null,
+    rangeMax: null,
+    bits: Number.isFinite(bits) ? Math.min(32, Math.max(1, Math.round(bits))) : 10,
     profile,
     displayMode,
     calibre,
-    processing,
-    _lastTemplate: null,
+    processing: typeof entry?.processing === 'string' ? entry.processing : '',
+    measurements,
   };
+  updateChannelRanges(channel);
+  updateChannelEnabled(channel);
+  updateChannelProcessing(channel);
+  return channel;
 }
 
 function nextDefaultId() {
@@ -290,9 +221,8 @@ function nextDefaultId() {
 function createDefaultChannel() {
   const id = nextDefaultId();
   const baseInput = state.inputs.find((item) => item.active) || state.inputs[0];
-  const profile = 'voltage';
-  const processing = getDefaultProcessingScript(profile, baseInput);
-  return {
+  const measurements = createDefaultMeasurements();
+  const channel = {
     id,
     name: id,
     label: `Canal ${state.channels.length + 1}`,
@@ -305,12 +235,16 @@ function createDefaultChannel() {
     rangeMin: null,
     rangeMax: null,
     bits: 10,
-    profile,
+    profile: 'voltage',
     displayMode: 'digital',
     calibre: '',
-    processing,
-    _lastTemplate: processing,
+    processing: '',
+    measurements,
   };
+  updateChannelRanges(channel);
+  updateChannelEnabled(channel);
+  updateChannelProcessing(channel);
+  return channel;
 }
 
 function updateCounter() {
@@ -336,13 +270,14 @@ function setStatus(message, type = '') {
   }
 }
 
-function handleInputSelection(select, channel, refreshSummary, onInputChanged) {
+function handleInputSelection(select, channel, refreshSummary) {
   select.innerHTML = '';
+  const activeInputs = state.inputs.filter((item) => item.active);
   const placeholder = document.createElement('option');
   placeholder.value = '';
-  placeholder.textContent = '— Aucune entrée —';
+  placeholder.textContent = activeInputs.length ? '— Aucune entrée —' : 'Aucune entrée active';
   select.appendChild(placeholder);
-  state.inputs.forEach((item) => {
+  activeInputs.forEach((item) => {
     const opt = document.createElement('option');
     opt.value = item.name;
     const unit = item.unit ? ` (${item.unit})` : '';
@@ -350,11 +285,11 @@ function handleInputSelection(select, channel, refreshSummary, onInputChanged) {
     select.appendChild(opt);
   });
   select.value = channel.input || '';
+  select.disabled = !activeInputs.length;
   select.addEventListener('change', (event) => {
     channel.input = event.target.value.trim();
-    refreshSummary();
-    if (typeof onInputChanged === 'function') {
-      onInputChanged(channel.input);
+    if (refreshSummary) {
+      refreshSummary();
     }
   });
 }
@@ -366,43 +301,6 @@ function createField(labelText, element) {
   label.textContent = labelText;
   wrapper.append(label, element);
   return wrapper;
-}
-
-function createNumberField(label, channel, key, options = {}) {
-  const input = document.createElement('input');
-  input.type = 'number';
-  if (options.step) input.step = options.step;
-  if (options.min !== undefined) input.min = options.min;
-  if (options.max !== undefined) input.max = options.max;
-  if (options.placeholder) input.placeholder = options.placeholder;
-  const value = channel[key];
-  input.value = value === null || value === undefined ? '' : value;
-  input.addEventListener('change', (event) => {
-    const raw = event.target.value.trim();
-    if (raw.length === 0 && options.allowNull) {
-      channel[key] = null;
-      event.target.value = '';
-      return;
-    }
-    const num = Number(raw);
-    if (!Number.isFinite(num)) {
-      if (options.allowNull) {
-        channel[key] = null;
-        event.target.value = '';
-      }
-      return;
-    }
-    let nextValue = num;
-    if (options.clamp) {
-      nextValue = Math.max(options.clamp.min, Math.min(options.clamp.max, nextValue));
-    }
-    if (options.round) {
-      nextValue = Math.round(nextValue);
-    }
-    channel[key] = nextValue;
-    event.target.value = nextValue;
-  });
-  return createField(label, input);
 }
 
 function createTextField(label, channel, key, refreshSummary) {
@@ -418,20 +316,103 @@ function createTextField(label, channel, key, refreshSummary) {
   return createField(label, input);
 }
 
-function createToggle(label, channel, key, refreshSummary) {
-  const wrapper = document.createElement('label');
-  wrapper.className = 'toggle';
-  const checkbox = document.createElement('input');
-  checkbox.type = 'checkbox';
-  checkbox.checked = channel[key] !== false;
-  checkbox.addEventListener('change', (event) => {
-    channel[key] = !!event.target.checked;
+function createMeasurementCard(channel, definition, refreshSummary) {
+  const measurements = ensureMeasurements(channel);
+  const data = measurements[definition.id];
+  const card = document.createElement('div');
+  card.className = 'measurement-card';
+
+  const header = document.createElement('div');
+  header.className = 'measurement-card-header';
+  const title = document.createElement('h3');
+  title.textContent = definition.label;
+  header.appendChild(title);
+
+  const toggleLabel = document.createElement('label');
+  toggleLabel.className = 'measurement-toggle';
+  const toggleInput = document.createElement('input');
+  toggleInput.type = 'checkbox';
+  toggleInput.checked = data.enabled;
+  const toggleText = document.createElement('span');
+  toggleText.textContent = 'Active';
+  toggleLabel.append(toggleInput, toggleText);
+  header.appendChild(toggleLabel);
+  card.appendChild(header);
+
+  const rangeRow = document.createElement('div');
+  rangeRow.className = 'measurement-range';
+  const minLabel = document.createElement('label');
+  minLabel.textContent = 'Valeur min.';
+  const minInput = document.createElement('input');
+  minInput.type = 'number';
+  minInput.step = 'any';
+  minInput.value = Number.isFinite(data.min) ? data.min : '';
+  minInput.placeholder = '—';
+  minInput.disabled = !data.enabled;
+  minInput.addEventListener('change', (event) => {
+    const value = normaliseNumber(event.target.value, null);
+    data.min = Number.isFinite(value) ? value : null;
+    if (definition.id === 'voltageDC') {
+      updateChannelRanges(channel);
+    }
+  });
+  minLabel.appendChild(minInput);
+
+  const maxLabel = document.createElement('label');
+  maxLabel.textContent = 'Valeur max.';
+  const maxInput = document.createElement('input');
+  maxInput.type = 'number';
+  maxInput.step = 'any';
+  maxInput.value = Number.isFinite(data.max) ? data.max : '';
+  maxInput.placeholder = '—';
+  maxInput.disabled = !data.enabled;
+  maxInput.addEventListener('change', (event) => {
+    const value = normaliseNumber(event.target.value, null);
+    data.max = Number.isFinite(value) ? value : null;
+    if (definition.id === 'voltageDC') {
+      updateChannelRanges(channel);
+    }
+  });
+  maxLabel.appendChild(maxInput);
+
+  rangeRow.append(minLabel, maxLabel);
+  card.appendChild(rangeRow);
+
+  const formulaLabel = document.createElement('label');
+  formulaLabel.className = 'measurement-formula-label';
+  formulaLabel.textContent = 'Formule (JavaScript)';
+  const formulaArea = document.createElement('textarea');
+  formulaArea.className = 'measurement-formula';
+  formulaArea.rows = 4;
+  formulaArea.spellcheck = false;
+  formulaArea.autocapitalize = 'off';
+  formulaArea.autocomplete = 'off';
+  formulaArea.autocorrect = 'off';
+  formulaArea.placeholder = definition.defaultFormula || DEFAULT_FORMULA;
+  formulaArea.value = data.formula || '';
+  formulaArea.disabled = !data.enabled;
+  formulaArea.addEventListener('input', (event) => {
+    data.formula = event.target.value;
+    updateChannelProcessing(channel);
+  });
+  card.append(formulaLabel, formulaArea);
+
+  toggleInput.addEventListener('change', (event) => {
+    data.enabled = !!event.target.checked;
+    minInput.disabled = !data.enabled;
+    maxInput.disabled = !data.enabled;
+    formulaArea.disabled = !data.enabled;
+    updateChannelEnabled(channel);
+    updateChannelProcessing(channel);
+    if (definition.id === 'voltageDC') {
+      updateChannelRanges(channel);
+    }
     if (refreshSummary) {
       refreshSummary();
     }
   });
-  wrapper.append(checkbox, document.createTextNode(label));
-  return wrapper;
+
+  return card;
 }
 
 function renderChannels() {
@@ -440,7 +421,9 @@ function renderChannels() {
   const addButton = document.getElementById('addChannelBtn');
   if (!container) return;
   container.innerHTML = '';
+
   state.channels.forEach((channel, index) => {
+    ensureMeasurements(channel);
     const card = document.createElement('div');
     card.className = 'channel-card';
 
@@ -450,10 +433,11 @@ function renderChannels() {
     const refreshSummary = () => {
       const fallback = channel.id || `Canal ${index + 1}`;
       title.textContent = channel.label || channel.name || fallback;
+      const measurements = ensureMeasurements(channel);
+      const activeCount = Object.values(measurements).filter((entry) => entry && entry.enabled).length;
       if (channel.input) {
-        const modeLabel = MEASUREMENT_OPTIONS.find((option) => option.id === (channel.profile || 'voltage'));
-        const measurement = modeLabel ? modeLabel.label : 'Mesure';
-        subtitle.textContent = `${measurement} • Entrée : ${channel.input}`;
+        const measurementText = activeCount === 1 ? '1 grandeur active' : `${activeCount} grandeurs actives`;
+        subtitle.textContent = `${measurementText} • Entrée : ${channel.input}`;
       } else {
         subtitle.textContent = 'Aucune entrée assignée';
       }
@@ -465,201 +449,21 @@ function renderChannels() {
     const firstRow = document.createElement('div');
     firstRow.className = 'field-row';
     firstRow.append(
-      createTextField('Identifiant (JSON)', channel, 'id', refreshSummary),
-      createTextField('Nom interne', channel, 'name', refreshSummary),
+      createTextField('Nom', channel, 'name', refreshSummary),
       createTextField('Libellé affiché', channel, 'label', refreshSummary),
     );
     card.appendChild(firstRow);
 
     const inputSelect = document.createElement('select');
+    handleInputSelection(inputSelect, channel, refreshSummary);
     card.appendChild(createField('Entrée associée', inputSelect));
 
-    const measurementRow = document.createElement('div');
-    measurementRow.className = 'field-row';
-
-    const profileSelect = document.createElement('select');
-    MEASUREMENT_OPTIONS.forEach((option) => {
-      const opt = document.createElement('option');
-      opt.value = option.id;
-      opt.textContent = option.label;
-      profileSelect.appendChild(opt);
+    const measurementsGrid = document.createElement('div');
+    measurementsGrid.className = 'measurement-grid';
+    MEASUREMENT_DEFINITIONS.forEach((definition) => {
+      measurementsGrid.appendChild(createMeasurementCard(channel, definition, refreshSummary));
     });
-    const currentProfile = MEASUREMENT_IDS.has(channel.profile) ? channel.profile : 'voltage';
-    profileSelect.value = currentProfile;
-    channel.profile = currentProfile;
-    measurementRow.appendChild(createField('Mesure par défaut', profileSelect));
-
-    const displaySelect = document.createElement('select');
-    DISPLAY_OPTIONS.forEach((option) => {
-      const opt = document.createElement('option');
-      opt.value = option.id;
-      opt.textContent = option.label;
-      displaySelect.appendChild(opt);
-    });
-    const currentDisplay = DISPLAY_IDS.has(channel.displayMode) ? channel.displayMode : 'digital';
-    displaySelect.value = currentDisplay;
-    channel.displayMode = currentDisplay;
-    measurementRow.appendChild(createField('Affichage préféré', displaySelect));
-
-    const calibreInput = document.createElement('input');
-    calibreInput.type = 'text';
-    calibreInput.placeholder = 'ex. 20V';
-    calibreInput.value = channel.calibre || '';
-    calibreInput.addEventListener('input', (event) => {
-      channel.calibre = event.target.value.trim();
-      if (channel.calibre) {
-        channel.activeCalibre = channel.calibre;
-      }
-    });
-    measurementRow.appendChild(createField('Calibre initial (optionnel)', calibreInput));
-    card.appendChild(measurementRow);
-
-    const scriptArea = document.createElement('textarea');
-    scriptArea.classList.add('code-editor');
-    scriptArea.spellcheck = false;
-    scriptArea.autocapitalize = 'off';
-    scriptArea.autocomplete = 'off';
-    scriptArea.autocorrect = 'off';
-    scriptArea.rows = 14;
-    scriptArea.wrap = 'off';
-    scriptArea.placeholder = 'Variables disponibles : raw, scale, offset, history, timestamp, measurement, acMode…';
-    const scriptId = `${channel.id || `channel-${index + 1}`}-script`;
-    scriptArea.id = scriptId;
-
-    const applyTemplate = (force = false) => {
-      const inputInfo = getInputInfoByName(channel.input);
-      const template = getDefaultProcessingScript(channel.profile, inputInfo);
-      if (
-        force ||
-        !scriptArea.value.trim().length ||
-        (channel._lastTemplate && channel._lastTemplate === scriptArea.value)
-      ) {
-        channel.processing = template;
-        channel._lastTemplate = template;
-        scriptArea.value = template;
-      }
-    };
-
-    if (!channel.processing || !channel.processing.trim().length) {
-      applyTemplate(true);
-    } else {
-      scriptArea.value = channel.processing;
-      const inputInfo = getInputInfoByName(channel.input);
-      const defaultTemplate = getDefaultProcessingScript(channel.profile, inputInfo);
-      if (channel.processing && channel.processing.trim() === defaultTemplate.trim()) {
-        channel._lastTemplate = defaultTemplate;
-      } else {
-        channel._lastTemplate = null;
-      }
-    }
-
-    scriptArea.addEventListener('input', (event) => {
-      channel.processing = event.target.value;
-      if (channel._lastTemplate && event.target.value !== channel._lastTemplate) {
-        channel._lastTemplate = null;
-      }
-    });
-
-    profileSelect.addEventListener('change', (event) => {
-      const value = event.target.value;
-      channel.profile = MEASUREMENT_IDS.has(value) ? value : 'voltage';
-      refreshSummary();
-      applyTemplate(false);
-    });
-
-    displaySelect.addEventListener('change', (event) => {
-      const value = event.target.value;
-      channel.displayMode = DISPLAY_IDS.has(value) ? value : 'digital';
-    });
-
-    handleInputSelection(inputSelect, channel, refreshSummary, () => applyTemplate(false));
-
-    const secondRow = document.createElement('div');
-    secondRow.className = 'field-row';
-    secondRow.append(
-      createTextField('Unité', channel, 'unit'),
-      createTextField('Symbole', channel, 'symbol'),
-    );
-    card.appendChild(secondRow);
-
-    const thirdRow = document.createElement('div');
-    thirdRow.className = 'field-row';
-    thirdRow.append(
-      createNumberField('Échelle', channel, 'scale', { step: 'any' }),
-      createNumberField('Décalage', channel, 'offset', { step: 'any' }),
-    );
-    card.appendChild(thirdRow);
-
-    const scriptField = document.createElement('div');
-    scriptField.className = 'field code-field';
-    const scriptLabel = document.createElement('label');
-    scriptLabel.textContent = 'Logique de mesure (JavaScript)';
-    scriptLabel.setAttribute('for', scriptId);
-    const codeToolbar = document.createElement('div');
-    codeToolbar.className = 'code-toolbar';
-    const helpButton = document.createElement('button');
-    helpButton.type = 'button';
-    helpButton.className = 'code-help-btn';
-    helpButton.textContent = '📘 Aide mesures';
-    helpButton.setAttribute('aria-expanded', 'false');
-    const editorWrapper = document.createElement('div');
-    editorWrapper.className = 'code-editor-wrapper';
-    editorWrapper.appendChild(scriptArea);
-    const helpPanel = document.createElement('div');
-    helpPanel.className = 'code-help-panel';
-    helpPanel.hidden = true;
-    helpPanel.setAttribute('role', 'dialog');
-    helpPanel.setAttribute('aria-label', 'Aide programmation des mesures');
-    helpPanel.tabIndex = -1;
-    helpPanel.innerHTML = `
-      <p><strong>Variables de calcul</strong> – valeurs disponibles pour construire vos formules&nbsp;:</p>
-      <ul>
-        <li><code>raw</code> : lecture brute (0 à 1023 pour A0) fournie par l'échantillonnage.</li>
-        <li><code>scale</code> et <code>offset</code> : réglages du canal pour l'étalonnage.</li>
-        <li><code>history</code> : tableau des derniers points {raw, scaled, value, timestamp} (fenêtre d'échantillonnage).</li>
-        <li><code>timestamp</code> : horodatage en millisecondes du point courant.</li>
-        <li><code>measurement</code> : mode sélectionné (tension, courant, résistance, etc.).</li>
-        <li><code>acMode</code> : lecture en DC ou AC (bouton AC/DC du multimètre).</li>
-        <li><code>Math</code> : fonctions mathématiques JavaScript (sin, sqrt, pow...).</li>
-      </ul>
-      <p>Utilisez ces grandeurs pour calculer une moyenne glissante, une valeur efficace (RMS), des valeurs de crête ou encore le pic à pic à partir de la fenêtre d'échantillonnage.</p>
-      <p>Retournez soit un nombre, soit un objet <code>{ value, unit, symbol, decimals }</code> pour piloter l'affichage du multimètre.</p>
-    `;
-    helpButton.addEventListener('click', () => {
-      const expanded = helpPanel.hidden;
-      helpPanel.hidden = !expanded;
-      helpButton.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-      if (!helpPanel.hidden) {
-        helpPanel.focus();
-      }
-    });
-    codeToolbar.appendChild(helpButton);
-    scriptField.append(scriptLabel, codeToolbar, editorWrapper, helpPanel);
-    card.appendChild(scriptField);
-
-    const fourthRow = document.createElement('div');
-    fourthRow.className = 'field-row';
-    fourthRow.append(
-      createNumberField('Plage min. (optionnelle)', channel, 'rangeMin', { step: 'any', allowNull: true, placeholder: '—' }),
-      createNumberField('Plage max. (optionnelle)', channel, 'rangeMax', { step: 'any', allowNull: true, placeholder: '—' }),
-    );
-    card.appendChild(fourthRow);
-
-    const fifthRow = document.createElement('div');
-    fifthRow.className = 'field-row';
-    fifthRow.append(
-      createNumberField('Résolution (bits)', channel, 'bits', {
-        min: 1,
-        max: 32,
-        clamp: { min: 1, max: 32 },
-        round: true,
-      }),
-    );
-    card.appendChild(fifthRow);
-
-    const toggleWrapper = document.createElement('div');
-    toggleWrapper.appendChild(createToggle('Activer ce canal', channel, 'enabled', refreshSummary));
-    card.appendChild(toggleWrapper);
+    card.appendChild(measurementsGrid);
 
     const actions = document.createElement('div');
     actions.className = 'card-actions';
@@ -696,20 +500,20 @@ function serialiseChannels() {
     const input = normaliseString(channel.input);
     const unit = normaliseString(channel.unit);
     const symbol = normaliseString(channel.symbol);
-    const enabled = channel.enabled !== false;
-    const scale = Number.isFinite(channel.scale) ? channel.scale : 1;
-    const offset = Number.isFinite(channel.offset) ? channel.offset : 0;
-    const rangeMin = channel.rangeMin === null || channel.rangeMin === undefined
-      ? null
-      : Number(channel.rangeMin);
-    const rangeMax = channel.rangeMax === null || channel.rangeMax === undefined
-      ? null
-      : Number(channel.rangeMax);
-    const bits = clampBits(channel.bits);
-    const profile = MEASUREMENT_IDS.has(channel.profile) ? channel.profile : 'voltage';
-    const displayMode = DISPLAY_IDS.has(channel.displayMode) ? channel.displayMode : 'digital';
-    const calibre = normaliseString(channel.calibre);
-    const processing = typeof channel.processing === 'string' ? channel.processing : '';
+    const measurements = normaliseMeasurements(channel.measurements);
+    channel.measurements = measurements;
+    updateChannelRanges(channel);
+    updateChannelEnabled(channel);
+    updateChannelProcessing(channel);
+    const serialisedMeasurements = {};
+    Object.entries(measurements).forEach(([key, value]) => {
+      serialisedMeasurements[key] = {
+        enabled: value.enabled !== false,
+        min: Number.isFinite(value.min) ? value.min : null,
+        max: Number.isFinite(value.max) ? value.max : null,
+        formula: typeof value.formula === 'string' ? value.formula : '',
+      };
+    });
     return {
       id,
       name,
@@ -717,16 +521,17 @@ function serialiseChannels() {
       input,
       unit,
       symbol,
-      enabled,
-      scale,
-      offset,
-      rangeMin,
-      rangeMax,
-      bits,
-      profile,
-      displayMode,
-      calibre,
-      processing,
+      enabled: channel.enabled !== false,
+      scale: Number.isFinite(channel.scale) ? channel.scale : 1,
+      offset: Number.isFinite(channel.offset) ? channel.offset : 0,
+      rangeMin: channel.rangeMin === null ? null : channel.rangeMin,
+      rangeMax: channel.rangeMax === null ? null : channel.rangeMax,
+      bits: Number.isFinite(channel.bits) ? Math.min(32, Math.max(1, Math.round(channel.bits))) : 10,
+      profile: normaliseString(channel.profile) || 'voltage',
+      displayMode: normaliseString(channel.displayMode) || 'digital',
+      calibre: normaliseString(channel.calibre),
+      processing: typeof channel.processing === 'string' ? channel.processing : '',
+      measurements: serialisedMeasurements,
     };
   });
 }
