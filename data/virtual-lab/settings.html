@@ -212,6 +212,83 @@
       resize: vertical;
       font-family: "Roboto Mono", "Fira Code", "Courier New", monospace;
     }
+    .code-field {
+      position: relative;
+    }
+    .code-toolbar {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.6em;
+      align-items: center;
+      margin-top: 0.2em;
+    }
+    .code-help-btn {
+      background: linear-gradient(135deg, rgba(32,126,255,0.88), rgba(60,205,170,0.92));
+      color: #fff;
+      border: none;
+      border-radius: 999px;
+      padding: 0.4em 1.05em;
+      font-size: 0.9em;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 10px 22px rgba(14, 70, 160, 0.28);
+      transition: transform 0.12s ease, box-shadow 0.12s ease;
+    }
+    .code-help-btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 14px 28px rgba(14, 70, 160, 0.38);
+    }
+    .code-help-btn[aria-expanded="true"] {
+      box-shadow: 0 14px 30px rgba(60, 205, 170, 0.38);
+    }
+    .code-editor-wrapper {
+      position: relative;
+    }
+    .code-editor {
+      font-family: 'Fira Code', 'JetBrains Mono', 'SFMono-Regular', 'Roboto Mono', monospace;
+      font-size: 0.88em;
+      line-height: 1.5;
+      min-height: 18em;
+      background: radial-gradient(circle at 20% 20%, rgba(32,126,255,0.18), transparent 60%),
+        linear-gradient(180deg, rgba(6,18,38,0.98), rgba(5,14,26,0.96));
+      color: #e9f4ff;
+      border: 1px solid rgba(45,125,240,0.35);
+      box-shadow: inset 0 0 0 1px rgba(5,40,85,0.5);
+      padding: 0.85em 1em;
+      resize: vertical;
+      white-space: pre;
+    }
+    .code-editor:focus {
+      outline: 2px solid rgba(94, 181, 255, 0.7);
+      outline-offset: 2px;
+    }
+    .code-help-panel {
+      margin-top: 0.7em;
+      padding: 0.95em 1.15em;
+      background: linear-gradient(160deg, rgba(6,18,36,0.97), rgba(9,28,52,0.94));
+      border-radius: 12px;
+      border: 1px solid rgba(60, 180, 255, 0.32);
+      box-shadow: 0 18px 32px rgba(4, 20, 48, 0.45);
+      color: #e5f1ff;
+    }
+    .code-help-panel p {
+      margin: 0 0 0.65em;
+      line-height: 1.5;
+    }
+    .code-help-panel ul {
+      margin: 0 0 0.6em 1.2em;
+      padding: 0;
+    }
+    .code-help-panel li {
+      margin-bottom: 0.3em;
+    }
+    .code-help-panel code {
+      font-family: 'Fira Code', 'JetBrains Mono', monospace;
+      color: #7de8ff;
+      background: rgba(9, 42, 70, 0.65);
+      padding: 0.1em 0.35em;
+      border-radius: 6px;
+    }
     .field-row {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
