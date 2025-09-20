@@ -793,6 +793,11 @@ function resetSnapshotsFromConfig(kind, list) {
   });
 }
 
+function markAllSnapshotsSaved() {
+  resetSnapshotsFromConfig('input', inputs);
+  resetSnapshotsFromConfig('output', outputs);
+}
+
 function applyServerSnapshots(kind, entries) {
   const map = getSnapshotMap(kind);
   map.clear();
@@ -1631,6 +1636,11 @@ async function saveConfig() {
     if (statusEl) {
       statusEl.textContent = 'Fichier enregistré.';
     }
+    markAllSnapshotsSaved();
+    logIoStep('Configuration IO sauvegardée côté serveur', {
+      inputs: inputs.length,
+      outputs: outputs.length
+    });
   } catch (err) {
     console.error(err);
     if (statusEl) {
