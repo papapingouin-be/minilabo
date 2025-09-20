@@ -215,6 +215,20 @@ static const size_t CONFIG_JSON_MIN_CAPACITY = 1024;
 static const size_t CONFIG_JSON_SAFETY_MARGIN = 512;
 static const size_t CONFIG_JSON_MAX_CAPACITY = 28672;
 
+struct ConfigRecordMetadata {
+  uint16_t version;
+  uint16_t sections;
+  uint32_t payloadLength;
+  uint32_t checksum;
+};
+
+static uint32_t crc32ForBuffer(const uint8_t *data, size_t length);
+static bool tryDecodeConfigRecord(const uint8_t *data,
+                                  size_t length,
+                                  ConfigRecordMetadata &meta,
+                                  const char *label,
+                                  bool &isRecord);
+
 static size_t configJsonCapacityForPayload(size_t payloadSize) {
   size_t capacity = CONFIG_JSON_MIN_CAPACITY;
   if (payloadSize > 0) {
@@ -2498,13 +2512,6 @@ void loadConfig() {
 // of the global configuration to its dedicated JSON file inside /private.
 // Call saveIoConfig(), saveInterfaceConfig() or saveVirtualConfig() after
 // modifying the respective portion of the global config.
-struct ConfigRecordMetadata {
-  uint16_t version;
-  uint16_t sections;
-  uint32_t payloadLength;
-  uint32_t checksum;
-};
-
 static uint32_t crc32ForBuffer(const uint8_t *data, size_t length) {
   uint32_t crc = 0xFFFFFFFFu;
   for (size_t i = 0; i < length; ++i) {
