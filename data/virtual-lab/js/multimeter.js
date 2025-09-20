@@ -80,14 +80,17 @@ const MEASUREMENT_PROFILES = {
 
 const MEASUREMENT_ORDER = ['voltage', 'resistance', 'current', 'frequency', 'capacitance', 'inductance'];
 const DISPLAY_MODES = ['digital', 'binary', 'gauge'];
+const MEASUREMENT_SET = new Set(MEASUREMENT_ORDER);
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const GAUGE_CENTER_X = 130;
-const GAUGE_CENTER_Y = 118;
-const GAUGE_RADIUS = 88;
-const GAUGE_TICK_OUTER_RADIUS = 90;
-const GAUGE_TICK_INNER_RADIUS = 74;
-const GAUGE_START_ANGLE = -110;
-const GAUGE_END_ANGLE = 110;
+const GAUGE_CENTER_X = 160;
+const GAUGE_CENTER_Y = 140;
+const GAUGE_RADIUS = 96;
+const GAUGE_ARC_RADIUS = 116;
+const GAUGE_TICK_OUTER_RADIUS = 108;
+const GAUGE_TICK_INNER_RADIUS = 86;
+const GAUGE_START_ANGLE = -120;
+const GAUGE_END_ANGLE = 120;
+const PROCESSING_HISTORY_LIMIT = 120;
 const POSITIVE_ONLY_PROFILES = new Set(['voltage', 'resistance', 'capacitance', 'inductance', 'frequency']);
 
 function clamp(value, min, max) {
@@ -120,11 +123,11 @@ function formatDisplay(value, decimals) {
 
 function populateSelect(select, options, placeholder) {
   select.innerHTML = '';
+  const defaultOption = document.createElement('option');
+  defaultOption.value = '';
+  defaultOption.textContent = placeholder;
+  select.appendChild(defaultOption);
   if (!options.length) {
-    const opt = document.createElement('option');
-    opt.textContent = placeholder;
-    opt.value = '';
-    select.appendChild(opt);
     select.disabled = true;
     return;
   }
@@ -138,6 +141,105 @@ function populateSelect(select, options, placeholder) {
   select.disabled = false;
 }
 
+function compileProcessing(channel) {
+  if (!channel) {
+    return;
+  }
+  const source = typeof channel.processing === 'string' ? channel.processing.trim() : '';
+  if (!source.length) {
+    channel.compiledProcessing = null;
+    channel.processingError = null;
+    if (!Array.isArray(channel.history)) {
+      channel.history = [];
+    }
+    return;
+  }
+  try {
+    // eslint-disable-next-line no-new-func
+    channel.compiledProcessing = new Function(
+      'context',
+      `"use strict";\n${source}`
+    );
+    channel.processingError = null;
+  } catch (error) {
+    console.warn('[VirtualLab] Script de traitement invalide pour', channel.id, error);
+    channel.compiledProcessing = null;
+    channel.processingError = error.message;
+  }
+  channel.history = Array.isArray(channel.history) ? channel.history : [];
+}
+
+function ensureChannelHistory(channel) {
+  if (!channel) {
+    return [];
+  }
+  if (!Array.isArray(channel.history)) {
+    channel.history = [];
+  }
+  return channel.history;
+}
+
+function executeProcessing(channel, rawValue, scaledValue) {
+  const history = ensureChannelHistory(channel);
+  const timestamp = Date.now();
+  const overrides = {
+    unit: null,
+    symbol: null,
+    decimals: null,
+    displayMode: null,
+    measurementMode: null,
+  };
+  let processedValue = Number.isFinite(scaledValue) ? scaledValue : null;
+  if (channel && channel.compiledProcessing && processedValue !== null) {
+    try {
+      const previous = history.length ? history[history.length - 1] : null;
+      const context = {
+        raw: rawValue,
+        scaled: scaledValue,
+        scale: Number.isFinite(channel.scale) ? channel.scale : 1,
+        offset: Number.isFinite(channel.offset) ? channel.offset : 0,
+        previous,
+        history: history.slice(-32),
+        timestamp,
+        Math,
+      };
+      const result = channel.compiledProcessing(context);
+      if (typeof result === 'number' && Number.isFinite(result)) {
+        processedValue = result;
+      } else if (result && typeof result === 'object') {
+        if (Object.prototype.hasOwnProperty.call(result, 'value')) {
+          const value = Number(result.value);
+          processedValue = Number.isFinite(value) ? value : processedValue;
+        }
+        if (typeof result.unit === 'string' && result.unit.trim().length) {
+          overrides.unit = result.unit.trim();
+        }
+        if (typeof result.symbol === 'string' && result.symbol.trim().length) {
+          overrides.symbol = result.symbol.trim();
+        }
+        if (typeof result.decimals === 'number' && Number.isFinite(result.decimals)) {
+          overrides.decimals = Math.max(0, Math.round(result.decimals));
+        }
+        if (typeof result.displayMode === 'string' && DISPLAY_MODES.includes(result.displayMode)) {
+          overrides.displayMode = result.displayMode;
+        }
+        if (typeof result.measurementMode === 'string' && MEASUREMENT_SET.has(result.measurementMode)) {
+          overrides.measurementMode = result.measurementMode;
+        }
+      }
+      channel.processingError = null;
+    } catch (error) {
+      console.warn('[VirtualLab] Erreur durant l\'exécution du script multimètre', channel.id, error);
+      channel.processingError = error.message;
+    }
+  }
+  history.push({ raw: rawValue, scaled: scaledValue, value: processedValue, timestamp });
+  if (history.length > PROCESSING_HISTORY_LIMIT) {
+    history.splice(0, history.length - PROCESSING_HISTORY_LIMIT);
+  }
+  return { value: processedValue, overrides, timestamp };
+}
+
 export function mountMultimeter(container, { inputs = [], error = null, meterChannels = [] } = {}) {
   if (!container) return;
 
@@ -145,11 +247,18 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
     <div class="device-shell multimeter-shell">
       <div class="multimeter-head">
         <div class="device-branding">
+          <span class="device-brand">MiniLabBox</span>
           <span class="device-model" id="multimeter-title">Multimètre virtuel</span>
+          <span class="device-subtitle">Mesures polyvalentes</span>
         </div>
-        <div class="io-selector">
-          <label for="multimeter-input">Entrée mesurée</label>
-          <select id="multimeter-input" class="io-select"></select>
+        <div class="device-toolbar">
+          <a class="device-config-button" href="settings.html#multimeter" aria-label="Configurer le multimètre virtuel">
+            ⚙️ Configurer
+          </a>
+          <div class="io-selector">
+            <label for="multimeter-input">Entrée mesurée</label>
+            <select id="multimeter-input" class="io-select"></select>
+          </div>
         </div>
       </div>
       <div class="multimeter-body">
@@ -170,10 +279,24 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
             </div>
             <div class="multimeter-display-mode multimeter-display-mode--gauge" data-mode="gauge" hidden>
               <div class="multimeter-gauge-wrapper">
-                <svg class="multimeter-gauge" viewBox="0 0 260 140" role="img" aria-label="Cadran analogique">
-                  <path id="multimeter-gauge-arc" class="multimeter-gauge-arc" />
+                <svg class="multimeter-gauge" viewBox="0 0 320 200" role="img" aria-label="Cadran analogique">
+                  <defs>
+                    <radialGradient id="multimeter-gauge-face-gradient" cx="50%" cy="65%" r="75%">
+                      <stop offset="0%" stop-color="rgba(12, 32, 28, 0.95)" />
+                      <stop offset="65%" stop-color="rgba(12, 32, 28, 0.65)" />
+                      <stop offset="100%" stop-color="rgba(6, 18, 14, 0.2)" />
+                    </radialGradient>
+                    <linearGradient id="multimeter-gauge-arc-gradient" x1="0%" y1="50%" x2="100%" y2="50%">
+                      <stop offset="0%" stop-color="#20e3ff" />
+                      <stop offset="50%" stop-color="#7df9a9" />
+                      <stop offset="100%" stop-color="#f6c65b" />
+                    </linearGradient>
+                  </defs>
+                  <path class="multimeter-gauge-face" d="M32 184a128 128 0 0 1 256 0v24H32z" fill="url(#multimeter-gauge-face-gradient)" />
+                  <path id="multimeter-gauge-arc" class="multimeter-gauge-arc" stroke="url(#multimeter-gauge-arc-gradient)" />
                   <g id="multimeter-gauge-ticks" class="multimeter-gauge-ticks"></g>
-                  <line id="multimeter-gauge-needle" class="multimeter-gauge-needle" x1="130" y1="118" x2="130" y2="42" />
+                  <line id="multimeter-gauge-needle" class="multimeter-gauge-needle" x1="160" y1="140" x2="160" y2="44" />
+                  <circle class="multimeter-gauge-cap" cx="160" cy="140" r="12" />
                 </svg>
                 <div class="multimeter-gauge-labels">
                   <span id="multimeter-gauge-min">—</span>
@@ -243,7 +366,11 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
           rangeMax: Number.isFinite(channel.rangeMax) ? channel.rangeMax : null,
           bits: Number.isFinite(channel.bits)
             ? Math.min(32, Math.max(1, Math.round(channel.bits)))
-            : 10
+            : 10,
+          profile: typeof channel.profile === 'string' ? channel.profile.trim() : '',
+          displayMode: typeof channel.displayMode === 'string' ? channel.displayMode.trim() : '',
+          calibre: typeof channel.calibre === 'string' ? channel.calibre.trim() : '',
+          processing: typeof channel.processing === 'string' ? channel.processing : ''
         }))
     : availableInputs.map((item, index) => ({
         id: item.name,
@@ -257,12 +384,23 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
         offset: Number.isFinite(item.offset) ? item.offset : 0,
         rangeMin: null,
         rangeMax: null,
-        bits: 10
+        bits: 10,
+        profile: 'voltage',
+        displayMode: 'digital',
+        calibre: '',
+        processing: ''
       }));
 
-  const activeChannels = channels.filter((channel) => channel.enabled && channel.input);
-
   const defaultMode = MEASUREMENT_ORDER[0];
+
+  channels.forEach((channel) => {
+    compileProcessing(channel);
+    channel.activeProfile = MEASUREMENT_SET.has(channel.profile) ? channel.profile : defaultMode;
+    channel.activeDisplay = DISPLAY_MODES.includes(channel.displayMode) ? channel.displayMode : 'digital';
+    channel.activeCalibre = channel.calibre && channel.calibre.length ? channel.calibre : null;
+  });
+
+  const activeChannels = channels.filter((channel) => channel.enabled && channel.input);
   const state = {
     powered: true,
     acMode: 'dc',
@@ -275,7 +413,15 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
     lastScaledValue: null,
     heldRawValue: null,
     heldScaledValue: null,
-    displayMode: 'digital'
+    displayMode: 'digital',
+    overrides: {
+      unit: null,
+      symbol: null,
+      decimals: null,
+      displayMode: null,
+      measurementMode: null,
+    },
+    processingError: null
   };
 
   const valueDisplay = container.querySelector('#multimeter-value');
@@ -305,10 +451,20 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
   const displayButtons = Array.from(container.querySelectorAll('[data-display]'));
 
   const channelMap = new Map(activeChannels.map((channel) => [channel.id, channel]));
-  populateSelect(inputSelect, activeChannels, 'Aucune configuration disponible');
+  const resetOverrides = () => {
+    state.overrides.unit = null;
+    state.overrides.symbol = null;
+    state.overrides.decimals = null;
+    state.overrides.displayMode = null;
+    state.overrides.measurementMode = null;
+  };
+  resetOverrides();
+  const placeholder = activeChannels.length ? '— Choisir une entrée —' : 'Aucune configuration disponible';
+  populateSelect(inputSelect, activeChannels, placeholder);
   if (activeChannels.length) {
-    inputSelect.value = activeChannels[0].id;
-    statusLabel.textContent = `${activeChannels.length} canal(aux) disponible(s)`;
+    inputSelect.value = '';
+    const suffix = activeChannels.length > 1 ? 's' : '';
+    statusLabel.textContent = `${activeChannels.length} canal${suffix} configuré${suffix}. Sélectionnez une entrée.`;
   } else if (error) {
     statusLabel.textContent = 'Impossible de charger la configuration.';
   } else {
@@ -359,8 +515,12 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
   const updateGaugeLabels = (calibre, channel) => {
     const range = getEffectiveRange(calibre, channel);
     const multiplier = calibre && Number.isFinite(calibre.displayMultiplier) ? calibre.displayMultiplier : 1;
-    const decimals = calibre && Number.isFinite(calibre.decimals) ? calibre.decimals : 2;
-    const unit = getChannelUnit(channel, calibre);
+    const decimals = Number.isFinite(state.overrides.decimals)
+      ? state.overrides.decimals
+      : calibre && Number.isFinite(calibre.decimals)
+        ? calibre.decimals
+        : 2;
+    const unit = state.overrides.unit || getChannelUnit(channel, calibre);
     const minText = formatDisplay(range.min * multiplier, decimals);
     const maxText = formatDisplay(range.max * multiplier, decimals);
     gaugeMinLabel.textContent = unit ? `${minText} ${unit}` : minText;
@@ -371,8 +531,10 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
     const profile = getCurrentProfile();
     const calibre = getCurrentCalibre();
     const channel = getCurrentChannel();
-    symbolDisplay.textContent = getChannelSymbol(channel, profile);
-    unitDisplay.textContent = getChannelUnit(channel, calibre);
+    const symbol = state.overrides.symbol || getChannelSymbol(channel, profile);
+    const unit = state.overrides.unit || getChannelUnit(channel, calibre);
+    symbolDisplay.textContent = symbol;
+    unitDisplay.textContent = unit;
     updateGaugeLabels(calibre, channel);
   };
 
@@ -420,6 +582,10 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
         state.lastRawValue = null;
         state.heldScaledValue = null;
         state.heldRawValue = null;
+        const currentChannel = getCurrentChannel();
+        if (currentChannel) {
+          currentChannel.activeCalibre = cal.id;
+        }
         updateKnobRotation();
         updateCalibrationButtons();
         refreshMeasurement();
@@ -446,12 +612,73 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
 
   const measurementButtons = Array.from(measurementContainer.querySelectorAll('[data-measurement]'));
 
+  const getValidCalibreId = (profile, desiredId) => {
+    if (!profile || !Array.isArray(profile.calibrations) || profile.calibrations.length === 0) {
+      return null;
+    }
+    if (desiredId && profile.calibrations.some((cal) => cal.id === desiredId)) {
+      return desiredId;
+    }
+    if (profile.defaultCalibre && profile.calibrations.some((cal) => cal.id === profile.defaultCalibre)) {
+      return profile.defaultCalibre;
+    }
+    return profile.calibrations[0].id;
+  };
+
+  const updateMeasurementButtonsState = () => {
+    measurementButtons.forEach((btn) => {
+      const isActive = btn.dataset.measurement === state.measurementMode;
+      btn.classList.toggle('is-active', isActive);
+      btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    });
+  };
+
+  const setMeasurementMode = (mode, { force = false, calibreId = null, skipRefresh = false } = {}) => {
+    const desired = MEASUREMENT_SET.has(mode) ? mode : defaultMode;
+    const changed = state.measurementMode !== desired;
+    if (!changed && !force && !calibreId) {
+      return;
+    }
+    state.measurementMode = desired;
+    state.previousValue = null;
+    state.lastRawValue = null;
+    state.lastScaledValue = null;
+    state.heldRawValue = null;
+    state.heldScaledValue = null;
+    if (state.hold) {
+      state.hold = false;
+      holdIndicator.hidden = true;
+      holdButton.classList.remove('is-active');
+      holdButton.setAttribute('aria-pressed', 'false');
+    }
+    const profile = getCurrentProfile();
+    const channel = getCurrentChannel();
+    const preferredCalibre = calibreId || (channel && channel.activeCalibre) || (channel && channel.calibre);
+    const nextCalibre = getValidCalibreId(profile, preferredCalibre);
+    if (nextCalibre) {
+      state.calibreId = nextCalibre;
+    }
+    if (channel) {
+      channel.activeProfile = state.measurementMode;
+      if (state.calibreId) {
+        channel.activeCalibre = state.calibreId;
+      }
+    }
+    updateMeasurementButtonsState();
+    renderCalibrations(profile);
+    updateSymbolAndUnit();
+    renderCurrentValue();
+    if (!skipRefresh) {
+      refreshMeasurement({ force: true });
+    }
+  };
+
   const initialiseGauge = () => {
     if (gaugeArc) {
-      const start = polarToCartesian(GAUGE_START_ANGLE, GAUGE_RADIUS);
-      const end = polarToCartesian(GAUGE_END_ANGLE, GAUGE_RADIUS);
+      const start = polarToCartesian(GAUGE_START_ANGLE, GAUGE_ARC_RADIUS);
+      const end = polarToCartesian(GAUGE_END_ANGLE, GAUGE_ARC_RADIUS);
       const largeArc = GAUGE_END_ANGLE - GAUGE_START_ANGLE <= 180 ? 0 : 1;
-      const path = `M ${start.x} ${start.y} A ${GAUGE_RADIUS} ${GAUGE_RADIUS} 0 ${largeArc} 1 ${end.x} ${end.y}`;
+      const path = `M ${start.x.toFixed(2)} ${start.y.toFixed(2)} A ${GAUGE_ARC_RADIUS} ${GAUGE_ARC_RADIUS} 0 ${largeArc} 1 ${end.x.toFixed(2)} ${end.y.toFixed(2)}`;
       gaugeArc.setAttribute('d', path);
     }
     if (gaugeTicksGroup) {
@@ -468,6 +695,23 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
         tick.setAttribute('x2', outer.x.toFixed(2));
         tick.setAttribute('y2', outer.y.toFixed(2));
         tick.classList.add('multimeter-gauge-tick');
+        gaugeTicksGroup.appendChild(tick);
+      }
+      const subDivisions = tickCount * 5;
+      for (let i = 0; i <= subDivisions; i += 1) {
+        if (i % 5 === 0) {
+          continue;
+        }
+        const ratio = i / subDivisions;
+        const angle = GAUGE_START_ANGLE + (GAUGE_END_ANGLE - GAUGE_START_ANGLE) * ratio;
+        const outer = polarToCartesian(angle, GAUGE_TICK_OUTER_RADIUS - 6);
+        const inner = polarToCartesian(angle, GAUGE_TICK_INNER_RADIUS + 8);
+        const tick = document.createElementNS(SVG_NS, 'line');
+        tick.setAttribute('x1', inner.x.toFixed(2));
+        tick.setAttribute('y1', inner.y.toFixed(2));
+        tick.setAttribute('x2', outer.x.toFixed(2));
+        tick.setAttribute('y2', outer.y.toFixed(2));
+        tick.classList.add('multimeter-gauge-subtick');
         gaugeTicksGroup.appendChild(tick);
       }
     }
@@ -529,12 +773,13 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
   };
 
   const updateDigitalDisplay = (value, profile, calibre, channel) => {
-    const unit = getChannelUnit(channel, calibre);
+    const unit = state.overrides.unit || getChannelUnit(channel, calibre);
+    const symbol = state.overrides.symbol || getChannelSymbol(channel, profile);
     if (value === null || Number.isNaN(value)) {
       valueDisplay.textContent = '—';
       bar.value = 0;
       unitDisplay.textContent = unit;
-      symbolDisplay.textContent = getChannelSymbol(channel, profile);
+      symbolDisplay.textContent = symbol;
       return;
     }
     const range = getEffectiveRange(calibre, channel);
@@ -542,15 +787,19 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
       valueDisplay.textContent = 'OL';
       bar.value = 100;
       unitDisplay.textContent = unit;
-      symbolDisplay.textContent = getChannelSymbol(channel, profile);
+      symbolDisplay.textContent = symbol;
       return;
     }
     const multiplier = calibre && Number.isFinite(calibre.displayMultiplier) ? calibre.displayMultiplier : 1;
-    const decimals = calibre && Number.isFinite(calibre.decimals) ? calibre.decimals : 2;
+    const decimals = Number.isFinite(state.overrides.decimals)
+      ? state.overrides.decimals
+      : calibre && Number.isFinite(calibre.decimals)
+        ? calibre.decimals
+        : 2;
     const displayValue = value * multiplier;
     valueDisplay.textContent = formatDisplay(displayValue, decimals);
     unitDisplay.textContent = unit;
-    symbolDisplay.textContent = getChannelSymbol(channel, profile);
+    symbolDisplay.textContent = symbol;
     const span = (range.max - range.min) * multiplier;
     const ratio = span === 0 ? 0 : (displayValue - range.min * multiplier) / span;
     bar.value = clamp(ratio * 100, 0, 100);
@@ -581,9 +830,13 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
   };
 
   const updateGaugeDisplay = (value, profile, calibre, channel) => {
-    const unit = getChannelUnit(channel, calibre);
+    const unit = state.overrides.unit || getChannelUnit(channel, calibre);
     const multiplier = calibre && Number.isFinite(calibre.displayMultiplier) ? calibre.displayMultiplier : 1;
-    const decimals = calibre && Number.isFinite(calibre.decimals) ? calibre.decimals : 2;
+    const decimals = Number.isFinite(state.overrides.decimals)
+      ? state.overrides.decimals
+      : calibre && Number.isFinite(calibre.decimals)
+        ? calibre.decimals
+        : 2;
     const range = getEffectiveRange(calibre, channel);
     let ratio = 0;
     let readout = '—';
@@ -634,11 +887,16 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
   const setDisplayMode = (mode) => {
     const desired = DISPLAY_MODES.includes(mode) ? mode : 'digital';
     if (state.displayMode === desired) {
+      updateDisplayModeVisibility();
       return;
     }
     state.displayMode = desired;
     updateDisplayModeVisibility();
     renderCurrentValue();
+    const channel = getCurrentChannel();
+    if (channel) {
+      channel.activeDisplay = state.displayMode;
+    }
   };
 
   const displayOff = () => {
@@ -664,7 +922,6 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
       return;
     }
     const channel = getCurrentChannel();
-    const profile = getCurrentProfile();
     const calibre = getCurrentCalibre();
     acdcLabel.textContent = state.acMode === 'ac' ? 'AC' : 'DC';
 
@@ -672,8 +929,10 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
       state.lastRawValue = null;
       state.lastScaledValue = null;
       state.previousValue = null;
+      resetOverrides();
+      state.processingError = null;
       updatedLabel.textContent = '—';
-      statusLabel.textContent = 'Aucun canal sélectionné';
+      statusLabel.textContent = 'Sélectionnez une entrée pour commencer.';
       renderCurrentValue();
       return;
     }
@@ -684,6 +943,10 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
       return;
     }
 
+    const previousOverrides = { ...state.overrides };
+    resetOverrides();
+    state.processingError = null;
+
     try {
       const snapshot = await fetchInputsSnapshot();
       const raw = Object.prototype.hasOwnProperty.call(snapshot, channel.input)
@@ -691,17 +954,47 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
         : NaN;
       state.lastRawValue = Number.isFinite(raw) ? raw : null;
       const scaled = applyMeterScaling(state.lastRawValue, channel);
-      const processed = applyAcMode(Number.isFinite(scaled) ? scaled : null);
+      let processedValue = null;
+      if (Number.isFinite(scaled)) {
+        const { value, overrides } = executeProcessing(channel, state.lastRawValue, scaled);
+        processedValue = Number.isFinite(value) ? value : null;
+        if (overrides) {
+          state.overrides.unit = overrides.unit || null;
+          state.overrides.symbol = overrides.symbol || null;
+          state.overrides.decimals = Number.isFinite(overrides.decimals) ? overrides.decimals : null;
+          state.overrides.displayMode = overrides.displayMode || null;
+        }
+      } else {
+        processedValue = null;
+      }
+      state.processingError = channel.processingError || null;
+      if (state.overrides.displayMode && state.overrides.displayMode !== state.displayMode) {
+        setDisplayMode(state.overrides.displayMode);
+      }
+      const processed = applyAcMode(Number.isFinite(processedValue) ? processedValue : null);
       const smoothed = getSmoothedValue(processed);
       state.lastScaledValue = Number.isFinite(smoothed) ? smoothed : null;
+      updateSymbolAndUnit();
       renderCurrentValue();
       const now = new Date();
       updatedLabel.textContent = now.toLocaleTimeString('fr-FR', { hour12: false });
       const label = channel.label || channel.name || channel.input;
       const suffix = channel.input && channel.input !== label ? ` (source ${channel.input})` : '';
-      statusLabel.textContent = `Lecture ${state.acMode === 'ac' ? 'AC' : 'DC'} sur ${label}${suffix}`;
+      const baseStatus = `Lecture ${state.acMode === 'ac' ? 'AC' : 'DC'} sur ${label}${suffix}`;
+      statusLabel.textContent = state.processingError
+        ? `${baseStatus} • Script : ${state.processingError}`
+        : baseStatus;
     } catch (err) {
       console.warn('[VirtualLab] Lecture des entrées impossible:', err);
+      state.processingError = null;
+      state.overrides.unit = previousOverrides.unit;
+      state.overrides.symbol = previousOverrides.symbol;
+      state.overrides.decimals = previousOverrides.decimals;
+      state.overrides.displayMode = previousOverrides.displayMode || null;
+      if (state.overrides.displayMode && state.overrides.displayMode !== state.displayMode) {
+        setDisplayMode(state.overrides.displayMode);
+      }
+      updateSymbolAndUnit();
       const fallbackBase = randomFallbackBase(calibre);
       const processed = applyAcMode(fallbackBase);
       const smoothed = getSmoothedValue(processed);
@@ -725,31 +1018,7 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
 
   measurementButtons.forEach((button) => {
     button.addEventListener('click', () => {
-      const mode = button.dataset.measurement;
-      if (state.measurementMode === mode) {
-        return;
-      }
-      state.measurementMode = mode;
-      const profile = getCurrentProfile();
-      state.calibreId = profile.defaultCalibre || profile.calibrations[0].id;
-      state.previousValue = null;
-      state.lastRawValue = null;
-      state.lastScaledValue = null;
-      state.heldRawValue = null;
-      state.heldScaledValue = null;
-      state.hold = false;
-      holdIndicator.hidden = true;
-      holdButton.classList.remove('is-active');
-      holdButton.setAttribute('aria-pressed', 'false');
-      measurementButtons.forEach((btn) => {
-        const isActive = btn.dataset.measurement === mode;
-        btn.classList.toggle('is-active', isActive);
-        btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
-      });
-      updateSymbolAndUnit();
-      renderCalibrations(profile);
-      renderCurrentValue();
-      refreshMeasurement();
+      setMeasurementMode(button.dataset.measurement);
     });
   });
 
@@ -820,15 +1089,31 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
     state.lastScaledValue = null;
     state.heldRawValue = null;
     state.heldScaledValue = null;
+    state.processingError = null;
     if (state.hold) {
       state.hold = false;
       holdButton.classList.remove('is-active');
       holdButton.setAttribute('aria-pressed', 'false');
       holdIndicator.hidden = true;
     }
+    const channel = getCurrentChannel();
+    if (!channel) {
+      resetOverrides();
+      updateSymbolAndUnit();
+      renderCurrentValue();
+      statusLabel.textContent = 'Sélectionnez une entrée pour commencer.';
+      return;
+    }
+    const desiredMode = channel.activeProfile || (MEASUREMENT_SET.has(channel.profile) ? channel.profile : defaultMode);
+    const desiredCalibre = channel.activeCalibre || channel.calibre || null;
+    setMeasurementMode(desiredMode, { force: true, calibreId: desiredCalibre, skipRefresh: true });
+    const desiredDisplay = channel.activeDisplay || channel.displayMode || 'digital';
+    setDisplayMode(desiredDisplay);
+    resetOverrides();
     updateSymbolAndUnit();
     renderCurrentValue();
-    refreshMeasurement();
+    statusLabel.textContent = 'Préparation de la lecture…';
+    refreshMeasurement({ force: true });
   });
 
   window.addEventListener('beforeunload', () => {

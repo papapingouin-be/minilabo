@@ -1,5 +1,23 @@
 const MAX_METER_CHANNELS = 6;
 
+const MEASUREMENT_OPTIONS = [
+  { id: 'voltage', label: 'Tension (U)' },
+  { id: 'resistance', label: 'Résistance (R)' },
+  { id: 'current', label: 'Courant (I)' },
+  { id: 'frequency', label: 'Fréquence (f)' },
+  { id: 'capacitance', label: 'Capacité (C)' },
+  { id: 'inductance', label: 'Inductance (L)' },
+];
+
+const DISPLAY_OPTIONS = [
+  { id: 'digital', label: 'Affichage numérique' },
+  { id: 'binary', label: 'Code binaire' },
+  { id: 'gauge', label: 'Cadran analogique' },
+];
+
+const MEASUREMENT_IDS = new Set(MEASUREMENT_OPTIONS.map((option) => option.id));
+const DISPLAY_IDS = new Set(DISPLAY_OPTIONS.map((option) => option.id));
+
 const state = {
   channels: [],
   inputs: [],
@@ -21,6 +39,38 @@ function normaliseNumber(value, fallback = null) {
     return fallback;
   }
   return num;
+}
+
+function getDefaultProcessingScript(profile) {
+  if (profile === 'frequency') {
+    return [
+      "// Estimation simple de la fréquence à partir d'un compteur cumulatif",
+      "// raw : valeur brute, scale : coefficient d'échelle, offset : décalage",
+      "// history : dernières mesures (raw, scaled, value, timestamp)",
+      "// L'objet Math de JavaScript est disponible.",
+      'if (!history.length) {',
+      '  return raw * scale + offset;',
+      '}',
+      'const previous = history[history.length - 1];',
+      'const dt = (timestamp - previous.timestamp) / 1000;',
+      'if (dt <= 0) {',
+      '  return previous.value ?? 0;',
+      '}',
+      'const delta = raw - previous.raw;',
+      'const estimate = Math.abs(delta) / dt;',
+      "// Pour personnaliser l'affichage, retournez un objet { value, unit, symbol }.",
+      '// Retourne une estimation en hertz.',
+      'return Number.isFinite(estimate) && estimate > 0 ? estimate : Math.max(previous.value ?? 0, 0);',
+    ].join('\n');
+  }
+  return [
+    "// raw : valeur brute provenant de l'entrée",
+    "// scale : coefficient multiplicatif • offset : décalage ajouté ensuite",
+    "// Retournez la valeur à afficher.",
+    "// L'objet Math de JavaScript est disponible.",
+    "// Il est aussi possible de retourner un objet { value, unit, symbol } pour ajuster l'affichage.",
+    'return raw * scale + offset;',
+  ].join('\n');
 }
 
 function clampBits(value) {
@@ -51,6 +101,16 @@ function normaliseChannel(entry, index) {
     ? normaliseNumber(entry.rangeMax, null)
     : null;
   const bits = clampBits(entry && entry.bits);
+  let profile = normaliseString(entry && entry.profile);
+  if (!MEASUREMENT_IDS.has(profile)) {
+    profile = 'voltage';
+  }
+  let displayMode = normaliseString(entry && entry.displayMode);
+  if (!DISPLAY_IDS.has(displayMode)) {
+    displayMode = 'digital';
+  }
+  const calibre = normaliseString(entry && entry.calibre);
+  const processing = typeof entry?.processing === 'string' ? entry.processing : '';
   return {
     id,
     name,
@@ -64,6 +124,11 @@ function normaliseChannel(entry, index) {
     rangeMin,
     rangeMax,
     bits,
+    profile,
+    displayMode,
+    calibre,
+    processing,
+    _lastTemplate: null,
   };
 }
 
@@ -82,6 +147,8 @@ function nextDefaultId() {
 function createDefaultChannel() {
   const id = nextDefaultId();
   const baseInput = state.inputs.find((item) => item.active) || state.inputs[0];
+  const profile = 'voltage';
+  const processing = getDefaultProcessingScript(profile);
   return {
     id,
     name: id,
@@ -95,6 +162,11 @@ function createDefaultChannel() {
     rangeMin: null,
     rangeMax: null,
     bits: 10,
+    profile,
+    displayMode: 'digital',
+    calibre: '',
+    processing,
+    _lastTemplate: processing,
   };
 }
 
@@ -233,7 +305,9 @@ function renderChannels() {
       const fallback = channel.id || `Canal ${index + 1}`;
       title.textContent = channel.label || channel.name || fallback;
       if (channel.input) {
-        subtitle.textContent = `Entrée assignée : ${channel.input}`;
+        const modeLabel = MEASUREMENT_OPTIONS.find((option) => option.id === (channel.profile || 'voltage'));
+        const measurement = modeLabel ? modeLabel.label : 'Mesure';
+        subtitle.textContent = `${measurement} • Entrée : ${channel.input}`;
       } else {
         subtitle.textContent = 'Aucune entrée assignée';
       }
@@ -255,6 +329,80 @@ function renderChannels() {
     handleInputSelection(inputSelect, channel, refreshSummary);
     card.appendChild(createField('Entrée associée', inputSelect));
 
+    const measurementRow = document.createElement('div');
+    measurementRow.className = 'field-row';
+
+    const profileSelect = document.createElement('select');
+    MEASUREMENT_OPTIONS.forEach((option) => {
+      const opt = document.createElement('option');
+      opt.value = option.id;
+      opt.textContent = option.label;
+      profileSelect.appendChild(opt);
+    });
+    const currentProfile = MEASUREMENT_IDS.has(channel.profile) ? channel.profile : 'voltage';
+    profileSelect.value = currentProfile;
+    channel.profile = currentProfile;
+    measurementRow.appendChild(createField('Mesure par défaut', profileSelect));
+
+    const displaySelect = document.createElement('select');
+    DISPLAY_OPTIONS.forEach((option) => {
+      const opt = document.createElement('option');
+      opt.value = option.id;
+      opt.textContent = option.label;
+      displaySelect.appendChild(opt);
+    });
+    const currentDisplay = DISPLAY_IDS.has(channel.displayMode) ? channel.displayMode : 'digital';
+    displaySelect.value = currentDisplay;
+    channel.displayMode = currentDisplay;
+    measurementRow.appendChild(createField('Affichage préféré', displaySelect));
+
+    const calibreInput = document.createElement('input');
+    calibreInput.type = 'text';
+    calibreInput.placeholder = 'ex. 20V';
+    calibreInput.value = channel.calibre || '';
+    calibreInput.addEventListener('input', (event) => {
+      channel.calibre = event.target.value.trim();
+      if (channel.calibre) {
+        channel.activeCalibre = channel.calibre;
+      }
+    });
+    measurementRow.appendChild(createField('Calibre initial (optionnel)', calibreInput));
+    card.appendChild(measurementRow);
+
+    const scriptArea = document.createElement('textarea');
+    scriptArea.spellcheck = false;
+    scriptArea.rows = 6;
+    scriptArea.placeholder = 'Utilisez raw, scale, offset, history, timestamp…';
+    if (!channel.processing || !channel.processing.trim().length) {
+      const template = getDefaultProcessingScript(channel.profile);
+      channel.processing = template;
+      channel._lastTemplate = template;
+    }
+    scriptArea.value = channel.processing;
+    scriptArea.addEventListener('input', (event) => {
+      channel.processing = event.target.value;
+      if (channel._lastTemplate && event.target.value !== channel._lastTemplate) {
+        channel._lastTemplate = null;
+      }
+    });
+
+    profileSelect.addEventListener('change', (event) => {
+      const value = event.target.value;
+      channel.profile = MEASUREMENT_IDS.has(value) ? value : 'voltage';
+      refreshSummary();
+      const template = getDefaultProcessingScript(channel.profile);
+      if (!scriptArea.value.trim().length || channel._lastTemplate === scriptArea.value) {
+        channel.processing = template;
+        channel._lastTemplate = template;
+        scriptArea.value = template;
+      }
+    });
+
+    displaySelect.addEventListener('change', (event) => {
+      const value = event.target.value;
+      channel.displayMode = DISPLAY_IDS.has(value) ? value : 'digital';
+    });
+
     const secondRow = document.createElement('div');
     secondRow.className = 'field-row';
     secondRow.append(
@@ -270,6 +418,8 @@ function renderChannels() {
       createNumberField('Décalage', channel, 'offset', { step: 'any' }),
     );
     card.appendChild(thirdRow);
+
+    card.appendChild(createField('Logique de mesure (JavaScript)', scriptArea));
 
     const fourthRow = document.createElement('div');
     fourthRow.className = 'field-row';
@@ -340,6 +490,10 @@ function serialiseChannels() {
       ? null
       : Number(channel.rangeMax);
     const bits = clampBits(channel.bits);
+    const profile = MEASUREMENT_IDS.has(channel.profile) ? channel.profile : 'voltage';
+    const displayMode = DISPLAY_IDS.has(channel.displayMode) ? channel.displayMode : 'digital';
+    const calibre = normaliseString(channel.calibre);
+    const processing = typeof channel.processing === 'string' ? channel.processing : '';
     return {
       id,
       name,
@@ -353,6 +507,10 @@ function serialiseChannels() {
       rangeMin,
       rangeMax,
       bits,
+      profile,
+      displayMode,
+      calibre,
+      processing,
     };
   });
 }

@@ -115,6 +115,45 @@ body {
   gap: 1.5rem;
 }
 
+.device-toolbar {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.device-config-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: var(--text);
+  font-size: 0.75rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  text-decoration: none;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.device-config-button:hover,
+.device-config-button:focus-visible {
+  background: rgba(74, 212, 255, 0.16);
+  transform: translateY(-1px);
+  box-shadow: 0 12px 28px rgba(32, 227, 255, 0.15);
+}
+
+.device-config-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.device-config-button:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
 .device-branding {
   display: flex;
   flex-direction: column;
@@ -148,6 +187,22 @@ body {
   gap: 0.35rem;
   align-items: flex-end;
   min-width: 180px;
+}
+
+@media (max-width: 720px) {
+  .device-toolbar {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+
+  .device-toolbar .io-selector {
+    width: 100%;
+    align-items: stretch;
+  }
+
+  .io-selector {
+    min-width: 0;
+  }
 }
 
 .io-selector label {
@@ -346,7 +401,7 @@ body {
 .multimeter-head {
   display: flex;
   justify-content: space-between;
-  align-items: flex-end;
+  align-items: flex-start;
   flex-wrap: wrap;
   gap: 1.6rem;
 }
@@ -478,48 +533,67 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.7rem;
+  gap: 0.9rem;
 }
 
 .multimeter-gauge {
-  width: min(100%, 320px);
-  height: 120px;
+  width: min(100%, 360px);
+  height: 160px;
+}
+
+.multimeter-gauge-face {
+  fill: rgba(14, 40, 36, 0.9);
+  stroke: rgba(74, 212, 255, 0.18);
+  stroke-width: 2;
 }
 
 .multimeter-gauge-arc {
   fill: none;
-  stroke: rgba(125, 249, 169, 0.24);
-  stroke-width: 4;
+  stroke-width: 6;
   stroke-linecap: round;
+  filter: drop-shadow(0 6px 16px rgba(32, 227, 255, 0.25));
 }
 
 .multimeter-gauge-tick {
-  stroke: rgba(125, 249, 169, 0.5);
-  stroke-width: 2;
+  stroke: rgba(125, 249, 169, 0.65);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+}
+
+.multimeter-gauge-subtick {
+  stroke: rgba(125, 249, 169, 0.35);
+  stroke-width: 1.3;
   stroke-linecap: round;
 }
 
 .multimeter-gauge-needle {
-  stroke: #ff5c5c;
-  stroke-width: 3.6;
+  stroke: #ff7676;
+  stroke-width: 4.2;
   stroke-linecap: round;
   transition: stroke 0.2s ease;
+}
+
+.multimeter-gauge-cap {
+  fill: rgba(6, 24, 20, 0.92);
+  stroke: rgba(125, 249, 169, 0.35);
+  stroke-width: 3;
+  box-shadow: 0 0 12px rgba(125, 249, 169, 0.35);
 }
 
 .multimeter-gauge-labels {
   display: flex;
   justify-content: space-between;
-  width: min(100%, 320px);
+  width: min(100%, 360px);
   color: rgba(125, 249, 169, 0.75);
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   letter-spacing: 0.12em;
 }
 
 .multimeter-gauge-readout {
   font-family: "Segment7Standard", "Share Tech Mono", "Roboto Mono", monospace;
-  font-size: 1.4rem;
+  font-size: 1.5rem;
   color: #f6c65b;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.2em;
 }
 
 .multimeter-display progress::-webkit-progress-bar {

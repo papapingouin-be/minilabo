@@ -37,6 +37,10 @@ function normaliseMeterChannel(entry, index, inputsByName) {
   const label = typeof entry.label === 'string' && entry.label.trim().length
     ? entry.label.trim()
     : idSource;
+  const profile = typeof entry.profile === 'string' ? entry.profile.trim() : '';
+  const displayMode = typeof entry.displayMode === 'string' ? entry.displayMode.trim() : '';
+  const calibre = typeof entry.calibre === 'string' ? entry.calibre.trim() : '';
+  const processing = typeof entry.processing === 'string' ? entry.processing : '';
   const baseInput = inputsByName.get(inputName);
   return {
     id: idSource,
@@ -50,7 +54,11 @@ function normaliseMeterChannel(entry, index, inputsByName) {
     offset: Number.isFinite(offset) ? offset : 0,
     rangeMin: Number.isFinite(rangeMin) ? rangeMin : null,
     rangeMax: Number.isFinite(rangeMax) ? rangeMax : null,
-    bits
+    bits,
+    profile,
+    displayMode,
+    calibre,
+    processing
   };
 }
 

@@ -25,9 +25,14 @@ export function mountMathZone(container) {
     <div class="device-shell math-shell">
       <div class="device-header">
         <div class="device-branding">
-          <span class="device-brand">Analyse</span>
+          <span class="device-brand">MiniLabBox</span>
           <span class="device-model" id="math-zone-title">Console mathématique</span>
           <span class="device-subtitle">Calculs temps réel</span>
+        </div>
+        <div class="device-toolbar">
+          <a class="device-config-button" href="settings.html#math" aria-label="Configurer la console mathématique">
+            ⚙️ Configurer
+          </a>
         </div>
       </div>
       <div class="math-console">
