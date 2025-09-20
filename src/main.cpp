@@ -1352,6 +1352,44 @@ static bool parseJsonContainerString(const String &rawValue,
   return false;
 }
 
+static size_t countConfigEntries(JsonVariantConst variant) {
+  if (variant.isNull()) {
+    return 0;
+  }
+  JsonArrayConst arr = variant.as<JsonArrayConst>();
+  if (!arr.isNull()) {
+    return arr.size();
+  }
+  JsonObjectConst obj = variant.as<JsonObjectConst>();
+  if (!obj.isNull()) {
+    return obj.size();
+  }
+  if (variant.is<const char *>()) {
+    String raw = variant.as<String>();
+    raw.trim();
+    if (raw.length() == 0) {
+      return 0;
+    }
+    size_t nestedCapacity = configJsonCapacityForPayload(raw.length());
+    DynamicJsonDocument nested(nestedCapacity);
+    if (nestedCapacity > 0 && nested.capacity() == 0) {
+      return 0;
+    }
+    if (deserializeJson(nested, raw)) {
+      return 0;
+    }
+    JsonArrayConst nestedArr = nested.as<JsonArrayConst>();
+    if (!nestedArr.isNull()) {
+      return nestedArr.size();
+    }
+    JsonObjectConst nestedObj = nested.as<JsonObjectConst>();
+    if (!nestedObj.isNull()) {
+      return nestedObj.size();
+    }
+  }
+  return 0;
+}
+
 static bool decodeInputs(JsonVariantConst inputsVar,
                          std::vector<InputConfig> &parsed) {
   std::vector<String> seenNames;
@@ -3282,6 +3320,62 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
   Config previousConfig = config;
   parseConfigFromJson(doc, config, &previousConfig, false,
                       CONFIG_SECTION_MODULES | CONFIG_SECTION_IO);
+  size_t requestedInputEntries = countConfigEntries(doc["inputs"]);
+  size_t requestedOutputEntries = countConfigEntries(doc["outputs"]);
+  size_t expectedInputs = requestedInputEntries;
+  if (expectedInputs > MAX_INPUTS) {
+    expectedInputs = MAX_INPUTS;
+  }
+  size_t expectedOutputs = requestedOutputEntries;
+  if (expectedOutputs > MAX_OUTPUTS) {
+    expectedOutputs = MAX_OUTPUTS;
+  }
+  bool inputMismatch = config.inputCount < expectedInputs;
+  bool outputMismatch = config.outputCount < expectedOutputs;
+  if (inputMismatch || outputMismatch) {
+    String mismatchSummary;
+    if (inputMismatch) {
+      mismatchSummary += String("entrées demandées ") +
+                         static_cast<unsigned>(expectedInputs) + " appliquées " +
+                         static_cast<unsigned>(config.inputCount);
+    }
+    if (outputMismatch) {
+      if (mismatchSummary.length() > 0) {
+        mismatchSummary += "; ";
+      }
+      mismatchSummary += String("sorties demandées ") +
+                         static_cast<unsigned>(expectedOutputs) + " appliquées " +
+                         static_cast<unsigned>(config.outputCount);
+    }
+    logPrintf("IO configuration request discarded: %s",
+              mismatchSummary.length() > 0 ? mismatchSummary.c_str()
+                                           : "incomplete configuration");
+    appendConfigSaveLog(String("Erreur : ") +
+                        "certaines voies n'ont pas été interprétées (" +
+                        mismatchSummary + ")");
+    config = previousConfig;
+    DynamicJsonDocument errDoc(256);
+    errDoc["error"] = "invalid_io_config";
+    if (inputMismatch) {
+      errDoc["detail"] = outputMismatch ? "inputs_outputs_dropped"
+                                         : "inputs_dropped";
+      errDoc["requestedInputs"] = static_cast<uint8_t>(expectedInputs);
+      errDoc["appliedInputs"] = config.inputCount;
+    }
+    if (outputMismatch) {
+      if (!inputMismatch) {
+        errDoc["detail"] = "outputs_dropped";
+      }
+      errDoc["requestedOutputs"] = static_cast<uint8_t>(expectedOutputs);
+      errDoc["appliedOutputs"] = config.outputCount;
+    }
+    String errPayload;
+    serializeJson(errDoc, errPayload);
+    appendConfigSaveLog("Réponse d'erreur envoyée au client");
+    appendConfigSaveLog("--- Fin de sauvegarde de configuration IO ---");
+    srv->send(422, "application/json", errPayload);
+    return;
+  }
   appendConfigSaveLog("Configuration appliquée en mémoire");
   if (!saveIoConfig()) {
     appendConfigSaveLog("Erreur : écriture du fichier io_config.json");
