@@ -4627,26 +4627,49 @@ void registerRoutes(ServerT &server) {
       srv->send(500, "application/json", R"({"error":"storage unavailable"})");
       return;
     }
-    DynamicJsonDocument doc(2048);
-    if (deserializeJson(doc, body)) {
-      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+
+    size_t docCapacity = configJsonCapacityForPayload(body.length());
+    while (true) {
+      DynamicJsonDocument doc(docCapacity);
+      if (docCapacity > 0 && doc.capacity() == 0) {
+        srv->send(500, "application/json", R"({"error":"alloc_failed"})");
+        return;
+      }
+      DeserializationError parseErr = deserializeJson(doc, body);
+      if (parseErr == DeserializationError::NoMemory) {
+        if (docCapacity < CONFIG_JSON_MAX_CAPACITY) {
+          size_t nextCapacity = growConfigJsonCapacity(docCapacity);
+          if (nextCapacity == docCapacity) {
+            srv->send(400, "application/json",
+                      R"({"error":"payload_too_large"})");
+            return;
+          }
+          docCapacity = nextCapacity;
+          continue;
+        }
+        srv->send(400, "application/json",
+                  R"({"error":"payload_too_large"})");
+        return;
+      }
+      if (parseErr) {
+        srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+        return;
+      }
+
+      String clientPath = doc["path"].as<String>();
+      String fsPath;
+      if (!resolveUserPath(clientPath, fsPath)) {
+        srv->send(400, "application/json", R"({"error":"invalid path"})");
+        return;
+      }
+      String content = doc["content"].as<String>();
+      if (!writeTextFile(fsPath.c_str(), content)) {
+        srv->send(500, "application/json", R"({"error":"write failed"})");
+        return;
+      }
+      srv->send(200, "application/json", R"({"status":"ok"})");
       return;
     }
-    String clientPath = doc["path"].as<String>();
-    String fsPath;
-    if (!resolveUserPath(clientPath, fsPath)) {
-      srv->send(400, "application/json", R"({"error":"invalid path"})");
-      return;
-    }
-    String content = doc["content"].as<String>();
-    File f = LittleFS.open(fsPath, "w");
-    if (!f) {
-      srv->send(500, "application/json", R"({"error":"open failed"})");
-      return;
-    }
-    f.print(content);
-    f.close();
-    srv->send(200, "application/json", R"({"status":"ok"})");
   });
 
   server.on("/api/files/create", HTTP_POST, [&server]() {
@@ -4661,32 +4684,54 @@ void registerRoutes(ServerT &server) {
       srv->send(500, "application/json", R"({"error":"storage unavailable"})");
       return;
     }
-    DynamicJsonDocument doc(512);
-    if (deserializeJson(doc, body)) {
-      srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+
+    size_t docCapacity = configJsonCapacityForPayload(body.length());
+    while (true) {
+      DynamicJsonDocument doc(docCapacity);
+      if (docCapacity > 0 && doc.capacity() == 0) {
+        srv->send(500, "application/json", R"({"error":"alloc_failed"})");
+        return;
+      }
+      DeserializationError parseErr = deserializeJson(doc, body);
+      if (parseErr == DeserializationError::NoMemory) {
+        if (docCapacity < CONFIG_JSON_MAX_CAPACITY) {
+          size_t nextCapacity = growConfigJsonCapacity(docCapacity);
+          if (nextCapacity == docCapacity) {
+            srv->send(400, "application/json",
+                      R"({"error":"payload_too_large"})");
+            return;
+          }
+          docCapacity = nextCapacity;
+          continue;
+        }
+        srv->send(400, "application/json",
+                  R"({"error":"payload_too_large"})");
+        return;
+      }
+      if (parseErr) {
+        srv->send(400, "application/json", R"({"error":"Invalid JSON"})");
+        return;
+      }
+
+      String clientPath = doc["path"].as<String>();
+      String fsPath;
+      if (!resolveUserPath(clientPath, fsPath)) {
+        srv->send(400, "application/json", R"({"error":"invalid path"})");
+        return;
+      }
+      if (LittleFS.exists(fsPath)) {
+        srv->send(409, "application/json", R"({"error":"exists"})");
+        return;
+      }
+      String content = doc["content"].as<String>();
+      if (!writeTextFile(fsPath.c_str(), content)) {
+        LittleFS.remove(fsPath);
+        srv->send(500, "application/json", R"({"error":"create failed"})");
+        return;
+      }
+      srv->send(200, "application/json", R"({"status":"ok"})");
       return;
     }
-    String clientPath = doc["path"].as<String>();
-    String fsPath;
-    if (!resolveUserPath(clientPath, fsPath)) {
-      srv->send(400, "application/json", R"({"error":"invalid path"})");
-      return;
-    }
-    if (LittleFS.exists(fsPath)) {
-      srv->send(409, "application/json", R"({"error":"exists"})");
-      return;
-    }
-    String content = doc["content"].as<String>();
-    File f = LittleFS.open(fsPath, "w");
-    if (!f) {
-      srv->send(500, "application/json", R"({"error":"create failed"})");
-      return;
-    }
-    if (content.length() > 0) {
-      f.print(content);
-    }
-    f.close();
-    srv->send(200, "application/json", R"({"status":"ok"})");
   });
 
   server.on("/api/files/rename", HTTP_POST, [&server]() {
