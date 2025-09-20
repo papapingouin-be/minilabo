@@ -3623,6 +3623,25 @@ bool requireAuth(ServerT *server) {
   return true;
 }
 
+template <typename ServerT>
+static String extractPlainBody(ServerT *server) {
+  if (server->hasArg("plain")) {
+    return server->arg("plain");
+  }
+  String body = server->arg("plain");
+  if (body.length() > 0) {
+    return body;
+  }
+  int argCount = server->args();
+  if (argCount == 1) {
+    String name = server->argName(0);
+    if (name.length() == 0 || name.equalsIgnoreCase("plain")) {
+      return server->arg(0);
+    }
+  }
+  return String();
+}
+
 void registerDiscoveredNode(const String &nodeId, const IPAddress &ip) {
   if (nodeId.length() == 0 || nodeId == config.nodeId) {
     return;
@@ -4052,7 +4071,7 @@ template <typename ServerT>
 void registerRoutes(ServerT &server) {
   server.on("/api/session/login", HTTP_POST, [&server]() {
     auto *srv = &server;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
@@ -4151,14 +4170,14 @@ void registerRoutes(ServerT &server) {
   server.on("/api/config/io/set", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     handleIoConfigSetRequest(srv, body);
   });
 
   server.on("/api/config/set", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     handleIoConfigSetRequest(srv, body);
   });
 
@@ -4179,14 +4198,14 @@ void registerRoutes(ServerT &server) {
   server.on("/api/config/interface/set", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     handleInterfaceConfigSetRequest(srv, body);
   });
 
   server.on("/api/config/virtual-multimeter", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
@@ -4420,7 +4439,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/output/set", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
@@ -4526,7 +4545,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/peers/set", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
@@ -4586,7 +4605,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/logs/append", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"empty_body"})");
       return;
@@ -4712,7 +4731,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/files/save", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
@@ -4769,7 +4788,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/files/create", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
@@ -4831,7 +4850,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/files/rename", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
@@ -4876,7 +4895,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/files/delete", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
@@ -4920,7 +4939,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/virtual/function-generator/output", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
@@ -4966,7 +4985,7 @@ void registerRoutes(ServerT &server) {
             [&server]() {
               auto *srv = &server;
               if (!requireAuth(srv)) return;
-              String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+              String body = extractPlainBody(srv);
               if (body.length() == 0) {
                 srv->send(400, "application/json", R"({"error":"No body"})");
                 return;
@@ -4987,7 +5006,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/virtual/oscilloscope/trace", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
@@ -5012,7 +5031,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/virtual/oscilloscope/trace/remove", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
@@ -5033,7 +5052,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/virtual/oscilloscope/capture", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
@@ -5079,7 +5098,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/virtual/multimeter/input", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
@@ -5104,7 +5123,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/virtual/multimeter/input/remove", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
@@ -5125,7 +5144,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/virtual/multimeter/measure", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
@@ -5191,7 +5210,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/virtual/math/expression", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
@@ -5229,7 +5248,7 @@ void registerRoutes(ServerT &server) {
   server.on("/api/virtual/math/remove", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    String body = srv->hasArg("plain") ? srv->arg("plain") : String();
+    String body = extractPlainBody(srv);
     if (body.length() == 0) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
