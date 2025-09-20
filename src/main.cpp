@@ -27,6 +27,7 @@
 #include <Updater.h>
 #include <memory>
 #include <cstdlib>
+#include <cstring>
 #include <math.h>
 #include <vector>
 
@@ -207,6 +208,9 @@ static const char *VIRTUAL_CONFIG_BACKUP_FILE_PATH = "/private/virtual_config.ba
 static const char *VIRTUAL_CONFIG_TEMP_FILE_PATH = "/private/virtual_config.tmp";
 static const char *VIRTUAL_CONFIG_BACKUP_STAGING_PATH = "/private/virtual_config.bak.tmp";
 static const char *LEGACY_CONFIG_FILE_PATH = "/config.json";
+static const uint32_t CONFIG_RECORD_MAGIC = 0x4D4C4243; // 'MLBC'
+static const uint16_t CONFIG_RECORD_VERSION = 1;
+static const size_t CONFIG_RECORD_HEADER_SIZE = 16; // bytes
 static const size_t CONFIG_JSON_MIN_CAPACITY = 1024;
 static const size_t CONFIG_JSON_SAFETY_MARGIN = 512;
 static const size_t CONFIG_JSON_MAX_CAPACITY = 28672;
@@ -2198,23 +2202,56 @@ static bool loadConfigFromPath(const char *path,
     return false;
   }
   size_t size = f.size();
-  std::unique_ptr<char[]> buf(new char[size + 1]);
-  size_t read = f.readBytes(buf.get(), size);
+  std::unique_ptr<uint8_t[]> raw(new uint8_t[size > 0 ? size : 1]);
+  size_t read = f.read(raw.get(), size);
   f.close();
   if (read > size) {
     read = size;
   }
-  buf[read] = '\0';
   logPrintf("Reading configuration from %s (%u/%u bytes)", path,
             static_cast<unsigned>(read), static_cast<unsigned>(size));
   if (read != size) {
     logPrintf("Warning: short read on %s (expected %u bytes, got %u)", path,
               static_cast<unsigned>(size), static_cast<unsigned>(read));
   }
-  size_t docCapacity = configJsonCapacityForPayload(read);
+  ConfigRecordMetadata meta;
+  bool isRecord = false;
+  if (!tryDecodeConfigRecord(raw.get(), read, meta, label, isRecord)) {
+    return false;
+  }
+
+  const uint8_t *jsonPtr = raw.get();
+  size_t jsonLength = read;
+  if (isRecord) {
+    const uint8_t *payloadPtr = raw.get() + CONFIG_RECORD_HEADER_SIZE;
+    jsonPtr = payloadPtr;
+    jsonLength = meta.payloadLength;
+    uint32_t actualChecksum = crc32ForBuffer(jsonPtr, jsonLength);
+    if (actualChecksum != meta.checksum) {
+      logPrintf(
+          "%s config record checksum mismatch: stored=%08X computed=%08X",
+          label, static_cast<unsigned>(meta.checksum),
+          static_cast<unsigned>(actualChecksum));
+      return false;
+    }
+    logPrintf(
+        "%s config record metadata: version=%u sections=0x%04X payload=%u checksum=%08X",
+        label, static_cast<unsigned>(meta.version),
+        static_cast<unsigned>(meta.sections),
+        static_cast<unsigned>(meta.payloadLength),
+        static_cast<unsigned>(meta.checksum));
+  }
+
+  std::unique_ptr<char[]> buf(new char[jsonLength + 1]);
+  if (jsonLength > 0) {
+    memcpy(buf.get(), jsonPtr, jsonLength);
+  }
+  buf[jsonLength] = '\0';
+
+  size_t docCapacity = configJsonCapacityForPayload(jsonLength);
   while (true) {
     DynamicJsonDocument doc(docCapacity);
-    DeserializationError err = deserializeJson(doc, buf.get(), read);
+    DeserializationError err = deserializeJson(doc, buf.get(), jsonLength);
     if (err == DeserializationError::NoMemory &&
         docCapacity < CONFIG_JSON_MAX_CAPACITY) {
       size_t nextCapacity = growConfigJsonCapacity(docCapacity);
@@ -2461,6 +2498,138 @@ void loadConfig() {
 // of the global configuration to its dedicated JSON file inside /private.
 // Call saveIoConfig(), saveInterfaceConfig() or saveVirtualConfig() after
 // modifying the respective portion of the global config.
+struct ConfigRecordMetadata {
+  uint16_t version;
+  uint16_t sections;
+  uint32_t payloadLength;
+  uint32_t checksum;
+};
+
+static uint32_t crc32ForBuffer(const uint8_t *data, size_t length) {
+  uint32_t crc = 0xFFFFFFFFu;
+  for (size_t i = 0; i < length; ++i) {
+    crc ^= static_cast<uint32_t>(data[i]);
+    for (int bit = 0; bit < 8; ++bit) {
+      if (crc & 1u) {
+        crc = (crc >> 1) ^ 0xEDB88320u;
+      } else {
+        crc >>= 1;
+      }
+    }
+  }
+  return crc ^ 0xFFFFFFFFu;
+}
+
+static uint16_t readUint16Le(const uint8_t *data) {
+  return static_cast<uint16_t>(data[0]) |
+         (static_cast<uint16_t>(data[1]) << 8);
+}
+
+static uint32_t readUint32Le(const uint8_t *data) {
+  return static_cast<uint32_t>(data[0]) |
+         (static_cast<uint32_t>(data[1]) << 8) |
+         (static_cast<uint32_t>(data[2]) << 16) |
+         (static_cast<uint32_t>(data[3]) << 24);
+}
+
+static bool writeUint16Le(File &f, uint16_t value) {
+  uint8_t buf[2];
+  buf[0] = static_cast<uint8_t>(value & 0xFFu);
+  buf[1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
+  return f.write(buf, sizeof(buf)) == sizeof(buf);
+}
+
+static bool writeUint32Le(File &f, uint32_t value) {
+  uint8_t buf[4];
+  buf[0] = static_cast<uint8_t>(value & 0xFFu);
+  buf[1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
+  buf[2] = static_cast<uint8_t>((value >> 16) & 0xFFu);
+  buf[3] = static_cast<uint8_t>((value >> 24) & 0xFFu);
+  return f.write(buf, sizeof(buf)) == sizeof(buf);
+}
+
+static bool writeConfigRecord(File &f,
+                              uint16_t sections,
+                              const uint8_t *payload,
+                              size_t payloadLength,
+                              uint32_t checksum,
+                              const char *label,
+                              const char *path) {
+  if (!writeUint32Le(f, CONFIG_RECORD_MAGIC) ||
+      !writeUint16Le(f, CONFIG_RECORD_VERSION) ||
+      !writeUint16Le(f, sections) ||
+      !writeUint32Le(f, static_cast<uint32_t>(payloadLength)) ||
+      !writeUint32Le(f, checksum)) {
+    logPrintf("Failed to write %s config header to %s", label, path);
+    return false;
+  }
+  if (payloadLength == 0) {
+    return true;
+  }
+  size_t written = f.write(payload, payloadLength);
+  if (written != payloadLength) {
+    logPrintf("Short write when writing %s config payload to %s (expected %u, wrote %u)",
+              label, path, static_cast<unsigned>(payloadLength),
+              static_cast<unsigned>(written));
+    return false;
+  }
+  return true;
+}
+
+static bool writeConfigRecordFile(const char *path,
+                                  uint16_t sections,
+                                  const uint8_t *payload,
+                                  size_t payloadLength,
+                                  uint32_t checksum,
+                                  const char *label) {
+  File f = LittleFS.open(path, "w");
+  if (!f) {
+    logPrintf("Failed to open %s for writing", path);
+    return false;
+  }
+  bool ok = writeConfigRecord(f, sections, payload, payloadLength, checksum,
+                              label, path);
+  f.flush();
+  f.close();
+  if (!ok) {
+    LittleFS.remove(path);
+  }
+  return ok;
+}
+
+static bool tryDecodeConfigRecord(const uint8_t *data,
+                                  size_t length,
+                                  ConfigRecordMetadata &meta,
+                                  const char *label,
+                                  bool &isRecord) {
+  isRecord = false;
+  if (length < CONFIG_RECORD_HEADER_SIZE) {
+    return true; // Not enough bytes to be a record; treat as plain JSON
+  }
+  uint32_t magic = readUint32Le(data);
+  if (magic != CONFIG_RECORD_MAGIC) {
+    return true; // Legacy JSON payload
+  }
+  isRecord = true;
+  meta.version = readUint16Le(data + 4);
+  meta.sections = readUint16Le(data + 6);
+  meta.payloadLength = readUint32Le(data + 8);
+  meta.checksum = readUint32Le(data + 12);
+  if (meta.version != CONFIG_RECORD_VERSION) {
+    logPrintf("Unsupported %s config record version %u", label,
+              static_cast<unsigned>(meta.version));
+    return false;
+  }
+  if (meta.payloadLength > (length - CONFIG_RECORD_HEADER_SIZE)) {
+    logPrintf(
+        "%s config record claims %u bytes but only %u available; refusing", label,
+        static_cast<unsigned>(meta.payloadLength),
+        static_cast<unsigned>(length - CONFIG_RECORD_HEADER_SIZE));
+    return false;
+  }
+  return true;
+}
+
 static bool removeFileIfExists(const char *path) {
   if (!LittleFS.exists(path)) {
     return true;
@@ -2469,58 +2638,6 @@ static bool removeFileIfExists(const char *path) {
     logPrintf("Failed to remove %s", path);
     return false;
   }
-  return true;
-}
-
-static bool writeStringToFile(const char *path, const String &payload) {
-  File f = LittleFS.open(path, "w");
-  if (!f) {
-    logPrintf("Failed to open %s for writing", path);
-    return false;
-  }
-  size_t written = f.print(payload);
-  f.flush();
-  f.close();
-  if (written != payload.length()) {
-    logPrintf("Short write when saving %s: expected %u bytes, wrote %u", path,
-              static_cast<unsigned>(payload.length()),
-              static_cast<unsigned>(written));
-    LittleFS.remove(path);
-    return false;
-  }
-  return true;
-}
-
-static bool copyFileToPath(const char *sourcePath, const char *destPath) {
-  File src = LittleFS.open(sourcePath, "r");
-  if (!src) {
-    logPrintf("Failed to open %s for reading", sourcePath);
-    return false;
-  }
-  File dst = LittleFS.open(destPath, "w");
-  if (!dst) {
-    logPrintf("Failed to open %s for writing", destPath);
-    src.close();
-    return false;
-  }
-  uint8_t buffer[256];
-  while (src.available()) {
-    size_t read = src.read(buffer, sizeof(buffer));
-    if (read == 0) {
-      break;
-    }
-    size_t written = dst.write(buffer, read);
-    if (written != read) {
-      logPrintf("Short write while copying %s to %s", sourcePath, destPath);
-      src.close();
-      dst.close();
-      LittleFS.remove(destPath);
-      return false;
-    }
-  }
-  dst.flush();
-  src.close();
-  dst.close();
   return true;
 }
 
@@ -2539,18 +2656,35 @@ static bool saveConfigSection(const char *label,
     logMessage(String(label) + " config directory unavailable");
     return false;
   }
+  const uint8_t *payloadBytes =
+      reinterpret_cast<const uint8_t *>(payload.c_str());
+  size_t payloadLength = payload.length();
+  uint32_t checksum = crc32ForBuffer(payloadBytes, payloadLength);
+
   if (!removeFileIfExists(tempPath)) {
     return false;
   }
-  if (!writeStringToFile(tempPath, payload)) {
+  File tempFile = LittleFS.open(tempPath, "w");
+  if (!tempFile) {
+    logPrintf("Failed to open %s for writing", tempPath);
     return false;
   }
-  if (!removeFileIfExists(stagingPath)) {
+  bool wroteTemp = writeConfigRecord(tempFile, static_cast<uint16_t>(sections),
+                                     payloadBytes, payloadLength, checksum,
+                                     label, tempPath);
+  tempFile.flush();
+  tempFile.close();
+  if (!wroteTemp) {
     LittleFS.remove(tempPath);
     return false;
   }
+
   bool hadExistingConfig = LittleFS.exists(primaryPath);
   if (hadExistingConfig) {
+    if (!removeFileIfExists(stagingPath)) {
+      LittleFS.remove(tempPath);
+      return false;
+    }
     if (!LittleFS.rename(primaryPath, stagingPath)) {
       logPrintf("Failed to stage %s configuration %s", label, primaryPath);
       LittleFS.remove(tempPath);
@@ -2559,6 +2693,7 @@ static bool saveConfigSection(const char *label,
     logPrintf("Existing %s configuration moved to staging %s", label,
               stagingPath);
   }
+
   if (!LittleFS.rename(tempPath, primaryPath)) {
     logPrintf("Failed to commit %s configuration file %s", label,
               primaryPath);
@@ -2571,7 +2706,9 @@ static bool saveConfigSection(const char *label,
     }
     return false;
   }
-  if (!writeStringToFile(backupPath, payload)) {
+
+  if (!writeConfigRecordFile(backupPath, static_cast<uint16_t>(sections),
+                             payloadBytes, payloadLength, checksum, label)) {
     logPrintf("Failed to refresh %s backup config file %s", label,
               backupPath);
     if (hadExistingConfig) {
@@ -2582,21 +2719,20 @@ static bool saveConfigSection(const char *label,
       if (!LittleFS.rename(stagingPath, primaryPath)) {
         logPrintf("Failed to restore %s configuration from staging %s", label,
                   stagingPath);
-      } else {
-        logPrintf("%s configuration restored from staging after backup failure",
-                  label);
-        copyFileToPath(primaryPath, backupPath);
       }
     } else {
       removeFileIfExists(primaryPath);
     }
     return false;
   }
+
   if (hadExistingConfig) {
     removeFileIfExists(stagingPath);
   }
-  logPrintf("%s configuration saved to %s (%u bytes)", label, primaryPath,
-            static_cast<unsigned>(payload.length()));
+
+  logPrintf("%s configuration persisted (%u bytes, crc=%08X)", label,
+            static_cast<unsigned>(payloadLength),
+            static_cast<unsigned>(checksum));
   logMessage(String(label) + " configuration saved");
   return true;
 }
@@ -2895,15 +3031,42 @@ static bool verifyConfigStored(const Config &expected,
     return false;
   }
   size_t size = f.size();
-  std::unique_ptr<char[]> buf(new char[size + 1]);
-  size_t read = f.readBytes(buf.get(), size);
+  std::unique_ptr<uint8_t[]> raw(new uint8_t[size > 0 ? size : 1]);
+  size_t read = f.read(raw.get(), size);
   f.close();
-  buf[read] = '\0';
+  ConfigRecordMetadata meta;
+  bool isRecord = false;
+  if (!tryDecodeConfigRecord(raw.get(), read, meta, path, isRecord)) {
+    errorDetail = "record_header_invalid";
+    return false;
+  }
 
-  size_t docCapacity = configJsonCapacityForPayload(read);
+  const uint8_t *jsonPtr = raw.get();
+  size_t jsonLength = read;
+  if (isRecord) {
+    jsonPtr = raw.get() + CONFIG_RECORD_HEADER_SIZE;
+    jsonLength = meta.payloadLength;
+    uint32_t actualChecksum = crc32ForBuffer(jsonPtr, jsonLength);
+    if (actualChecksum != meta.checksum) {
+      errorDetail = "checksum_mismatch";
+      logPrintf(
+          "%s verification checksum mismatch: stored=%08X computed=%08X", path,
+          static_cast<unsigned>(meta.checksum),
+          static_cast<unsigned>(actualChecksum));
+      return false;
+    }
+  }
+
+  std::unique_ptr<char[]> buf(new char[jsonLength + 1]);
+  if (jsonLength > 0) {
+    memcpy(buf.get(), jsonPtr, jsonLength);
+  }
+  buf[jsonLength] = '\0';
+
+  size_t docCapacity = configJsonCapacityForPayload(jsonLength);
   while (true) {
     DynamicJsonDocument doc(docCapacity);
-    DeserializationError err = deserializeJson(doc, buf.get());
+    DeserializationError err = deserializeJson(doc, buf.get(), jsonLength);
     if (err == DeserializationError::NoMemory &&
         docCapacity < CONFIG_JSON_MAX_CAPACITY) {
       size_t nextCapacity = growConfigJsonCapacity(docCapacity);
