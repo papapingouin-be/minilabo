@@ -711,8 +711,7 @@ function snapshotInput(item, idx) {
     snapshot.pin = item.pin || '';
   }
   if (snapshot.type === 'ads1115') {
-    const channel = Number.isFinite(item.adsChannel) ? parseInt(item.adsChannel, 10) : 0;
-    snapshot.adsChannel = channel;
+    snapshot.adsChannel = toInteger(item.adsChannel, 0, { min: 0, max: 3 });
   }
   if (snapshot.type === 'remote') {
     snapshot.remoteNode = item.remoteNode || '';
@@ -732,7 +731,7 @@ function snapshotOutput(item, idx) {
     snapshot.pin = item.pin || '';
   }
   if (snapshot.type === 'pwm010') {
-    snapshot.pwmFreq = Number.isFinite(item.pwmFreq) ? Math.max(1, Math.round(item.pwmFreq)) : 2000;
+    snapshot.pwmFreq = toInteger(item.pwmFreq, 2000, { min: 1 });
   }
   if (snapshot.type === 'mcp4725') {
     snapshot.i2cAddress = item.i2cAddress && item.i2cAddress.length ? item.i2cAddress : '0x60';
@@ -840,6 +839,21 @@ function toNumber(value, fallback) {
   }
   const num = Number(value);
   return Number.isFinite(num) ? num : fallback;
+}
+
+function toInteger(value, fallback, options = {}) {
+  const num = toNumber(value, fallback);
+  if (!Number.isFinite(num)) {
+    return fallback;
+  }
+  let result = Math.round(num);
+  if (options.min !== undefined) {
+    result = Math.max(options.min, result);
+  }
+  if (options.max !== undefined) {
+    result = Math.min(options.max, result);
+  }
+  return result;
 }
 
 function newInputConfig(type) {
@@ -1166,9 +1180,11 @@ function renderTypeSpecificFields(data, kind) {
         opt.textContent = `A${ch}`;
         select.appendChild(opt);
       });
-      select.value = Number.isFinite(data.adsChannel) ? data.adsChannel : 0;
+      const selectedChannel = toInteger(data.adsChannel, 0, { min: 0, max: 3 });
+      select.value = String(selectedChannel);
+      modalState.data.adsChannel = selectedChannel;
       select.onchange = (ev) => {
-        modalState.data.adsChannel = parseInt(ev.target.value, 10);
+        modalState.data.adsChannel = toInteger(ev.target.value, 0, { min: 0, max: 3 });
       };
       row.appendChild(label);
       row.appendChild(select);
@@ -1246,8 +1262,7 @@ function renderTypeSpecificFields(data, kind) {
       input.max = '40000';
       input.value = data.pwmFreq || 2000;
       input.oninput = (ev) => {
-        const value = parseInt(ev.target.value, 10);
-        modalState.data.pwmFreq = Number.isFinite(value) ? value : 2000;
+        modalState.data.pwmFreq = toInteger(ev.target.value, 2000, { min: 1 });
       };
       row.appendChild(label);
       row.appendChild(input);
@@ -1559,7 +1574,7 @@ async function saveConfig() {
         obj.pin = item.pin || '';
       }
       if (item.type === 'ads1115') {
-        obj.adsChannel = Number.isFinite(item.adsChannel) ? parseInt(item.adsChannel, 10) : 0;
+        obj.adsChannel = toInteger(item.adsChannel, 0, { min: 0, max: 3 });
       }
       if (item.type === 'remote') {
         obj.remoteNode = item.remoteNode || '';
@@ -1578,7 +1593,7 @@ async function saveConfig() {
         obj.pin = item.pin || '';
       }
       if (item.type === 'pwm010') {
-        obj.pwmFreq = Number.isFinite(item.pwmFreq) ? Math.max(1, Math.round(item.pwmFreq)) : 2000;
+        obj.pwmFreq = toInteger(item.pwmFreq, 2000, { min: 1 });
       }
       if (item.type === 'mcp4725') {
         obj.i2cAddress = item.i2cAddress && item.i2cAddress.length ? item.i2cAddress : '0x60';
