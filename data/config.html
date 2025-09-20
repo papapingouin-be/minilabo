@@ -1546,7 +1546,6 @@ async function saveConfig() {
     if (statusEl) {
       statusEl.textContent = 'Une sauvegarde est déjà en cours...';
     }
-    logIoStep('Tentative de sauvegarde ignorée car une autre sauvegarde est en cours.');
     return;
   }
 
@@ -1556,9 +1555,10 @@ async function saveConfig() {
   if (saveBtn && !saveBtn.dataset.label) {
     saveBtn.dataset.label = originalSaveLabel;
   }
-  const initialRebootDisabled = rebootBtn ? rebootBtn.disabled : false;
-  let rebootShouldBeEnabled = false;
 
+  const initialRebootDisabled = rebootBtn ? rebootBtn.disabled : false;
+
+  let rebootShouldBeEnabled = false;
   const restoreUi = () => {
     if (saveBtn) {
       saveBtn.disabled = false;
@@ -1573,9 +1573,7 @@ async function saveConfig() {
   };
 
   saveInProgress = true;
-  startIoLogSession('save', { title: 'Sauvegarde de la configuration', mode: 'save' });
   refreshModuleStateFromForm();
-  logIoStep('Début de sauvegarde de la configuration', { ...moduleState });
   markRebootPrompt(false);
   if (saveBtn) {
     saveBtn.disabled = true;
@@ -1588,20 +1586,8 @@ async function saveConfig() {
     statusEl.textContent = 'Sauvegarde en cours...';
   }
 
+  let payload = '';
   try {
-    try {
-      logIoStep('Validation de la session d’authentification avant sauvegarde.');
-      await ensureSession();
-      logIoStep('Session d’authentification confirmée.');
-    } catch (authErr) {
-      logIoStep('Échec de la validation de la session', normaliseErrorForLog(authErr));
-      if (statusEl) {
-        statusEl.textContent = describeErrorMessage(authErr, 'Authentification requise pour sauvegarder.');
-      }
-      cancelIoLogSession('Séquence d’enregistrement interrompue');
-      return;
-    }
-
     const cfg = {};
     cfg.modules = {
       ads1115: document.getElementById('modAds').checked,
@@ -1653,138 +1639,41 @@ async function saveConfig() {
       return obj;
     });
     cfg.outputCount = cfg.outputs.length;
-    logIoStep('Configuration assemblée avant envoi', {
-      inputs: cfg.inputs.length,
-      outputs: cfg.outputs.length
-    });
-
-    let payload;
-    try {
-      payload = JSON.stringify(cfg);
-    } catch (err) {
-      logIoStep('Erreur lors de la sérialisation JSON locale', { message: err.message });
-      if (statusEl) {
-        statusEl.textContent = 'Erreur lors de la préparation de la configuration.';
-      }
-      cancelIoLogSession('Séquence d’enregistrement interrompue');
-      return;
+    payload = JSON.stringify(cfg);
+  } catch (err) {
+    console.error(err);
+    if (statusEl) {
+      statusEl.textContent = 'Erreur lors de la préparation de la configuration.';
     }
-    const payloadPreview = payload.length > 800 ? `${payload.slice(0, 800)}…` : payload;
-    logIoStep('JSON de configuration généré', {
-      octets: payload.length,
-      aperçu: payloadPreview
-    });
+    restoreUi();
+    return;
+  }
 
-    const requestOptions = {
+  try {
+    const response = await authFetch('/api/config/io/set', {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
+      headers: { 'Content-Type': 'application/json' },
       body: payload
-    };
-    let currentEndpoint = '/api/config/io/set';
-    logIoStep('Transmission de la configuration au serveur', { endpoint: currentEndpoint });
-
-    async function sendConfigRequest(url) {
-      const response = await authFetch(url, requestOptions);
-      let raw = '';
-      try {
-        raw = await response.text();
-      } catch (_) {
-        raw = '';
-      }
-      let parsed = null;
-      if (raw && raw.length) {
-        try {
-          parsed = JSON.parse(raw);
-        } catch (_) {
-          parsed = null;
-        }
-      }
-      return { response, raw, parsed };
-    }
-
-    let attempt = await sendConfigRequest(currentEndpoint);
-    let legacyEndpointUsed = false;
-    if (attempt.response.status === 404) {
-      logIoStep('Point de terminaison /api/config/io/set indisponible, tentative via /api/config/set.');
-      legacyEndpointUsed = true;
-      currentEndpoint = '/api/config/set';
-      logIoStep('Transmission de la configuration au serveur', { endpoint: currentEndpoint, mode: 'compatibilité' });
-      attempt = await sendConfigRequest(currentEndpoint);
-    }
-
-    const { response: resp, raw, parsed } = attempt;
-    logIoStep('Analyse de la réponse du serveur', { status: resp.status, endpoint: currentEndpoint });
-    if (resp.ok) {
-      if (parsed && parsed.applied) {
-        applyServerSnapshots('input', parsed.applied.inputs || []);
-        applyServerSnapshots('output', parsed.applied.outputs || []);
-        renderIoList('input');
-        renderIoList('output');
-      }
-      if (legacyEndpointUsed) {
-        logIoStep('Configuration sauvegardée via le point de terminaison historique /api/config/set.');
-      } else {
-        logIoStep('Configuration sauvegardée avec succès');
-      }
-      const successStatus = legacyEndpointUsed
-        ? 'Sauvegarde vérifiée (mode compatibilité). Veuillez redémarrer pour appliquer les changements.'
-        : 'Sauvegarde vérifiée. Veuillez redémarrer pour appliquer les changements.';
-      if (statusEl) {
-        statusEl.textContent = successStatus;
-      }
-      rebootShouldBeEnabled = true;
-      try {
-        logIoStep('Relecture de la configuration depuis le serveur pour validation.');
-        await loadConfig();
-        logIoStep('Configuration rechargée après sauvegarde.');
-      } catch (reloadErr) {
-        logIoStep('La relecture de la configuration après sauvegarde a rencontré une erreur', normaliseErrorForLog(reloadErr));
-      }
-      const finalMessage = legacyEndpointUsed
-        ? 'Séquence d’enregistrement validée (compatibilité)'
-        : 'Séquence d’enregistrement validée';
-      completeIoLogSession(finalMessage);
-    } else {
-      let message = 'Erreur lors de la sauvegarde';
-      if (parsed && parsed.error) {
-        if (parsed.detail) {
-          message = `Erreur lors de la sauvegarde (${parsed.error}: ${parsed.detail})`;
-        } else {
-          message = `Erreur lors de la sauvegarde (${parsed.error})`;
-        }
-      } else if (raw && raw.length) {
-        message = `Erreur lors de la sauvegarde (${raw})`;
-      }
-      if (legacyEndpointUsed) {
-        message += ' — tentative via /api/config/set.';
-      }
-      if (parsed) {
-        logIoStep('Réponse JSON du serveur', { status: resp.status, json: parsed });
-      } else if (raw && raw.length) {
-        const responsePreview = raw.length > 800 ? `${raw.slice(0, 800)}…` : raw;
-        logIoStep('Réponse texte du serveur', {
-          status: resp.status,
-          octets: raw.length,
-          aperçu: responsePreview
-        });
-      }
-      logIoStep('Échec de la sauvegarde', { status: resp.status, message });
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      const message = text && text.length
+        ? `Erreur lors de la sauvegarde (${text})`
+        : `Erreur lors de la sauvegarde (${response.status})`;
       if (statusEl) {
         statusEl.textContent = message;
       }
-      cancelIoLogSession('Séquence d’enregistrement interrompue');
       return;
+    }
+    rebootShouldBeEnabled = true;
+    if (statusEl) {
+      statusEl.textContent = 'Fichier enregistré.';
     }
   } catch (err) {
     console.error(err);
-    logIoStep('Exception lors de la sauvegarde', normaliseErrorForLog(err));
     if (statusEl) {
-      const message = describeErrorMessage(err, 'Erreur lors de la sauvegarde');
-      statusEl.textContent = message.startsWith('Erreur')
-        ? message
-        : `Erreur lors de la sauvegarde (${message})`;
+      statusEl.textContent = 'Erreur lors de la sauvegarde.';
     }
-    cancelIoLogSession('Séquence d’enregistrement interrompue');
   } finally {
     restoreUi();
   }
