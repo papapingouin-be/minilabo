@@ -23,6 +23,146 @@ const state = {
   inputs: [],
 };
 
+function getInputInfoByName(name) {
+  if (!name) {
+    return null;
+  }
+  return state.inputs.find((item) => item.name === name) || null;
+}
+
+function isEsp8266AdcInput(inputInfo) {
+  if (!inputInfo) {
+    return false;
+  }
+  const pin = normaliseString(inputInfo.pin).toUpperCase();
+  const type = normaliseString(inputInfo.type).toLowerCase();
+  return pin === 'A0' || type === 'adc' || type === 'analog';
+}
+
+function buildEsp8266AdcScript() {
+  return `// Conversion complète depuis la broche A0 de l'ESP8266 (ADC interne 10 bits, 0-1 V).
+const {
+  raw = 0,
+  scale = 1,
+  offset = 0,
+  history = [],
+  timestamp = Date.now(),
+  measurement = 'voltage',
+  acMode = 'dc',
+} = context;
+
+const ADC_RESOLUTION = 1023;
+const ADC_VREF = 1.0; // Tension pleine échelle sur A0.
+
+// Tension instantanée issue de l'échantillon brut.
+const tensionInstantanee = (raw / ADC_RESOLUTION) * ADC_VREF;
+
+// Fenêtre d'échantillonnage en volts pour calculer moyenne, RMS et crêtes.
+const fenetre = [];
+for (let i = 0; i < history.length; i += 1) {
+  const point = history[i];
+  if (point && Number.isFinite(point.raw)) {
+    fenetre.push((point.raw / ADC_RESOLUTION) * ADC_VREF);
+  }
+}
+fenetre.push(tensionInstantanee);
+
+const tailleFenetre = fenetre.length || 1;
+const tensionMoyenne = fenetre.reduce((acc, valeur) => acc + valeur, 0) / tailleFenetre;
+const tensionRms = Math.sqrt(fenetre.reduce((acc, valeur) => acc + valeur * valeur, 0) / tailleFenetre);
+const creteMax = fenetre.reduce((acc, valeur) => (valeur > acc ? valeur : acc), fenetre[0]);
+const creteMin = fenetre.reduce((acc, valeur) => (valeur < acc ? valeur : acc), fenetre[0]);
+const amplitudeCreteAC = creteMax - creteMin;
+
+// Application de l'échelle/décalage configurés sur le canal.
+const mesureCalibree = tensionInstantanee * scale + offset;
+
+// Mode de mesure sélectionné sur le multimètre (tension, courant, etc.).
+const mode = typeof measurement === 'string' && measurement.length ? measurement : 'voltage';
+
+// Estimation de fréquence par passages par zéro sur la fenêtre d'échantillonnage.
+const marqueursTemps = [];
+for (let i = 0; i < history.length; i += 1) {
+  const point = history[i];
+  if (point && Number.isFinite(point.timestamp)) {
+    marqueursTemps.push(point.timestamp);
+  }
+}
+marqueursTemps.push(timestamp);
+let passages = 0;
+for (let i = 1; i < fenetre.length; i += 1) {
+  const precedent = fenetre[i - 1] - tensionMoyenne;
+  const courant = fenetre[i] - tensionMoyenne;
+  if ((precedent <= 0 && courant > 0) || (precedent >= 0 && courant < 0)) {
+    passages += 1;
+  }
+}
+const dureeFenetre = marqueursTemps.length > 1 ? (marqueursTemps[marqueursTemps.length - 1] - marqueursTemps[0]) / 1000 : 0;
+const frequenceEstimee = dureeFenetre > 0 ? (passages / 2) / dureeFenetre : 0;
+
+// Table de conversion pour chaque fonction de mesure disponible.
+const conversions = {
+  voltage: {
+    valeur: mesureCalibree,
+    unite: 'V',
+    symbole: 'U',
+    commentaire: "Tension instantanée calibrée (DC : moyenne, AC : RMS).",
+  },
+  current: {
+    valeur: mesureCalibree,
+    unite: 'A',
+    symbole: 'I',
+    commentaire: "Adapter scale = 1/Rshunt pour I = U/R.",
+  },
+  resistance: {
+    valeur: mesureCalibree,
+    unite: 'Ω',
+    symbole: 'R',
+    commentaire: "Injecter un courant connu et fixer scale = 1/Itest pour R = U/I.",
+  },
+  frequency: {
+    valeur: frequenceEstimee * scale + offset,
+    unite: 'Hz',
+    symbole: 'f',
+    commentaire: "Estimation par comptage des passages par zéro sur l'échantillonnage.",
+  },
+  capacitance: {
+    valeur: mesureCalibree,
+    unite: 'F',
+    symbole: 'C',
+    commentaire: "Utiliser l'échelon scale pour appliquer I = C·dU/dt.",
+  },
+  inductance: {
+    valeur: mesureCalibree,
+    unite: 'H',
+    symbole: 'L',
+    commentaire: "Utiliser l'échelon scale pour appliquer U = L·dI/dt.",
+  },
+};
+
+const mesureActive = conversions[mode] || conversions.voltage;
+
+// Synthèse des grandeurs utiles pour l'analyse (moyenne, RMS, crêtes).
+const synthese = {
+  moyenne: tensionMoyenne,
+  rms: tensionRms,
+  creteMax,
+  creteMin,
+  creteAC: amplitudeCreteAC,
+  acMode,
+};
+
+return {
+  value: mesureActive.valeur,
+  unit: mesureActive.unite,
+  symbol: mesureActive.symbole,
+  decimals: mode === 'voltage' ? 3 : 2,
+  measurementMode: mode,
+  details: synthese,
+  commentaire: mesureActive.commentaire,
+};`;
+}
+
 function normaliseString(value) {
   if (typeof value !== 'string') {
     return '';
@@ -41,7 +181,10 @@ function normaliseNumber(value, fallback = null) {
   return num;
 }
 
-function getDefaultProcessingScript(profile) {
+function getDefaultProcessingScript(profile, inputInfo = null) {
+  if (isEsp8266AdcInput(inputInfo)) {
+    return buildEsp8266AdcScript();
+  }
   if (profile === 'frequency') {
     return [
       "// Estimation simple de la fréquence à partir d'un compteur cumulatif",
@@ -148,7 +291,7 @@ function createDefaultChannel() {
   const id = nextDefaultId();
   const baseInput = state.inputs.find((item) => item.active) || state.inputs[0];
   const profile = 'voltage';
-  const processing = getDefaultProcessingScript(profile);
+  const processing = getDefaultProcessingScript(profile, baseInput);
   return {
     id,
     name: id,
@@ -193,7 +336,7 @@ function setStatus(message, type = '') {
   }
 }
 
-function handleInputSelection(select, channel, refreshSummary) {
+function handleInputSelection(select, channel, refreshSummary, onInputChanged) {
   select.innerHTML = '';
   const placeholder = document.createElement('option');
   placeholder.value = '';
@@ -210,6 +353,9 @@ function handleInputSelection(select, channel, refreshSummary) {
   select.addEventListener('change', (event) => {
     channel.input = event.target.value.trim();
     refreshSummary();
+    if (typeof onInputChanged === 'function') {
+      onInputChanged(channel.input);
+    }
   });
 }
 
@@ -326,7 +472,6 @@ function renderChannels() {
     card.appendChild(firstRow);
 
     const inputSelect = document.createElement('select');
-    handleInputSelection(inputSelect, channel, refreshSummary);
     card.appendChild(createField('Entrée associée', inputSelect));
 
     const measurementRow = document.createElement('div');
@@ -370,15 +515,44 @@ function renderChannels() {
     card.appendChild(measurementRow);
 
     const scriptArea = document.createElement('textarea');
+    scriptArea.classList.add('code-editor');
     scriptArea.spellcheck = false;
-    scriptArea.rows = 6;
-    scriptArea.placeholder = 'Utilisez raw, scale, offset, history, timestamp…';
+    scriptArea.autocapitalize = 'off';
+    scriptArea.autocomplete = 'off';
+    scriptArea.autocorrect = 'off';
+    scriptArea.rows = 14;
+    scriptArea.wrap = 'off';
+    scriptArea.placeholder = 'Variables disponibles : raw, scale, offset, history, timestamp, measurement, acMode…';
+    const scriptId = `${channel.id || `channel-${index + 1}`}-script`;
+    scriptArea.id = scriptId;
+
+    const applyTemplate = (force = false) => {
+      const inputInfo = getInputInfoByName(channel.input);
+      const template = getDefaultProcessingScript(channel.profile, inputInfo);
+      if (
+        force ||
+        !scriptArea.value.trim().length ||
+        (channel._lastTemplate && channel._lastTemplate === scriptArea.value)
+      ) {
+        channel.processing = template;
+        channel._lastTemplate = template;
+        scriptArea.value = template;
+      }
+    };
+
     if (!channel.processing || !channel.processing.trim().length) {
-      const template = getDefaultProcessingScript(channel.profile);
-      channel.processing = template;
-      channel._lastTemplate = template;
+      applyTemplate(true);
+    } else {
+      scriptArea.value = channel.processing;
+      const inputInfo = getInputInfoByName(channel.input);
+      const defaultTemplate = getDefaultProcessingScript(channel.profile, inputInfo);
+      if (channel.processing && channel.processing.trim() === defaultTemplate.trim()) {
+        channel._lastTemplate = defaultTemplate;
+      } else {
+        channel._lastTemplate = null;
+      }
     }
-    scriptArea.value = channel.processing;
+
     scriptArea.addEventListener('input', (event) => {
       channel.processing = event.target.value;
       if (channel._lastTemplate && event.target.value !== channel._lastTemplate) {
@@ -390,18 +564,15 @@ function renderChannels() {
       const value = event.target.value;
       channel.profile = MEASUREMENT_IDS.has(value) ? value : 'voltage';
       refreshSummary();
-      const template = getDefaultProcessingScript(channel.profile);
-      if (!scriptArea.value.trim().length || channel._lastTemplate === scriptArea.value) {
-        channel.processing = template;
-        channel._lastTemplate = template;
-        scriptArea.value = template;
-      }
+      applyTemplate(false);
     });
 
     displaySelect.addEventListener('change', (event) => {
       const value = event.target.value;
       channel.displayMode = DISPLAY_IDS.has(value) ? value : 'digital';
     });
+
+    handleInputSelection(inputSelect, channel, refreshSummary, () => applyTemplate(false));
 
     const secondRow = document.createElement('div');
     secondRow.className = 'field-row';
@@ -419,7 +590,52 @@ function renderChannels() {
     );
     card.appendChild(thirdRow);
 
-    card.appendChild(createField('Logique de mesure (JavaScript)', scriptArea));
+    const scriptField = document.createElement('div');
+    scriptField.className = 'field code-field';
+    const scriptLabel = document.createElement('label');
+    scriptLabel.textContent = 'Logique de mesure (JavaScript)';
+    scriptLabel.setAttribute('for', scriptId);
+    const codeToolbar = document.createElement('div');
+    codeToolbar.className = 'code-toolbar';
+    const helpButton = document.createElement('button');
+    helpButton.type = 'button';
+    helpButton.className = 'code-help-btn';
+    helpButton.textContent = '📘 Aide mesures';
+    helpButton.setAttribute('aria-expanded', 'false');
+    const editorWrapper = document.createElement('div');
+    editorWrapper.className = 'code-editor-wrapper';
+    editorWrapper.appendChild(scriptArea);
+    const helpPanel = document.createElement('div');
+    helpPanel.className = 'code-help-panel';
+    helpPanel.hidden = true;
+    helpPanel.setAttribute('role', 'dialog');
+    helpPanel.setAttribute('aria-label', 'Aide programmation des mesures');
+    helpPanel.tabIndex = -1;
+    helpPanel.innerHTML = `
+      <p><strong>Variables de calcul</strong> – valeurs disponibles pour construire vos formules&nbsp;:</p>
+      <ul>
+        <li><code>raw</code> : lecture brute (0 à 1023 pour A0) fournie par l'échantillonnage.</li>
+        <li><code>scale</code> et <code>offset</code> : réglages du canal pour l'étalonnage.</li>
+        <li><code>history</code> : tableau des derniers points {raw, scaled, value, timestamp} (fenêtre d'échantillonnage).</li>
+        <li><code>timestamp</code> : horodatage en millisecondes du point courant.</li>
+        <li><code>measurement</code> : mode sélectionné (tension, courant, résistance, etc.).</li>
+        <li><code>acMode</code> : lecture en DC ou AC (bouton AC/DC du multimètre).</li>
+        <li><code>Math</code> : fonctions mathématiques JavaScript (sin, sqrt, pow...).</li>
+      </ul>
+      <p>Utilisez ces grandeurs pour calculer une moyenne glissante, une valeur efficace (RMS), des valeurs de crête ou encore le pic à pic à partir de la fenêtre d'échantillonnage.</p>
+      <p>Retournez soit un nombre, soit un objet <code>{ value, unit, symbol, decimals }</code> pour piloter l'affichage du multimètre.</p>
+    `;
+    helpButton.addEventListener('click', () => {
+      const expanded = helpPanel.hidden;
+      helpPanel.hidden = !expanded;
+      helpButton.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      if (!helpPanel.hidden) {
+        helpPanel.focus();
+      }
+    });
+    codeToolbar.appendChild(helpButton);
+    scriptField.append(scriptLabel, codeToolbar, editorWrapper, helpPanel);
+    card.appendChild(scriptField);
 
     const fourthRow = document.createElement('div');
     fourthRow.className = 'field-row';
@@ -534,6 +750,8 @@ async function loadConfiguration() {
       name: normaliseString(entry && entry.name),
       unit: normaliseString(entry && entry.unit),
       active: entry && entry.active !== false,
+      type: normaliseString(entry && entry.type),
+      pin: normaliseString(entry && entry.pin),
     })).filter((item) => item.name.length > 0);
     let channels = [];
     if (cfg.virtualMultimeter && Array.isArray(cfg.virtualMultimeter.channels)) {

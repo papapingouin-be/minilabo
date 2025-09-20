@@ -179,7 +179,7 @@ function ensureChannelHistory(channel) {
   return channel.history;
 }
 
-function executeProcessing(channel, rawValue, scaledValue) {
+function executeProcessing(channel, rawValue, scaledValue, environment = {}) {
   const history = ensureChannelHistory(channel);
   const timestamp = Date.now();
   const overrides = {
@@ -202,6 +202,14 @@ function executeProcessing(channel, rawValue, scaledValue) {
         history: history.slice(-32),
         timestamp,
         Math,
+        measurement:
+          typeof environment.measurement === 'string' && environment.measurement.length
+            ? environment.measurement
+            : channel?.activeProfile || channel?.profile || 'voltage',
+        acMode:
+          typeof environment.acMode === 'string' && environment.acMode.length
+            ? environment.acMode
+            : 'dc',
       };
       const result = channel.compiledProcessing(context);
       if (typeof result === 'number' && Number.isFinite(result)) {
@@ -233,7 +241,7 @@ function executeProcessing(channel, rawValue, scaledValue) {
       channel.processingError = error.message;
     }
   }
-  history.push({ raw: rawValue, scaled: scaledValue, value: processedValue, timestamp });
+  history.push({ raw: rawValue, scaled: scaledValue, value: processedValue, timestamp, acMode: environment.acMode });
   if (history.length > PROCESSING_HISTORY_LIMIT) {
     history.splice(0, history.length - PROCESSING_HISTORY_LIMIT);
   }
@@ -349,47 +357,28 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
   const availableInputs = Array.isArray(inputs) ? inputs : [];
   const inputsByName = new Map(availableInputs.map((item) => [item.name, item]));
   const rawChannels = Array.isArray(meterChannels) ? meterChannels : [];
-  const channels = rawChannels.length
-    ? rawChannels
-        .filter((channel) => channel && channel.input && inputsByName.has(channel.input))
-        .map((channel, index) => ({
-          id: channel.id || channel.name || `meter${index + 1}`,
-          name: channel.id || channel.name || `meter${index + 1}`,
-          label: channel.label || channel.name || channel.input,
-          input: channel.input,
-          unit: channel.unit || (inputsByName.get(channel.input)?.unit || ''),
-          symbol: channel.symbol || '',
-          enabled: channel.enabled !== false,
-          scale: Number.isFinite(channel.scale) ? channel.scale : 1,
-          offset: Number.isFinite(channel.offset) ? channel.offset : 0,
-          rangeMin: Number.isFinite(channel.rangeMin) ? channel.rangeMin : null,
-          rangeMax: Number.isFinite(channel.rangeMax) ? channel.rangeMax : null,
-          bits: Number.isFinite(channel.bits)
-            ? Math.min(32, Math.max(1, Math.round(channel.bits)))
-            : 10,
-          profile: typeof channel.profile === 'string' ? channel.profile.trim() : '',
-          displayMode: typeof channel.displayMode === 'string' ? channel.displayMode.trim() : '',
-          calibre: typeof channel.calibre === 'string' ? channel.calibre.trim() : '',
-          processing: typeof channel.processing === 'string' ? channel.processing : ''
-        }))
-    : availableInputs.map((item, index) => ({
-        id: item.name,
-        name: item.name,
-        label: item.name,
-        input: item.name,
-        unit: item.unit || '',
-        symbol: '',
-        enabled: true,
-        scale: Number.isFinite(item.scale) ? item.scale : 1,
-        offset: Number.isFinite(item.offset) ? item.offset : 0,
-        rangeMin: null,
-        rangeMax: null,
-        bits: 10,
-        profile: 'voltage',
-        displayMode: 'digital',
-        calibre: '',
-        processing: ''
-      }));
+  const channels = rawChannels
+    .filter((channel) => channel && channel.input && inputsByName.has(channel.input))
+    .map((channel, index) => ({
+      id: channel.id || channel.name || `meter${index + 1}`,
+      name: channel.id || channel.name || `meter${index + 1}`,
+      label: channel.label || channel.name || channel.input,
+      input: channel.input,
+      unit: channel.unit || (inputsByName.get(channel.input)?.unit || ''),
+      symbol: channel.symbol || '',
+      enabled: channel.enabled !== false,
+      scale: Number.isFinite(channel.scale) ? channel.scale : 1,
+      offset: Number.isFinite(channel.offset) ? channel.offset : 0,
+      rangeMin: Number.isFinite(channel.rangeMin) ? channel.rangeMin : null,
+      rangeMax: Number.isFinite(channel.rangeMax) ? channel.rangeMax : null,
+      bits: Number.isFinite(channel.bits)
+        ? Math.min(32, Math.max(1, Math.round(channel.bits)))
+        : 10,
+      profile: typeof channel.profile === 'string' ? channel.profile.trim() : '',
+      displayMode: typeof channel.displayMode === 'string' ? channel.displayMode.trim() : '',
+      calibre: typeof channel.calibre === 'string' ? channel.calibre.trim() : '',
+      processing: typeof channel.processing === 'string' ? channel.processing : ''
+    }));
 
   const defaultMode = MEASUREMENT_ORDER[0];
 
@@ -956,7 +945,10 @@ export function mountMultimeter(container, { inputs = [], error = null, meterCha
       const scaled = applyMeterScaling(state.lastRawValue, channel);
       let processedValue = null;
       if (Number.isFinite(scaled)) {
-        const { value, overrides } = executeProcessing(channel, state.lastRawValue, scaled);
+        const { value, overrides } = executeProcessing(channel, state.lastRawValue, scaled, {
+          measurement: state.measurementMode,
+          acMode: state.acMode,
+        });
         processedValue = Number.isFinite(value) ? value : null;
         if (overrides) {
           state.overrides.unit = overrides.unit || null;
