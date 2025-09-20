@@ -208,6 +208,34 @@ static const char *VIRTUAL_CONFIG_FILE_PATH = "/private/virtual_config.json";
 static const char *VIRTUAL_CONFIG_BACKUP_FILE_PATH = "/private/virtual_config.bak";
 static const char *VIRTUAL_CONFIG_TEMP_FILE_PATH = "/private/virtual_config.tmp";
 static const char *VIRTUAL_CONFIG_BACKUP_STAGING_PATH = "/private/virtual_config.bak.tmp";
+
+struct ConfigSavePaths {
+  const char *primaryPath;
+  const char *tempPath;
+  const char *backupPath;
+  const char *backupStagingPath;
+};
+
+static const ConfigSavePaths IO_CONFIG_PATHS = {
+    IO_CONFIG_FILE_PATH,
+    IO_CONFIG_TEMP_FILE_PATH,
+    IO_CONFIG_BACKUP_FILE_PATH,
+    IO_CONFIG_BACKUP_STAGING_PATH,
+};
+
+static const ConfigSavePaths INTERFACE_CONFIG_PATHS = {
+    INTERFACE_CONFIG_FILE_PATH,
+    INTERFACE_CONFIG_TEMP_FILE_PATH,
+    INTERFACE_CONFIG_BACKUP_FILE_PATH,
+    INTERFACE_CONFIG_BACKUP_STAGING_PATH,
+};
+
+static const ConfigSavePaths VIRTUAL_CONFIG_PATHS = {
+    VIRTUAL_CONFIG_FILE_PATH,
+    VIRTUAL_CONFIG_TEMP_FILE_PATH,
+    VIRTUAL_CONFIG_BACKUP_FILE_PATH,
+    VIRTUAL_CONFIG_BACKUP_STAGING_PATH,
+};
 static const char *LEGACY_CONFIG_FILE_PATH = "/config.json";
 static const uint32_t CONFIG_RECORD_MAGIC = 0x4D4C4243; // 'MLBC'
 static const uint16_t CONFIG_RECORD_VERSION = 1;
@@ -314,12 +342,112 @@ static bool writeTextFile(const char *path, const String &content) {
   }
   size_t written = f.write(reinterpret_cast<const uint8_t *>(content.c_str()),
                            content.length());
+  f.flush();
   f.close();
   if (written != content.length()) {
     logPrintf("Short write when saving %s (%u/%u bytes)", path,
               static_cast<unsigned>(written),
               static_cast<unsigned>(content.length()));
     return false;
+  }
+  return true;
+}
+
+static void logConfigSaveFailure(const char *label,
+                                 const char *path,
+                                 const String &detail,
+                                 bool logToFile) {
+  logPrintf("%s configuration save failure: %s (%s)", label, detail.c_str(), path);
+  if (logToFile) {
+    appendConfigSaveLog(String("Erreur sauvegarde ") + label + " (" + path + "): " +
+                        detail);
+  }
+}
+
+static void logConfigSaveWarning(const char *label,
+                                 const char *path,
+                                 const String &detail,
+                                 bool logToFile) {
+  logPrintf("%s configuration save warning: %s (%s)", label, detail.c_str(), path);
+  if (logToFile) {
+    appendConfigSaveLog(String("Avertissement sauvegarde ") + label + " (" + path +
+                        "): " + detail);
+  }
+}
+
+static void promoteBackup(const ConfigSavePaths &paths,
+                          const char *label,
+                          bool logToFile) {
+  if (!LittleFS.exists(paths.backupStagingPath)) {
+    return;
+  }
+  if (LittleFS.exists(paths.backupPath) && !LittleFS.remove(paths.backupPath)) {
+    logConfigSaveWarning(label, paths.backupPath,
+                         "failed to remove previous backup", logToFile);
+    LittleFS.remove(paths.backupStagingPath);
+    return;
+  }
+  if (!LittleFS.rename(paths.backupStagingPath, paths.backupPath)) {
+    logConfigSaveWarning(label, paths.backupStagingPath,
+                         "failed to promote staged backup", logToFile);
+    LittleFS.remove(paths.backupStagingPath);
+  }
+}
+
+static bool atomicWriteConfig(const ConfigSavePaths &paths,
+                              const char *label,
+                              const String &payload,
+                              bool logToFile) {
+  if (LittleFS.exists(paths.tempPath) && !LittleFS.remove(paths.tempPath)) {
+    logConfigSaveFailure(label, paths.tempPath, "failed to clear temp file", logToFile);
+    return false;
+  }
+  if (!writeTextFile(paths.tempPath, payload)) {
+    if (logToFile) {
+      appendConfigSaveLog(String("Erreur lors de l'écriture de ") + paths.tempPath);
+    }
+    return false;
+  }
+
+  bool stagedOriginal = false;
+  if (LittleFS.exists(paths.backupStagingPath) &&
+      !LittleFS.remove(paths.backupStagingPath)) {
+    logConfigSaveFailure(label, paths.backupStagingPath,
+                         "failed to clear backup staging", logToFile);
+    LittleFS.remove(paths.tempPath);
+    return false;
+  }
+
+  if (LittleFS.exists(paths.primaryPath)) {
+    if (!LittleFS.rename(paths.primaryPath, paths.backupStagingPath)) {
+      logConfigSaveFailure(label, paths.primaryPath,
+                           "failed to stage existing configuration", logToFile);
+      LittleFS.remove(paths.tempPath);
+      return false;
+    }
+    stagedOriginal = true;
+  }
+
+  if (!LittleFS.rename(paths.tempPath, paths.primaryPath)) {
+    logConfigSaveFailure(label, paths.primaryPath,
+                         "failed to promote new configuration", logToFile);
+    // Attempt to restore the original file if we staged it previously.
+    if (stagedOriginal) {
+      if (!LittleFS.rename(paths.backupStagingPath, paths.primaryPath)) {
+        logPrintf("%s configuration restore failed after promotion error", label);
+      }
+    }
+    LittleFS.remove(paths.tempPath);
+    return false;
+  }
+
+  if (stagedOriginal) {
+    promoteBackup(paths, label, logToFile);
+  }
+
+  if (logToFile) {
+    appendConfigSaveLog(String("Configuration ") + label + " enregistrée dans " +
+                        paths.primaryPath);
   }
   return true;
 }
@@ -2709,7 +2837,7 @@ static bool tryDecodeConfigRecord(const uint8_t *data,
 }
 
 static bool saveJsonConfig(uint8_t sections,
-                           const char *path,
+                           const ConfigSavePaths &paths,
                            const char *label,
                            bool logToFile = false) {
   logConfigSummary(label);
@@ -2719,17 +2847,14 @@ static bool saveJsonConfig(uint8_t sections,
   }
   if (!ensureUserDirectory()) {
     logMessage(String(label) + " config directory unavailable");
-    return false;
-  }
-  if (!writeTextFile(path, payload)) {
-    logPrintf("Failed to write %s configuration to %s", label, path);
     if (logToFile) {
-      appendConfigSaveLog(String("Erreur lors de l'écriture de ") + path);
+      appendConfigSaveLog(String("Erreur sauvegarde ") + label +
+                          ": répertoire indisponible");
     }
     return false;
   }
-  if (logToFile) {
-    appendConfigSaveLog(String("Configuration ") + label + " enregistrée dans " + path);
+  if (!atomicWriteConfig(paths, label, payload, logToFile)) {
+    return false;
   }
   logMessage(String(label) + " configuration saved");
   return true;
@@ -2737,17 +2862,17 @@ static bool saveJsonConfig(uint8_t sections,
 
 bool saveIoConfig() {
   return saveJsonConfig(CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
-                       IO_CONFIG_FILE_PATH, "IO", true);
+                       IO_CONFIG_PATHS, "IO", true);
 }
 
 bool saveInterfaceConfig() {
   return saveJsonConfig(CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS,
-                       INTERFACE_CONFIG_FILE_PATH, "Interface");
+                       INTERFACE_CONFIG_PATHS, "Interface");
 }
 
 bool saveVirtualConfig() {
   return saveJsonConfig(CONFIG_SECTION_VIRTUAL,
-                       VIRTUAL_CONFIG_FILE_PATH, "Virtual");
+                       VIRTUAL_CONFIG_PATHS, "Virtual");
 }
 
 static const InputConfig *findInputByName(const Config &cfg, const String &name) {
