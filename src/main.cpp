@@ -802,6 +802,20 @@ struct ModulesConfig {
   bool mcp4725;
 };
 
+static const uint8_t MAX_METER_MEASUREMENTS = 7;
+static const char *const METER_MEASUREMENT_KEYS[MAX_METER_MEASUREMENTS] = {
+    "voltageDC",  "voltageAC", "frequency", "current",
+    "resistance", "capacitance", "inductance"};
+
+struct MeterMeasurementConfig {
+  bool enabled;
+  bool hasMin;
+  float minValue;
+  bool hasMax;
+  float maxValue;
+  String formula;
+};
+
 struct MeterChannelConfig {
   String id;
   String name;
@@ -817,6 +831,7 @@ struct MeterChannelConfig {
   bool hasRangeMax;
   float rangeMax;
   uint8_t bits;
+  MeterMeasurementConfig measurements[MAX_METER_MEASUREMENTS];
 };
 
 struct VirtualMultimeterConfig {
@@ -1493,14 +1508,46 @@ static const char *describeJsonType(const JsonVariantConst &value);
 static void logIoDelta(const Config &before, const Config &after);
 static bool verifyConfigStored(const Config &expected, String &errorDetail);
 
+static MeterMeasurementConfig makeDefaultMeterMeasurement(bool enabled = false) {
+  MeterMeasurementConfig mm;
+  mm.enabled = enabled;
+  mm.hasMin = false;
+  mm.minValue = 0.0f;
+  mm.hasMax = false;
+  mm.maxValue = 0.0f;
+  mm.formula = String();
+  return mm;
+}
+
 static MeterChannelConfig makeEmptyMeterChannel() {
-  return {"", "", "", "", "", "", false, 1.0f, 0.0f, false, 0.0f, false,
-          0.0f, 10};
+  MeterChannelConfig channel;
+  channel.id = "";
+  channel.name = "";
+  channel.label = "";
+  channel.input = "";
+  channel.unit = "";
+  channel.symbol = "";
+  channel.enabled = false;
+  channel.scale = 1.0f;
+  channel.offset = 0.0f;
+  channel.hasRangeMin = false;
+  channel.rangeMin = 0.0f;
+  channel.hasRangeMax = false;
+  channel.rangeMax = 0.0f;
+  channel.bits = 10;
+  for (uint8_t i = 0; i < MAX_METER_MEASUREMENTS; ++i) {
+    channel.measurements[i] = makeDefaultMeterMeasurement(false);
+  }
+  return channel;
 }
 
 static MeterChannelConfig makeDefaultMeterChannel() {
-  return {"", "", "", "", "", "", true, 1.0f, 0.0f, false, 0.0f, false,
-          0.0f, 10};
+  MeterChannelConfig channel = makeEmptyMeterChannel();
+  channel.enabled = true;
+  if (MAX_METER_MEASUREMENTS > 0) {
+    channel.measurements[0] = makeDefaultMeterMeasurement(true);
+  }
+  return channel;
 }
 
 static void clearVirtualMultimeterConfig(VirtualMultimeterConfig &cfg) {
@@ -1596,6 +1643,56 @@ static void parseMeterChannelEntry(JsonObjectConst obj,
   if (bitsValue < 1) bitsValue = 1;
   if (bitsValue > 32) bitsValue = 32;
   mc.bits = static_cast<uint8_t>(bitsValue);
+  if (obj.containsKey("measurements")) {
+    JsonObjectConst measurementsObj = obj["measurements"].as<JsonObjectConst>();
+    if (!measurementsObj.isNull()) {
+      for (uint8_t i = 0; i < MAX_METER_MEASUREMENTS; ++i) {
+        const char *key = METER_MEASUREMENT_KEYS[i];
+        MeterMeasurementConfig &mm = mc.measurements[i];
+        JsonObjectConst measurementEntry = measurementsObj[key].as<JsonObjectConst>();
+        if (measurementEntry.isNull()) {
+          continue;
+        }
+        mm.enabled = measurementEntry.containsKey("enabled")
+                          ? measurementEntry["enabled"].as<bool>()
+                          : mm.enabled;
+        if (measurementEntry.containsKey("min") &&
+            !measurementEntry["min"].isNull()) {
+          float value = measurementEntry["min"].as<float>();
+          if (isnan(value)) {
+            mm.hasMin = false;
+            mm.minValue = 0.0f;
+          } else {
+            mm.hasMin = true;
+            mm.minValue = value;
+          }
+        } else {
+          mm.hasMin = false;
+          mm.minValue = 0.0f;
+        }
+        if (measurementEntry.containsKey("max") &&
+            !measurementEntry["max"].isNull()) {
+          float value = measurementEntry["max"].as<float>();
+          if (isnan(value)) {
+            mm.hasMax = false;
+            mm.maxValue = 0.0f;
+          } else {
+            mm.hasMax = true;
+            mm.maxValue = value;
+          }
+        } else {
+          mm.hasMax = false;
+          mm.maxValue = 0.0f;
+        }
+        if (measurementEntry.containsKey("formula")) {
+          mm.formula = measurementEntry["formula"].as<String>();
+          mm.formula.trim();
+        } else {
+          mm.formula = String();
+        }
+      }
+    }
+  }
   target.channelCount++;
 }
 
@@ -1683,6 +1780,24 @@ static void populateVirtualMultimeterJson(JsonObject obj,
       entry["rangeMax"] = nullptr;
     }
     entry["bits"] = mc.bits;
+    JsonObject measurementsObj = entry.createNestedObject("measurements");
+    for (uint8_t j = 0; j < MAX_METER_MEASUREMENTS; ++j) {
+      const MeterMeasurementConfig &mm = mc.measurements[j];
+      const char *key = METER_MEASUREMENT_KEYS[j];
+      JsonObject measurementEntry = measurementsObj.createNestedObject(key);
+      measurementEntry["enabled"] = mm.enabled;
+      if (mm.hasMin) {
+        measurementEntry["min"] = mm.minValue;
+      } else {
+        measurementEntry["min"] = nullptr;
+      }
+      if (mm.hasMax) {
+        measurementEntry["max"] = mm.maxValue;
+      } else {
+        measurementEntry["max"] = nullptr;
+      }
+      measurementEntry["formula"] = mm.formula;
+    }
   }
 }
 
@@ -2358,10 +2473,7 @@ void setDefaultConfig() {
   resetInputSlots(config);
   resetOutputSlots(config);
 
-  config.virtualMultimeter.channelCount = 0;
-  for (uint8_t i = 0; i < MAX_METER_CHANNELS; ++i) {
-    config.virtualMultimeter.channels[i] = {"", "", "", "", "", "", false, 1.0f, 0.0f, false, 0.0f, false, 0.0f, 10};
-  }
+  clearVirtualMultimeterConfig(config.virtualMultimeter);
 
   config.peerCount = 0;
   for (uint8_t i = 0; i < MAX_PEERS; i++) {
