@@ -87,6 +87,7 @@
 <form id="configForm" onsubmit="return false;">
   <fieldset>
     <legend>Modules optionnels</legend>
+    <label><input type="checkbox" id="modAdc" checked disabled> ADC interne ESP (A0)</label><br>
     <label><input type="checkbox" id="modAds"> ADC externe ADS1115</label><br>
     <label><input type="checkbox" id="modPwm"> Convertisseur PWM → 0–10 V</label><br>
     <label><input type="checkbox" id="modDac"> DAC I²C MCP4725</label><br>
@@ -385,6 +386,7 @@ function getIoExplanation(kind, data, fallbackName, indexHint) {
 let inputs = [];
 let outputs = [];
 const moduleState = {
+  adc: true,
   ads1115: false,
   pwm010: false,
   mcp4725: false,
@@ -578,12 +580,14 @@ function getSnapshotMap(kind) {
 }
 
 function refreshModuleStateFromForm() {
+  const modAdc = document.getElementById('modAdc');
   const modAds = document.getElementById('modAds');
   const modPwm = document.getElementById('modPwm');
   const modDac = document.getElementById('modDac');
   const modZmpt = document.getElementById('modZmpt');
   const modZmct = document.getElementById('modZmct');
   const modDiv = document.getElementById('modDiv');
+  moduleState.adc = modAdc ? !!modAdc.checked : true;
   moduleState.ads1115 = !!(modAds && modAds.checked);
   moduleState.pwm010 = !!(modPwm && modPwm.checked);
   moduleState.mcp4725 = !!(modDac && modDac.checked);
@@ -693,6 +697,7 @@ function handleModuleStateChange() {
   refreshModuleStateFromForm();
   markRebootPrompt(false);
   logIoStep('Mise à jour des modules optionnels', {
+    adc: moduleState.adc,
     ads1115: moduleState.ads1115,
     pwm010: moduleState.pwm010,
     mcp4725: moduleState.mcp4725,
@@ -1542,6 +1547,10 @@ async function loadConfig() {
       fwVersionEl.textContent = metadata.fwVersion || 'inconnue';
     }
     const modules = cfg.modules || {};
+    const modAdcEl = document.getElementById('modAdc');
+    if (modAdcEl) {
+      modAdcEl.checked = true;
+    }
     document.getElementById('modAds').checked = !!modules.ads1115;
     document.getElementById('modPwm').checked = !!modules.pwm010;
     document.getElementById('modDac').checked = !!modules.mcp4725;
@@ -1618,6 +1627,7 @@ async function saveConfig() {
   try {
     const cfg = {};
     cfg.modules = {
+      adc:      true,
       ads1115: document.getElementById('modAds').checked,
       pwm010:  document.getElementById('modPwm').checked,
       mcp4725: document.getElementById('modDac').checked,
@@ -1739,7 +1749,7 @@ window.addEventListener('DOMContentLoaded', () => {
   if (addOutputBtn) {
     addOutputBtn.addEventListener('click', addOutput);
   }
-  ['modAds','modPwm','modDac','modZmpt','modZmct','modDiv'].forEach(id => {
+  ['modAdc','modAds','modPwm','modDac','modZmpt','modZmct','modDiv'].forEach(id => {
     const checkbox = document.getElementById(id);
     if (checkbox) {
       checkbox.addEventListener('change', handleModuleStateChange);

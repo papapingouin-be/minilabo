@@ -160,7 +160,7 @@ function buildProcessingFromMeasurements(channel) {
   lines.push('  default:');
   lines.push('    return null;');
   lines.push('}');
-  return lines.join('
+  return lines.join('\n');
 }
 
 function updateChannelProcessing(channel) {
