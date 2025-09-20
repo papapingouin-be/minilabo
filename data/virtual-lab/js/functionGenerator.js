@@ -89,13 +89,18 @@ export function mountFunctionGenerator(container, { outputs = [], error = null }
     <div class="device-shell generator-shell">
       <div class="device-header">
         <div class="device-branding">
-          <span class="device-brand">Rigol</span>
-          <span class="device-model" id="function-generator-title">DG1022Z</span>
-          <span class="device-subtitle">Générateur de fonctions</span>
+          <span class="device-brand">MiniLabBox</span>
+          <span class="device-model" id="function-generator-title">Générateur virtuel</span>
+          <span class="device-subtitle">Création de signaux</span>
         </div>
-        <div class="io-selector">
-          <label for="function-io">Sortie assignée</label>
-          <select id="function-io" class="io-select"></select>
+        <div class="device-toolbar">
+          <a class="device-config-button" href="settings.html#generator" aria-label="Configurer le générateur de fonctions virtuel">
+            ⚙️ Configurer
+          </a>
+          <div class="io-selector">
+            <label for="function-io">Sortie assignée</label>
+            <select id="function-io" class="io-select"></select>
+          </div>
         </div>
       </div>
       <div class="device-status" id="function-generator-status"></div>

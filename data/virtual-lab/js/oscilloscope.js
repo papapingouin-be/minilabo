@@ -90,13 +90,18 @@ export function mountOscilloscope(container, { inputs = [], error = null } = {})
     <div class="device-shell oscilloscope-shell">
       <div class="device-header">
         <div class="device-branding">
-          <span class="device-brand">Tektronix</span>
-          <span class="device-model" id="oscilloscope-title">Série 3 MSO</span>
-          <span class="device-subtitle">Oscilloscope numérique quatre voies</span>
+          <span class="device-brand">MiniLabBox</span>
+          <span class="device-model" id="oscilloscope-title">Oscilloscope virtuel</span>
+          <span class="device-subtitle">Analyse temps réel</span>
         </div>
-        <div class="io-selector">
-          <label for="oscilloscope-channel">Entrée active</label>
-          <select id="oscilloscope-channel" class="io-select"></select>
+        <div class="device-toolbar">
+          <a class="device-config-button" href="settings.html#oscilloscope" aria-label="Configurer l'oscilloscope virtuel">
+            ⚙️ Configurer
+          </a>
+          <div class="io-selector">
+            <label for="oscilloscope-channel">Entrée active</label>
+            <select id="oscilloscope-channel" class="io-select"></select>
+          </div>
         </div>
       </div>
       <div class="device-status" id="oscilloscope-status"></div>

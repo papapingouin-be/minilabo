@@ -72,6 +72,49 @@
       line-height: 1.5;
       color: #31425e;
     }
+    .settings-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.8em;
+      margin: 0 0 1.8em;
+    }
+    .settings-nav a {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3em;
+      padding: 0.45em 0.95em;
+      border-radius: 999px;
+      background: rgba(10,109,216,0.12);
+      color: #0a3d91;
+      text-decoration: none;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+    }
+    .settings-nav a:hover {
+      background: rgba(10,109,216,0.2);
+      transform: translateY(-1px);
+      box-shadow: 0 10px 20px rgba(10,109,216,0.16);
+    }
+    .device-config-section {
+      background: rgba(255,255,255,0.94);
+      border-radius: 16px;
+      padding: clamp(1.1em, 2.5vw, 1.8em);
+      box-shadow: 0 12px 28px rgba(10,109,216,0.08);
+      border: 1px solid rgba(10,109,216,0.1);
+      margin-bottom: 2.4em;
+    }
+    .device-config-section:last-of-type {
+      margin-bottom: 0;
+    }
+    .device-config-section h2 {
+      margin-top: 0;
+      color: #0a3d91;
+    }
+    .device-config-section p {
+      color: #31425e;
+      line-height: 1.5;
+    }
     .channels-toolbar {
       display: flex;
       justify-content: space-between;
@@ -148,7 +191,8 @@
       color: #1d355d;
     }
     .field input,
-    .field select {
+    .field select,
+    .field textarea {
       border-radius: 8px;
       border: 1px solid rgba(15,71,169,0.2);
       padding: 0.45em 0.55em;
@@ -157,10 +201,16 @@
       background: rgba(255,255,255,0.95);
     }
     .field input:focus,
-    .field select:focus {
+    .field select:focus,
+    .field textarea:focus {
       border-color: #0a6dd8;
       outline: none;
       box-shadow: 0 0 0 3px rgba(10,109,216,0.18);
+    }
+    .field textarea {
+      min-height: 130px;
+      resize: vertical;
+      font-family: "Roboto Mono", "Fira Code", "Courier New", monospace;
     }
     .field-row {
       display: grid;
@@ -264,20 +314,46 @@
   <main>
     <section class="intro">
       <p>Définissez les canaux du multimètre virtuel en associant chaque voie à une entrée du MiniLabBox. Les réglages ci-dessous sont sauvegardés sans modifier le reste de la configuration matérielle.</p>
-      <p>Chaque canal peut appliquer une échelle, un décalage et optionnellement une plage numérique ou un symbole personnalisé pour l'affichage.</p>
+      <p>Chaque canal peut appliquer une échelle, un décalage et une logique de mesure personnalisée pour convertir la lecture brute en valeur exploitable.</p>
     </section>
-    <div class="channels-toolbar">
-      <button id="addChannelBtn" type="button">➕ Ajouter un canal</button>
-      <div id="channelsCounter">0 canal configuré</div>
-    </div>
-    <div id="channelsContainer" class="channel-grid" aria-live="polite"></div>
-    <div id="emptyState" class="empty-state" hidden>
-      Aucun canal configuré. Ajoutez une voie pour suivre les mesures du multimètre virtuel.
-    </div>
-    <div class="status-bar">
-      <button id="saveBtn" type="button">💾 Enregistrer les canaux</button>
-      <div id="statusMessage" class="status-message" role="status" aria-live="polite"></div>
-    </div>
+    <nav class="settings-nav" aria-label="Navigation configuration">
+      <a href="#multimeter">⚡ Multimètre</a>
+      <a href="#oscilloscope">📈 Oscilloscope</a>
+      <a href="#generator">🎛️ Générateur</a>
+      <a href="#math">∑ Console math</a>
+    </nav>
+
+    <section id="multimeter" class="device-config-section">
+      <h2>Multimètre virtuel</h2>
+      <p>Associez chaque canal à une entrée matérielle et définissez la logique de conversion utilisée par le cadran numérique.</p>
+      <div class="channels-toolbar">
+        <button id="addChannelBtn" type="button">➕ Ajouter un canal</button>
+        <div id="channelsCounter">0 canal configuré</div>
+      </div>
+      <div id="channelsContainer" class="channel-grid" aria-live="polite"></div>
+      <div id="emptyState" class="empty-state" hidden>
+        Aucun canal configuré. Ajoutez une voie et précisez la logique de mesure du multimètre virtuel.
+      </div>
+      <div class="status-bar">
+        <button id="saveBtn" type="button">💾 Enregistrer les canaux</button>
+        <div id="statusMessage" class="status-message" role="status" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section id="oscilloscope" class="device-config-section">
+      <h2>Oscilloscope virtuel</h2>
+      <p>L'oscilloscope s'appuie directement sur les entrées actives de la MiniLabBox. Activez ou désactivez les voies analogiques depuis la configuration générale pour les retrouver dans le Virtual Lab.</p>
+    </section>
+
+    <section id="generator" class="device-config-section">
+      <h2>Générateur de fonctions virtuel</h2>
+      <p>Le générateur propose toutes les sorties actives. Les paramètres détaillés (forme d'onde, amplitude, offset) se règlent directement sur l'appareil virtuel.</p>
+    </section>
+
+    <section id="math" class="device-config-section">
+      <h2>Console mathématique</h2>
+      <p>Aucun réglage spécifique n'est requis pour la console mathématique : elle exécute les expressions que vous saisissez dans l'interface du Virtual Lab.</p>
+    </section>
   </main>
   <script type="module" src="js/settings.js"></script>
 </body>
