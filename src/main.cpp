@@ -741,8 +741,7 @@ static String outputTypeToString(OutputType t) {
 }
 
 // Structure describing a single logical input channel.  Each input has a
-// name, type and several optional parameters depending on its type.  The
-// scale and offset parameters allow calibration of analog measurements.
+// name, type and several optional parameters depending on its type.
 struct InputConfig {
   String     name;         // Human readable identifier (e.g. "input1")
   InputType  type;         // Which kind of input this represents
@@ -750,24 +749,18 @@ struct InputConfig {
   int        adsChannel;   // ADS1115 channel number (0–3)
   String     remoteNode;   // Node ID for remote input
   String     remoteName;   // Input name on remote node
-  float      scale;        // Multiplier applied to the raw reading
-  float      offset;       // Offset added after scaling
-  String     unit;         // Unit string for display (e.g. "V", "A")
   bool       active;       // Whether this input is enabled
   float      value;        // Last measured value (populated at runtime)
 };
 
 // Structure describing a single logical output channel.  Each output can
-// drive a PWM converter or simple GPIO pin.  Scale and offset can be
-// used to map a desired physical output value into a duty cycle.
+// drive a PWM converter or simple GPIO pin.
 struct OutputConfig {
   String     name;         // Human readable identifier (e.g. "output1")
   OutputType type;         // Which kind of output this represents
   int        pin;          // ESP8266 pin number for PWM/GPIO
   int        pwmFreq;      // PWM frequency in Hz (only global frequency is used)
   uint8_t    i2cAddress;   // I2C address for MCP4725 outputs
-  float      scale;        // Gain for mapping physical value to duty (0–1023)
-  float      offset;       // Offset added to duty after scaling
   bool       active;       // Whether this output is enabled
   float      value;        // Last commanded value
 };
@@ -896,9 +889,6 @@ static InputConfig makeDefaultInputSlot(uint8_t index) {
   ic.adsChannel = -1;
   ic.remoteNode = "";
   ic.remoteName = "";
-  ic.scale = 1.0f;
-  ic.offset = 0.0f;
-  ic.unit = "";
   ic.active = false;
   ic.value = NAN;
   return ic;
@@ -911,8 +901,6 @@ static OutputConfig makeDefaultOutputSlot(uint8_t index) {
   oc.pin = -1;
   oc.pwmFreq = 2000;
   oc.i2cAddress = 0x60;
-  oc.scale = 1.0f;
-  oc.offset = 0.0f;
   oc.active = false;
   oc.value = 0.0f;
   return oc;
@@ -948,13 +936,11 @@ static void logParsedInput(const InputConfig &ic, const String &entryTag) {
     tag = ic.name;
   }
   logPrintf(
-      "Input %s => name=%s type=%s pin=%s adsChannel=%s remote=%s/%s scale=%s offset=%s unit=%s active=%s",
+      "Input %s => name=%s type=%s pin=%s adsChannel=%s remote=%s/%s active=%s",
       tag.c_str(), ic.name.c_str(), inputTypeToString(ic.type).c_str(),
       describePinValue(ic.pin).c_str(),
       describeOptionalInt(ic.adsChannel).c_str(), ic.remoteNode.c_str(),
-      ic.remoteName.c_str(), String(ic.scale, 4).c_str(),
-      String(ic.offset, 4).c_str(), ic.unit.c_str(),
-      ic.active ? "true" : "false");
+      ic.remoteName.c_str(), ic.active ? "true" : "false");
 }
 
 static void logParsedOutput(const OutputConfig &oc, const String &entryTag) {
@@ -963,12 +949,11 @@ static void logParsedOutput(const OutputConfig &oc, const String &entryTag) {
     tag = oc.name;
   }
   logPrintf(
-      "Output %s => name=%s type=%s pin=%s pwm=%s addr=%s scale=%s offset=%s active=%s value=%s",
+      "Output %s => name=%s type=%s pin=%s pwm=%s addr=%s active=%s value=%s",
       tag.c_str(), oc.name.c_str(), outputTypeToString(oc.type).c_str(),
       describePinValue(oc.pin).c_str(),
       describeOptionalInt(oc.pwmFreq).c_str(),
-      formatI2cAddress(oc.i2cAddress).c_str(), String(oc.scale, 4).c_str(),
-      String(oc.offset, 4).c_str(), oc.active ? "true" : "false",
+      formatI2cAddress(oc.i2cAddress).c_str(), oc.active ? "true" : "false",
       String(oc.value, 4).c_str());
 }
 
@@ -1097,10 +1082,6 @@ static bool populateInputFromObject(JsonObjectConst obj,
     }
   }
 
-  ic.scale = obj.containsKey("scale") ? obj["scale"].as<float>() : 1.0f;
-  ic.offset = obj.containsKey("offset") ? obj["offset"].as<float>() : 0.0f;
-  ic.unit = obj.containsKey("unit") ? obj["unit"].as<String>() : String();
-  ic.unit.trim();
   bool hadActive = obj.containsKey("active");
   ic.active = hadActive ? obj["active"].as<bool>() : (ic.type != INPUT_DISABLED);
   if (!hadActive && ic.type != INPUT_DISABLED) {
@@ -1185,8 +1166,6 @@ static bool populateOutputFromObject(JsonObjectConst obj,
     logPrintf("Output %s missing i2cAddress for MCP4725", oc.name.c_str());
   }
 
-  oc.scale = obj.containsKey("scale") ? obj["scale"].as<float>() : 1.0f;
-  oc.offset = obj.containsKey("offset") ? obj["offset"].as<float>() : 0.0f;
   bool hadActive = obj.containsKey("active");
   oc.active = hadActive ? obj["active"].as<bool>() : (oc.type != OUTPUT_DISABLED);
   if (!hadActive && oc.type != OUTPUT_DISABLED) {
@@ -2248,9 +2227,6 @@ static void populateConfigJson(JsonDocument &doc,
       o["adsChannel"] = ic.adsChannel;
       o["remoteNode"] = ic.remoteNode;
       o["remoteName"] = ic.remoteName;
-      o["scale"] = ic.scale;
-      o["offset"] = ic.offset;
-      o["unit"] = ic.unit;
       o["active"] = ic.active;
     }
     doc["outputCount"] = config.outputCount;
@@ -2263,8 +2239,6 @@ static void populateConfigJson(JsonDocument &doc,
       o["pin"] = pinToString(oc.pin);
       o["pwmFreq"] = oc.pwmFreq;
       o["i2cAddress"] = formatI2cAddress(oc.i2cAddress);
-      o["scale"] = oc.scale;
-      o["offset"] = oc.offset;
       o["active"] = oc.active;
       o["value"] = oc.value;
     }
@@ -2866,18 +2840,6 @@ static String diffInputConfig(const InputConfig &before, const InputConfig &afte
     appendDiff(diff, "remoteName", describeStringValue(before.remoteName),
                describeStringValue(after.remoteName));
   }
-  if (floatsDiffer(before.scale, after.scale)) {
-    appendDiff(diff, "scale", describeFloatValue(before.scale),
-               describeFloatValue(after.scale));
-  }
-  if (floatsDiffer(before.offset, after.offset)) {
-    appendDiff(diff, "offset", describeFloatValue(before.offset),
-               describeFloatValue(after.offset));
-  }
-  if (before.unit != after.unit) {
-    appendDiff(diff, "unit", describeStringValue(before.unit),
-               describeStringValue(after.unit));
-  }
   if (before.active != after.active) {
     appendDiff(diff, "active", before.active ? "true" : "false",
                after.active ? "true" : "false");
@@ -2901,14 +2863,6 @@ static String diffOutputConfig(const OutputConfig &before, const OutputConfig &a
   if (before.i2cAddress != after.i2cAddress) {
     appendDiff(diff, "i2cAddress", formatI2cAddress(before.i2cAddress),
                formatI2cAddress(after.i2cAddress));
-  }
-  if (floatsDiffer(before.scale, after.scale)) {
-    appendDiff(diff, "scale", describeFloatValue(before.scale),
-               describeFloatValue(after.scale));
-  }
-  if (floatsDiffer(before.offset, after.offset)) {
-    appendDiff(diff, "offset", describeFloatValue(before.offset),
-               describeFloatValue(after.offset));
   }
   if (before.active != after.active) {
     appendDiff(diff, "active", before.active ? "true" : "false",
@@ -3626,20 +3580,18 @@ void updateInputs() {
         // Internal ADC (A0).  10-bit resolution.  Raw value 0–1023.
         if (ic.pin == A0) {
           int raw = analogRead(A0);
-          float v = raw;
-          ic.value = ic.scale * v + ic.offset;
+          ic.value = static_cast<float>(raw);
         } else {
           ic.value = NAN;
         }
         break;
       }
       case INPUT_ADS1115: {
-        // External ADS1115 channel.  16-bit resolution (signed).  Use
-        // raw code directly; scaling can be applied via ic.scale.
+        // External ADS1115 channel.  16-bit resolution (signed).  La valeur
+        // brute du convertisseur est renvoyée telle quelle.
         if (config.modules.ads1115 && ic.adsChannel >= 0 && ic.adsChannel < 4) {
           int16_t raw = ads.readADC_SingleEnded(ic.adsChannel);
-          float v = raw;
-          ic.value = ic.scale * v + ic.offset;
+          ic.value = static_cast<float>(raw);
         } else {
           ic.value = NAN;
         }
@@ -3649,7 +3601,7 @@ void updateInputs() {
         // Look up a remote value.  If the value has not been
         // received recently, NAN will be returned.
         float rv = getRemoteValue(ic.remoteNode, ic.remoteName);
-        ic.value = ic.scale * rv + ic.offset;
+        ic.value = rv;
         break;
       }
       case INPUT_ZMPT:
@@ -3675,12 +3627,12 @@ void updateInputs() {
           if (ic.type == INPUT_DIV) {
             // DC measurement: use average raw code
             float avg = sum / samples;
-            ic.value = ic.scale * avg + ic.offset;
+            ic.value = avg;
           } else {
             // AC measurement: RMS of AC component
             float meanSq = sumSq / samples;
             float rmsRaw = sqrtf(meanSq);
-            ic.value = ic.scale * rmsRaw + ic.offset;
+            ic.value = rmsRaw;
           }
         } else {
           ic.value = NAN;
@@ -3702,11 +3654,9 @@ void updateOutputs() {
     OutputConfig &oc = config.outputs[i];
     if (!oc.active || oc.type == OUTPUT_DISABLED) continue;
     if (oc.type == OUTPUT_PWM010) {
-      // Calculate duty cycle from physical value.  Value is assumed to
-      // be in volts for 0–10 V converters.  The scale and offset
-      // fields allow calibration of the 0–10 V module.  The result
-      // should be clamped to the 0–1023 range used by analogWrite.
-      float duty = oc.value * oc.scale + oc.offset;
+      // Calculate duty cycle from the stored value.  The result should
+      // be clamped to the 0–1023 range used by analogWrite.
+      float duty = oc.value;
       if (duty < 0.0f) duty = 0.0f;
       if (duty > 1023.0f) duty = 1023.0f;
       analogWrite(oc.pin, (uint32_t)duty);
@@ -3733,7 +3683,7 @@ void updateOutputs() {
           continue;
         }
       }
-      float code = oc.value * oc.scale + oc.offset;
+      float code = oc.value;
       if (code < 0.0f) code = 0.0f;
       if (code > 4095.0f) code = 4095.0f;
       mcp4725Drivers[index].setVoltage(static_cast<uint16_t>(code), false);
@@ -4309,7 +4259,6 @@ void registerRoutes(ServerT &server) {
       JsonObject o = arr.createNestedObject();
       o["name"] = ic.name;
       o["value"] = ic.value;
-      o["unit"] = ic.unit;
       o["timestamp"] = millis();
     }
     String payload;
