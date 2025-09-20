@@ -3292,108 +3292,142 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
   if (docCapacity == 0) {
     docCapacity = configJsonCapacityForPayload(0);
   }
-  DynamicJsonDocument doc(docCapacity);
-  DeserializationError parseErr = deserializeJson(doc, body);
-  if (parseErr == DeserializationError::NoMemory) {
-    appendConfigSaveLog("Erreur : charge utile trop volumineuse");
-    srv->send(400, "application/json",
-              R"({"error":"payload_too_large"})");
-    return;
-  }
-  if (parseErr) {
-    appendConfigSaveLog(String("Erreur de parsing JSON: ") + parseErr.c_str());
-    DynamicJsonDocument errDoc(256);
-    errDoc["error"] = "invalid_json";
-    errDoc["detail"] = parseErr.c_str();
-    String errPayload;
-    serializeJson(errDoc, errPayload);
-    srv->send(400, "application/json", errPayload);
-    return;
-  }
-  if (doc.overflowed()) {
-    appendConfigSaveLog("Erreur : mémoire insuffisante pour le JSON reçu");
-    srv->send(400, "application/json",
-              R"({"error":"json_overflow"})");
-    return;
-  }
-  appendConfigSaveLog("JSON analysé avec succès");
-  Config previousConfig = config;
-  parseConfigFromJson(doc, config, &previousConfig, false,
-                      CONFIG_SECTION_MODULES | CONFIG_SECTION_IO);
-  size_t requestedInputEntries = countConfigEntries(doc["inputs"]);
-  size_t requestedOutputEntries = countConfigEntries(doc["outputs"]);
-  size_t expectedInputs = requestedInputEntries;
-  if (expectedInputs > MAX_INPUTS) {
-    expectedInputs = MAX_INPUTS;
-  }
-  size_t expectedOutputs = requestedOutputEntries;
-  if (expectedOutputs > MAX_OUTPUTS) {
-    expectedOutputs = MAX_OUTPUTS;
-  }
-  bool inputMismatch = config.inputCount < expectedInputs;
-  bool outputMismatch = config.outputCount < expectedOutputs;
-  if (inputMismatch || outputMismatch) {
-    String mismatchSummary;
-    if (inputMismatch) {
-      mismatchSummary += String("entrées demandées ") +
-                         static_cast<unsigned>(expectedInputs) + " appliquées " +
-                         static_cast<unsigned>(config.inputCount);
-    }
-    if (outputMismatch) {
-      if (mismatchSummary.length() > 0) {
-        mismatchSummary += "; ";
+  while (true) {
+    DynamicJsonDocument doc(docCapacity);
+    DeserializationError parseErr = deserializeJson(doc, body);
+    if (parseErr == DeserializationError::NoMemory) {
+      if (docCapacity < CONFIG_JSON_MAX_CAPACITY) {
+        size_t nextCapacity = growConfigJsonCapacity(docCapacity);
+        if (nextCapacity > docCapacity) {
+          logPrintf(
+              "IO configuration JSON parse exceeded %u bytes; retrying with %u",
+              static_cast<unsigned>(docCapacity),
+              static_cast<unsigned>(nextCapacity));
+          String resizeMsg = String("Extension du tampon JSON (") +
+                             static_cast<unsigned long>(docCapacity) + " -> " +
+                             static_cast<unsigned long>(nextCapacity) +
+                             " octets)";
+          appendConfigSaveLog(resizeMsg);
+          docCapacity = nextCapacity;
+          continue;
+        }
       }
-      mismatchSummary += String("sorties demandées ") +
-                         static_cast<unsigned>(expectedOutputs) + " appliquées " +
-                         static_cast<unsigned>(config.outputCount);
+      appendConfigSaveLog("Erreur : charge utile trop volumineuse");
+      srv->send(400, "application/json",
+                R"({"error":"payload_too_large"})");
+      return;
     }
-    logPrintf("IO configuration request discarded: %s",
-              mismatchSummary.length() > 0 ? mismatchSummary.c_str()
-                                           : "incomplete configuration");
-    appendConfigSaveLog(String("Erreur : ") +
-                        "certaines voies n'ont pas été interprétées (" +
-                        mismatchSummary + ")");
-    config = previousConfig;
-    DynamicJsonDocument errDoc(256);
-    errDoc["error"] = "invalid_io_config";
-    if (inputMismatch) {
-      errDoc["detail"] = outputMismatch ? "inputs_outputs_dropped"
-                                         : "inputs_dropped";
-      errDoc["requestedInputs"] = static_cast<uint8_t>(expectedInputs);
-      errDoc["appliedInputs"] = config.inputCount;
+    if (parseErr) {
+      appendConfigSaveLog(String("Erreur de parsing JSON: ") + parseErr.c_str());
+      DynamicJsonDocument errDoc(256);
+      errDoc["error"] = "invalid_json";
+      errDoc["detail"] = parseErr.c_str();
+      String errPayload;
+      serializeJson(errDoc, errPayload);
+      srv->send(400, "application/json", errPayload);
+      return;
     }
-    if (outputMismatch) {
-      if (!inputMismatch) {
-        errDoc["detail"] = "outputs_dropped";
+    if (doc.overflowed()) {
+      if (docCapacity < CONFIG_JSON_MAX_CAPACITY) {
+        size_t nextCapacity = growConfigJsonCapacity(docCapacity);
+        if (nextCapacity > docCapacity) {
+          logPrintf("IO configuration JSON buffer overflowed %u bytes; retrying with %u",
+                    static_cast<unsigned>(docCapacity),
+                    static_cast<unsigned>(nextCapacity));
+          String resizeMsg = String("Extension du tampon JSON (") +
+                             static_cast<unsigned long>(docCapacity) + " -> " +
+                             static_cast<unsigned long>(nextCapacity) +
+                             " octets)";
+          appendConfigSaveLog(resizeMsg);
+          docCapacity = nextCapacity;
+          continue;
+        }
       }
-      errDoc["requestedOutputs"] = static_cast<uint8_t>(expectedOutputs);
-      errDoc["appliedOutputs"] = config.outputCount;
+      appendConfigSaveLog("Erreur : mémoire insuffisante pour le JSON reçu");
+      srv->send(400, "application/json",
+                R"({"error":"json_overflow"})");
+      return;
     }
-    String errPayload;
-    serializeJson(errDoc, errPayload);
-    appendConfigSaveLog("Réponse d'erreur envoyée au client");
+    appendConfigSaveLog("JSON analysé avec succès");
+    Config previousConfig = config;
+    parseConfigFromJson(doc, config, &previousConfig, false,
+                        CONFIG_SECTION_MODULES | CONFIG_SECTION_IO);
+    size_t requestedInputEntries = countConfigEntries(doc["inputs"]);
+    size_t requestedOutputEntries = countConfigEntries(doc["outputs"]);
+    size_t expectedInputs = requestedInputEntries;
+    if (expectedInputs > MAX_INPUTS) {
+      expectedInputs = MAX_INPUTS;
+    }
+    size_t expectedOutputs = requestedOutputEntries;
+    if (expectedOutputs > MAX_OUTPUTS) {
+      expectedOutputs = MAX_OUTPUTS;
+    }
+    bool inputMismatch = config.inputCount < expectedInputs;
+    bool outputMismatch = config.outputCount < expectedOutputs;
+    if (inputMismatch || outputMismatch) {
+      String mismatchSummary;
+      if (inputMismatch) {
+        mismatchSummary += String("entrées demandées ") +
+                           static_cast<unsigned>(expectedInputs) + " appliquées " +
+                           static_cast<unsigned>(config.inputCount);
+      }
+      if (outputMismatch) {
+        if (mismatchSummary.length() > 0) {
+          mismatchSummary += "; ";
+        }
+        mismatchSummary += String("sorties demandées ") +
+                           static_cast<unsigned>(expectedOutputs) + " appliquées " +
+                           static_cast<unsigned>(config.outputCount);
+      }
+      logPrintf("IO configuration request discarded: %s",
+                mismatchSummary.length() > 0 ? mismatchSummary.c_str()
+                                             : "incomplete configuration");
+      appendConfigSaveLog(String("Erreur : ") +
+                          "certaines voies n'ont pas été interprétées (" +
+                          mismatchSummary + ")");
+      config = previousConfig;
+      DynamicJsonDocument errDoc(256);
+      errDoc["error"] = "invalid_io_config";
+      if (inputMismatch) {
+        errDoc["detail"] = outputMismatch ? "inputs_outputs_dropped"
+                                           : "inputs_dropped";
+        errDoc["requestedInputs"] = static_cast<uint8_t>(expectedInputs);
+        errDoc["appliedInputs"] = config.inputCount;
+      }
+      if (outputMismatch) {
+        if (!inputMismatch) {
+          errDoc["detail"] = "outputs_dropped";
+        }
+        errDoc["requestedOutputs"] = static_cast<uint8_t>(expectedOutputs);
+        errDoc["appliedOutputs"] = config.outputCount;
+      }
+      String errPayload;
+      serializeJson(errDoc, errPayload);
+      appendConfigSaveLog("Réponse d'erreur envoyée au client");
+      appendConfigSaveLog("--- Fin de sauvegarde de configuration IO ---");
+      srv->send(422, "application/json", errPayload);
+      return;
+    }
+    appendConfigSaveLog("Configuration appliquée en mémoire");
+    if (!saveIoConfig()) {
+      appendConfigSaveLog("Erreur : écriture du fichier io_config.json");
+      config = previousConfig;
+      srv->send(500, "application/json",
+                R"({"error":"save_failed"})");
+      return;
+    }
+    appendConfigSaveLog("Sauvegarde terminée avec succès");
+    DynamicJsonDocument respDoc(256);
+    respDoc["status"] = "ok";
+    respDoc["message"] = "Fichier enregistré.";
+    respDoc["requiresReboot"] = true;
+    String payload;
+    serializeJson(respDoc, payload);
+    srv->send(200, "application/json", payload);
+    appendConfigSaveLog("Réponse envoyée au client");
     appendConfigSaveLog("--- Fin de sauvegarde de configuration IO ---");
-    srv->send(422, "application/json", errPayload);
     return;
   }
-  appendConfigSaveLog("Configuration appliquée en mémoire");
-  if (!saveIoConfig()) {
-    appendConfigSaveLog("Erreur : écriture du fichier io_config.json");
-    config = previousConfig;
-    srv->send(500, "application/json",
-              R"({"error":"save_failed"})");
-    return;
-  }
-  appendConfigSaveLog("Sauvegarde terminée avec succès");
-  DynamicJsonDocument respDoc(256);
-  respDoc["status"] = "ok";
-  respDoc["message"] = "Fichier enregistré.";
-  respDoc["requiresReboot"] = true;
-  String payload;
-  serializeJson(respDoc, payload);
-  srv->send(200, "application/json", payload);
-  appendConfigSaveLog("Réponse envoyée au client");
-  appendConfigSaveLog("--- Fin de sauvegarde de configuration IO ---");
 }
 
 template <typename ServerT>
