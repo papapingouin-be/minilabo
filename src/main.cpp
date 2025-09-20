@@ -196,6 +196,7 @@ static const char *LOG_PATH = "/log.txt";
 static const char *USER_FILES_DIR = "/private";
 static const char *SAMPLE_FILE_PATH = "/private/sample.html";
 static const char *IO_CONFIG_FILE_PATH = "/private/io_config.json";
+static const char *CONFIG_SAVE_LOG_PATH = "/private/sauvegardeconfig.log";
 static const char *IO_CONFIG_BACKUP_FILE_PATH = "/private/io_config.bak";
 static const char *IO_CONFIG_TEMP_FILE_PATH = "/private/io_config.tmp";
 static const char *IO_CONFIG_BACKUP_STAGING_PATH = "/private/io_config.bak.tmp";
@@ -285,6 +286,39 @@ static bool ensureUserDirectory() {
   }
   if (!LittleFS.mkdir(USER_FILES_DIR)) {
     logMessage("Failed to create private user directory");
+    return false;
+  }
+  return true;
+}
+
+static void appendConfigSaveLog(const String &message) {
+  if (!ensureUserDirectory()) {
+    logMessage("Unable to open private directory for config save log");
+    return;
+  }
+  File logFile = LittleFS.open(CONFIG_SAVE_LOG_PATH, "a");
+  if (!logFile) {
+    logPrintf("Failed to append config save log: %s", CONFIG_SAVE_LOG_PATH);
+    return;
+  }
+  String line = String("[") + millis() + "] " + message;
+  logFile.println(line);
+  logFile.close();
+}
+
+static bool writeTextFile(const char *path, const String &content) {
+  File f = LittleFS.open(path, "w");
+  if (!f) {
+    logPrintf("Failed to open %s for writing", path);
+    return false;
+  }
+  size_t written = f.write(reinterpret_cast<const uint8_t *>(content.c_str()),
+                           content.length());
+  f.close();
+  if (written != content.length()) {
+    logPrintf("Short write when saving %s (%u/%u bytes)", path,
+              static_cast<unsigned>(written),
+              static_cast<unsigned>(content.length()));
     return false;
   }
   return true;
@@ -2555,55 +2589,6 @@ static bool writeUint32Le(File &f, uint32_t value) {
   return f.write(buf, sizeof(buf)) == sizeof(buf);
 }
 
-static bool writeConfigRecord(File &f,
-                              uint16_t sections,
-                              const uint8_t *payload,
-                              size_t payloadLength,
-                              uint32_t checksum,
-                              const char *label,
-                              const char *path) {
-  if (!writeUint32Le(f, CONFIG_RECORD_MAGIC) ||
-      !writeUint16Le(f, CONFIG_RECORD_VERSION) ||
-      !writeUint16Le(f, sections) ||
-      !writeUint32Le(f, static_cast<uint32_t>(payloadLength)) ||
-      !writeUint32Le(f, checksum)) {
-    logPrintf("Failed to write %s config header to %s", label, path);
-    return false;
-  }
-  if (payloadLength == 0) {
-    return true;
-  }
-  size_t written = f.write(payload, payloadLength);
-  if (written != payloadLength) {
-    logPrintf("Short write when writing %s config payload to %s (expected %u, wrote %u)",
-              label, path, static_cast<unsigned>(payloadLength),
-              static_cast<unsigned>(written));
-    return false;
-  }
-  return true;
-}
-
-static bool writeConfigRecordFile(const char *path,
-                                  uint16_t sections,
-                                  const uint8_t *payload,
-                                  size_t payloadLength,
-                                  uint32_t checksum,
-                                  const char *label) {
-  File f = LittleFS.open(path, "w");
-  if (!f) {
-    logPrintf("Failed to open %s for writing", path);
-    return false;
-  }
-  bool ok = writeConfigRecord(f, sections, payload, payloadLength, checksum,
-                              label, path);
-  f.flush();
-  f.close();
-  if (!ok) {
-    LittleFS.remove(path);
-  }
-  return ok;
-}
-
 static bool tryDecodeConfigRecord(const uint8_t *data,
                                   size_t length,
                                   ConfigRecordMetadata &meta,
@@ -2637,136 +2622,46 @@ static bool tryDecodeConfigRecord(const uint8_t *data,
   return true;
 }
 
-static bool removeFileIfExists(const char *path) {
-  if (!LittleFS.exists(path)) {
-    return true;
-  }
-  if (!LittleFS.remove(path)) {
-    logPrintf("Failed to remove %s", path);
-    return false;
-  }
-  return true;
-}
-
-static bool saveConfigSection(const char *label,
-                              uint8_t sections,
-                              const char *primaryPath,
-                              const char *backupPath,
-                              const char *tempPath,
-                              const char *stagingPath) {
+static bool saveJsonConfig(uint8_t sections,
+                           const char *path,
+                           const char *label,
+                           bool logToFile = false) {
   logConfigSummary(label);
   String payload;
-  if (!buildConfigJsonPayload(payload, sections, false, label, true)) {
+  if (!buildConfigJsonPayload(payload, sections, false, label, false)) {
     return false;
   }
   if (!ensureUserDirectory()) {
     logMessage(String(label) + " config directory unavailable");
     return false;
   }
-  const uint8_t *payloadBytes =
-      reinterpret_cast<const uint8_t *>(payload.c_str());
-  size_t payloadLength = payload.length();
-  uint32_t checksum = crc32ForBuffer(payloadBytes, payloadLength);
-
-  if (!removeFileIfExists(tempPath)) {
-    return false;
-  }
-  File tempFile = LittleFS.open(tempPath, "w");
-  if (!tempFile) {
-    logPrintf("Failed to open %s for writing", tempPath);
-    return false;
-  }
-  bool wroteTemp = writeConfigRecord(tempFile, static_cast<uint16_t>(sections),
-                                     payloadBytes, payloadLength, checksum,
-                                     label, tempPath);
-  tempFile.flush();
-  tempFile.close();
-  if (!wroteTemp) {
-    LittleFS.remove(tempPath);
-    return false;
-  }
-
-  bool hadExistingConfig = LittleFS.exists(primaryPath);
-  if (hadExistingConfig) {
-    if (!removeFileIfExists(stagingPath)) {
-      LittleFS.remove(tempPath);
-      return false;
-    }
-    if (!LittleFS.rename(primaryPath, stagingPath)) {
-      logPrintf("Failed to stage %s configuration %s", label, primaryPath);
-      LittleFS.remove(tempPath);
-      return false;
-    }
-    logPrintf("Existing %s configuration moved to staging %s", label,
-              stagingPath);
-  }
-
-  if (!LittleFS.rename(tempPath, primaryPath)) {
-    logPrintf("Failed to commit %s configuration file %s", label,
-              primaryPath);
-    LittleFS.remove(tempPath);
-    if (hadExistingConfig) {
-      if (!LittleFS.rename(stagingPath, primaryPath)) {
-        logPrintf("Failed to restore %s configuration from staging %s",
-                  label, stagingPath);
-      }
+  if (!writeTextFile(path, payload)) {
+    logPrintf("Failed to write %s configuration to %s", label, path);
+    if (logToFile) {
+      appendConfigSaveLog(String("Erreur lors de l'écriture de ") + path);
     }
     return false;
   }
-
-  if (!writeConfigRecordFile(backupPath, static_cast<uint16_t>(sections),
-                             payloadBytes, payloadLength, checksum, label)) {
-    logPrintf("Failed to refresh %s backup config file %s", label,
-              backupPath);
-    if (hadExistingConfig) {
-      if (!removeFileIfExists(primaryPath)) {
-        logPrintf("Unable to remove partially written %s config %s", label,
-                  primaryPath);
-      }
-      if (!LittleFS.rename(stagingPath, primaryPath)) {
-        logPrintf("Failed to restore %s configuration from staging %s", label,
-                  stagingPath);
-      }
-    } else {
-      removeFileIfExists(primaryPath);
-    }
-    return false;
+  if (logToFile) {
+    appendConfigSaveLog(String("Configuration ") + label + " enregistrée dans " + path);
   }
-
-  if (hadExistingConfig) {
-    removeFileIfExists(stagingPath);
-  }
-
-  logPrintf("%s configuration persisted (%u bytes, crc=%08X)", label,
-            static_cast<unsigned>(payloadLength),
-            static_cast<unsigned>(checksum));
   logMessage(String(label) + " configuration saved");
   return true;
 }
 
 bool saveIoConfig() {
-  return saveConfigSection("IO", CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
-                          IO_CONFIG_FILE_PATH, IO_CONFIG_BACKUP_FILE_PATH,
-                          IO_CONFIG_TEMP_FILE_PATH,
-                          IO_CONFIG_BACKUP_STAGING_PATH);
+  return saveJsonConfig(CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
+                       IO_CONFIG_FILE_PATH, "IO", true);
 }
 
 bool saveInterfaceConfig() {
-  return saveConfigSection("Interface",
-                          CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS,
-                          INTERFACE_CONFIG_FILE_PATH,
-                          INTERFACE_CONFIG_BACKUP_FILE_PATH,
-                          INTERFACE_CONFIG_TEMP_FILE_PATH,
-                          INTERFACE_CONFIG_BACKUP_STAGING_PATH);
+  return saveJsonConfig(CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS,
+                       INTERFACE_CONFIG_FILE_PATH, "Interface");
 }
 
 bool saveVirtualConfig() {
-  return saveConfigSection("Virtual",
-                          CONFIG_SECTION_VIRTUAL,
-                          VIRTUAL_CONFIG_FILE_PATH,
-                          VIRTUAL_CONFIG_BACKUP_FILE_PATH,
-                          VIRTUAL_CONFIG_TEMP_FILE_PATH,
-                          VIRTUAL_CONFIG_BACKUP_STAGING_PATH);
+  return saveJsonConfig(CONFIG_SECTION_VIRTUAL,
+                       VIRTUAL_CONFIG_FILE_PATH, "Virtual");
 }
 
 static const InputConfig *findInputByName(const Config &cfg, const String &name) {
@@ -3157,148 +3052,63 @@ static bool verifyConfigStored(const Config &expected,
 
 template <typename ServerT>
 static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
+  appendConfigSaveLog("--- Début de sauvegarde de configuration IO ---");
   if (body.length() == 0) {
+    appendConfigSaveLog("Erreur : corps de requête vide");
     srv->send(400, "application/json", R"({"error":"No body"})");
     return;
   }
+  appendConfigSaveLog(String("Requête reçue (") + body.length() + " octets)");
   size_t docCapacity = configJsonCapacityForPayload(body.length());
-  while (true) {
-    DynamicJsonDocument doc(docCapacity);
-    DeserializationError parseErr = deserializeJson(doc, body);
-    if (parseErr == DeserializationError::NoMemory &&
-        docCapacity < CONFIG_JSON_MAX_CAPACITY) {
-      size_t nextCapacity = growConfigJsonCapacity(docCapacity);
-      if (nextCapacity == docCapacity) {
-        logJsonParseFailure("IO configuration", body, docCapacity, parseErr);
-        DynamicJsonDocument errDoc(256);
-        errDoc["error"] = "invalid_json";
-        errDoc["detail"] = parseErr.c_str();
-        errDoc["bytes"] = static_cast<uint32_t>(body.length());
-        errDoc["capacity"] = static_cast<uint32_t>(docCapacity);
-        errDoc["hint"] = "payload_too_large";
-        String errPayload;
-        serializeJson(errDoc, errPayload);
-        srv->send(400, "application/json", errPayload);
-        return;
-      }
-      logPrintf("IO configuration JSON parse exceeded %u bytes; retrying with %u",
-                static_cast<unsigned>(docCapacity),
-                static_cast<unsigned>(nextCapacity));
-      docCapacity = nextCapacity;
-      continue;
-    }
-    if (parseErr) {
-      logJsonParseFailure("IO configuration", body, docCapacity, parseErr);
-      DynamicJsonDocument errDoc(256);
-      errDoc["error"] = "invalid_json";
-      errDoc["detail"] = parseErr.c_str();
-      errDoc["bytes"] = static_cast<uint32_t>(body.length());
-      errDoc["capacity"] = static_cast<uint32_t>(docCapacity);
-      if (parseErr == DeserializationError::NoMemory) {
-        errDoc["hint"] = "payload_too_large";
-      }
-      String errPayload;
-      serializeJson(errDoc, errPayload);
-      srv->send(400, "application/json", errPayload);
-      return;
-    }
-    logPrintf("IO configuration update received (%u bytes)",
-              static_cast<unsigned>(body.length()));
-    logConfigJson("Received IO", doc);
-    logMessage("IO configuration payload parsed; applying runtime changes");
-    Config previousConfig = config;
-    parseConfigFromJson(doc, config, &previousConfig, false,
-                        CONFIG_SECTION_MODULES | CONFIG_SECTION_IO);
-    logMessage("IO configuration ready to be written to storage");
-    if (!saveIoConfig()) {
-      config = previousConfig;
-      logMessage("IO configuration update failed to save; changes reverted");
-      srv->send(500, "application/json", R"({"error":"save_failed"})");
-      return;
-    }
-    logMessage("IO configuration saved; verifying integrity");
-    String verifyError;
-    if (!verifyConfigStored(config, IO_CONFIG_FILE_PATH,
-                            CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
-                            verifyError)) {
-      logPrintf("IO configuration verification failed: %s",
-                verifyError.c_str());
-      config = previousConfig;
-      if (!saveIoConfig()) {
-        logMessage("Failed to restore IO configuration after verification failure");
-      }
-      DynamicJsonDocument errDoc(256);
-      errDoc["error"] = "verify_failed";
-      if (verifyError.length() > 0) {
-        errDoc["detail"] = verifyError;
-      }
-      String errPayload;
-      serializeJson(errDoc, errPayload);
-      srv->send(500, "application/json", errPayload);
-      return;
-    }
-    logIoDelta(previousConfig, config);
-    logConfigSummary("Applied IO");
-    logMessage("IO configuration verification succeeded");
-    logMessage("IO configuration update saved; reboot required");
-    DynamicJsonDocument respDoc(2048);
-    respDoc["status"] = "ok";
-    respDoc["saved"] = true;
-    respDoc["verified"] = true;
-    respDoc["requiresReboot"] = true;
-    JsonObject modulesObj = respDoc.createNestedObject("modules");
-    modulesObj["ads1115"] = config.modules.ads1115;
-    modulesObj["pwm010"] = config.modules.pwm010;
-    modulesObj["mcp4725"] = config.modules.mcp4725;
-    modulesObj["zmpt"] = config.modules.zmpt;
-    modulesObj["zmct"] = config.modules.zmct;
-    modulesObj["div"] = config.modules.div;
-    JsonArray inputsArr = respDoc.createNestedArray("inputs");
-    for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
-      JsonObject out = inputsArr.createNestedObject();
-      const InputConfig &ic = config.inputs[i];
-      out["name"] = ic.name;
-      out["type"] = inputTypeToString(ic.type);
-      if (ic.type == INPUT_ADC || ic.type == INPUT_DIV ||
-          ic.type == INPUT_ZMPT || ic.type == INPUT_ZMCT) {
-        out["pin"] = pinToString(ic.pin);
-      }
-      if (ic.type == INPUT_ADS1115) {
-        out["adsChannel"] = ic.adsChannel;
-      }
-      if (ic.type == INPUT_REMOTE) {
-        out["remoteNode"] = ic.remoteNode;
-        out["remoteName"] = ic.remoteName;
-      }
-      out["scale"] = ic.scale;
-      out["offset"] = ic.offset;
-      out["unit"] = ic.unit;
-      out["active"] = ic.active;
-    }
-    JsonArray outputsArr = respDoc.createNestedArray("outputs");
-    for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
-      JsonObject out = outputsArr.createNestedObject();
-      const OutputConfig &oc = config.outputs[i];
-      out["name"] = oc.name;
-      out["type"] = outputTypeToString(oc.type);
-      if (oc.type == OUTPUT_PWM010 || oc.type == OUTPUT_GPIO) {
-        out["pin"] = pinToString(oc.pin);
-      }
-      if (oc.type == OUTPUT_PWM010) {
-        out["pwmFreq"] = oc.pwmFreq;
-      }
-      if (oc.type == OUTPUT_MCP4725) {
-        out["i2cAddress"] = formatI2cAddress(oc.i2cAddress);
-      }
-      out["scale"] = oc.scale;
-      out["offset"] = oc.offset;
-      out["active"] = oc.active;
-    }
-    String payload;
-    serializeJson(respDoc, payload);
-    srv->send(200, "application/json", payload);
+  if (docCapacity == 0) {
+    docCapacity = configJsonCapacityForPayload(0);
+  }
+  DynamicJsonDocument doc(docCapacity);
+  DeserializationError parseErr = deserializeJson(doc, body);
+  if (parseErr == DeserializationError::NoMemory) {
+    appendConfigSaveLog("Erreur : charge utile trop volumineuse");
+    srv->send(400, "application/json",
+              R"({"error":"payload_too_large"})");
     return;
   }
+  if (parseErr) {
+    appendConfigSaveLog(String("Erreur de parsing JSON: ") + parseErr.c_str());
+    DynamicJsonDocument errDoc(256);
+    errDoc["error"] = "invalid_json";
+    errDoc["detail"] = parseErr.c_str();
+    String errPayload;
+    serializeJson(errDoc, errPayload);
+    srv->send(400, "application/json", errPayload);
+    return;
+  }
+  if (doc.overflowed()) {
+    appendConfigSaveLog("Erreur : mémoire insuffisante pour le JSON reçu");
+    srv->send(400, "application/json",
+              R"({"error":"json_overflow"})");
+    return;
+  }
+  appendConfigSaveLog("JSON analysé avec succès");
+  Config previousConfig = config;
+  parseConfigFromJson(doc, config, &previousConfig, false,
+                      CONFIG_SECTION_MODULES | CONFIG_SECTION_IO);
+  appendConfigSaveLog("Configuration appliquée en mémoire");
+  if (!saveIoConfig()) {
+    appendConfigSaveLog("Erreur : écriture du fichier io_config.json");
+    config = previousConfig;
+    srv->send(500, "application/json",
+              R"({"error":"save_failed"})");
+    return;
+  }
+  appendConfigSaveLog("Sauvegarde terminée avec succès");
+  DynamicJsonDocument respDoc(256);
+  respDoc["status"] = "ok";
+  respDoc["message"] = "Fichier enregistré.";
+  respDoc["requiresReboot"] = true;
+  String payload;
+  serializeJson(respDoc, payload);
+  srv->send(200, "application/json", payload);
+  appendConfigSaveLog("Réponse envoyée au client");
+  appendConfigSaveLog("--- Fin de sauvegarde de configuration IO ---");
 }
 
 template <typename ServerT>
