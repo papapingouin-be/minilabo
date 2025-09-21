@@ -1632,15 +1632,38 @@ async function saveConfig() {
       }
       return;
     }
-    rebootShouldBeEnabled = true;
+    const rawBody = await response.text();
+    let serverResult = null;
+    if (rawBody && rawBody.trim().length) {
+      try {
+        serverResult = JSON.parse(rawBody);
+      } catch (err) {
+        console.warn('Réponse JSON inattendue lors de la sauvegarde IO', err, rawBody);
+      }
+    }
+    rebootShouldBeEnabled = serverResult && typeof serverResult.requiresReboot === 'boolean'
+      ? !!serverResult.requiresReboot
+      : false;
     if (statusEl) {
-      statusEl.textContent = 'Fichier enregistré.';
+      if (serverResult && typeof serverResult.message === 'string' && serverResult.message.length) {
+        statusEl.textContent = serverResult.message;
+      } else if (rawBody && rawBody.trim().length) {
+        statusEl.textContent = rawBody;
+      } else {
+        statusEl.textContent = 'Fichier enregistré.';
+      }
     }
     markAllSnapshotsSaved();
-    logIoStep('Configuration IO sauvegardée côté serveur', {
+    const logDetail = {
       inputs: inputs.length,
       outputs: outputs.length
-    });
+    };
+    if (serverResult) {
+      logDetail.response = serverResult;
+    } else if (rawBody && rawBody.trim().length) {
+      logDetail.raw = rawBody;
+    }
+    logIoStep('Configuration IO sauvegardée côté serveur', logDetail);
   } catch (err) {
     console.error(err);
     if (statusEl) {

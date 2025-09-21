@@ -1618,6 +1618,7 @@ static String diffOutputConfig(const OutputConfig &before, const OutputConfig &a
 static const char *describeJsonType(const JsonVariantConst &value);
 static void logIoDelta(const Config &before, const Config &after);
 static bool verifyConfigStored(const Config &expected, String &errorDetail);
+static void applyIoRuntimeChanges(const Config &previousConfig);
 
 static MeterMeasurementConfig makeDefaultMeterMeasurement(bool enabled = false) {
   MeterMeasurementConfig mm;
@@ -2897,6 +2898,56 @@ static const OutputConfig *findOutputByName(const Config &cfg, const String &nam
   return nullptr;
 }
 
+static void disableOutputHardware(const OutputConfig &oc,
+                                  bool dacModuleAvailablePreviously) {
+  if (!oc.active) {
+    return;
+  }
+  switch (oc.type) {
+    case OUTPUT_PWM010:
+      if (oc.pin >= 0) {
+        analogWrite(oc.pin, 0);
+        pinMode(oc.pin, OUTPUT);
+        digitalWrite(oc.pin, LOW);
+      }
+      break;
+    case OUTPUT_GPIO:
+      if (oc.pin >= 0) {
+        pinMode(oc.pin, OUTPUT);
+        digitalWrite(oc.pin, LOW);
+      }
+      break;
+    case OUTPUT_MCP4725:
+      if (dacModuleAvailablePreviously) {
+        uint8_t addr = oc.i2cAddress ? oc.i2cAddress : 0x60;
+        Adafruit_MCP4725 tempDriver;
+        if (tempDriver.begin(addr)) {
+          tempDriver.setVoltage(0, false);
+        }
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+static void applyIoRuntimeChanges(const Config &previousConfig) {
+  for (uint8_t i = 0; i < previousConfig.outputCount && i < MAX_OUTPUTS; ++i) {
+    const OutputConfig &prevOutput = previousConfig.outputs[i];
+    const OutputConfig *current = findOutputByName(config, prevOutput.name);
+    bool stillActive = current && current->active &&
+                       current->type == prevOutput.type &&
+                       current->pin == prevOutput.pin;
+    if (!stillActive) {
+      disableOutputHardware(prevOutput, previousConfig.modules.mcp4725);
+    }
+  }
+  setupSensors();
+  updateOutputs();
+  updateInputs();
+  logMessage("IO configuration applied without reboot");
+}
+
 static bool floatsDiffer(float a, float b) {
   bool aNan = isnan(a);
   bool bNan = isnan(b);
@@ -3382,11 +3433,49 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
                 R"({"error":"save_failed"})");
       return;
     }
+    appendConfigSaveLog("Vérification du fichier écrit");
+    String verifyError;
+    if (!verifyConfigStored(config, IO_CONFIG_FILE_PATH,
+                            CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
+                            verifyError)) {
+      logPrintf("IO configuration verification failed: %s",
+                verifyError.c_str());
+      appendConfigSaveLog(String("Erreur : vérification échouée (") +
+                          (verifyError.length() ? verifyError
+                                                 : String("inconnue")) +
+                          ")");
+      config = previousConfig;
+      if (!saveIoConfig()) {
+        appendConfigSaveLog(
+            "Erreur : restauration de la configuration précédente échouée");
+        logMessage(
+            "Failed to restore IO configuration after verification failure");
+      } else {
+        appendConfigSaveLog("Configuration précédente restaurée");
+      }
+      DynamicJsonDocument errDoc(256);
+      errDoc["error"] = "verify_failed";
+      if (verifyError.length() > 0) {
+        errDoc["detail"] = verifyError;
+      }
+      String errPayload;
+      serializeJson(errDoc, errPayload);
+      srv->send(500, "application/json", errPayload);
+      appendConfigSaveLog("Réponse d'erreur envoyée au client");
+      appendConfigSaveLog("--- Fin de sauvegarde de configuration IO ---");
+      return;
+    }
+    appendConfigSaveLog("Vérification réussie");
+    applyIoRuntimeChanges(previousConfig);
     appendConfigSaveLog("Sauvegarde terminée avec succès");
-    DynamicJsonDocument respDoc(256);
+    appendConfigSaveLog("Configuration appliquée sans redémarrage");
+    DynamicJsonDocument respDoc(384);
     respDoc["status"] = "ok";
-    respDoc["message"] = "Fichier enregistré.";
-    respDoc["requiresReboot"] = true;
+    respDoc["message"] = "Configuration appliquée sans redémarrage.";
+    respDoc["requiresReboot"] = false;
+    JsonObject applied = respDoc.createNestedObject("applied");
+    applied["inputs"] = config.inputCount;
+    applied["outputs"] = config.outputCount;
     String payload;
     serializeJson(respDoc, payload);
     srv->send(200, "application/json", payload);
