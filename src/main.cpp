@@ -207,7 +207,10 @@ static const char *LOG_PATH = "/log.txt";
 static const char *USER_FILES_DIR = "/private";
 static const char *SAMPLE_FILE_PATH = "/private/sample.html";
 static const char *IO_CONFIG_FILE_PATH = "/private/io_config.json";
-static const char *CONFIG_SAVE_LOG_PATH = "/private/sauvegardeconfig.log";
+static const char *IO_CONFIG_TRANSACTIONAL_LOG_PATH =
+    "/private/sauvegarde_io_standard.log";
+static const char *IO_CONFIG_DIRECT_LOG_PATH =
+    "/private/sauvegarde_io_direct.log";
 static const char *IO_LOG_CSV_PATH = "/private/io-config-events.csv";
 static const char *IO_CONFIG_BACKUP_FILE_PATH = "/private/io_config.bak";
 static const char *IO_CONFIG_TEMP_FILE_PATH = "/private/io_config.tmp";
@@ -229,6 +232,7 @@ struct ConfigSaveRequest {
   ConfigSavePaths paths;
   const char *label;
   bool logToFile;
+  const char *logPath;
 };
 
 static const ConfigSavePaths IO_CONFIG_PATHS = {
@@ -333,14 +337,17 @@ static bool ensureUserDirectory() {
   return true;
 }
 
-static void appendConfigSaveLog(const String &message) {
+static void appendConfigSaveLog(const char *logPath, const String &message) {
+  if (!logPath || !logPath[0]) {
+    return;
+  }
   if (!ensureUserDirectory()) {
     logMessage("Unable to open private directory for config save log");
     return;
   }
-  File logFile = LittleFS.open(CONFIG_SAVE_LOG_PATH, "a");
+  File logFile = LittleFS.open(logPath, "a");
   if (!logFile) {
-    logPrintf("Failed to append config save log: %s", CONFIG_SAVE_LOG_PATH);
+    logPrintf("Failed to append config save log: %s", logPath);
     return;
   }
   String line = String("[") + millis() + "] " + message;
@@ -376,16 +383,29 @@ static const char *configSaveLabel(const ConfigSaveRequest &request) {
   return request.label ? request.label : "Config";
 }
 
+static const char *configSaveLogPath(const ConfigSaveRequest &request) {
+  if (request.logPath && request.logPath[0]) {
+    return request.logPath;
+  }
+  return IO_CONFIG_TRANSACTIONAL_LOG_PATH;
+}
+
+static void appendConfigSaveLogForRequest(const ConfigSaveRequest &request,
+                                          const String &message) {
+  if (!request.logToFile) {
+    return;
+  }
+  appendConfigSaveLog(configSaveLogPath(request), message);
+}
+
 static bool ensureConfigDirectory(const ConfigSaveRequest &request) {
   if (ensureUserDirectory()) {
     return true;
   }
   const char *label = configSaveLabel(request);
   logMessage(String(label) + " config directory unavailable");
-  if (request.logToFile) {
-    appendConfigSaveLog(String("Erreur sauvegarde ") + label +
-                        ": répertoire indisponible");
-  }
+  appendConfigSaveLogForRequest(
+      request, String("Erreur sauvegarde ") + label + ": répertoire indisponible");
   return false;
 }
 
@@ -394,10 +414,9 @@ static void logConfigSaveFailure(const ConfigSaveRequest &request,
                                  const String &detail) {
   const char *label = configSaveLabel(request);
   logPrintf("%s configuration save failure: %s (%s)", label, detail.c_str(), path);
-  if (request.logToFile) {
-    appendConfigSaveLog(String("Erreur sauvegarde ") + label + " (" + path + "): " +
-                        detail);
-  }
+  appendConfigSaveLogForRequest(
+      request,
+      String("Erreur sauvegarde ") + label + " (" + path + "): " + detail);
 }
 
 static void logConfigSaveWarning(const ConfigSaveRequest &request,
@@ -405,10 +424,9 @@ static void logConfigSaveWarning(const ConfigSaveRequest &request,
                                  const String &detail) {
   const char *label = configSaveLabel(request);
   logPrintf("%s configuration save warning: %s (%s)", label, detail.c_str(), path);
-  if (request.logToFile) {
-    appendConfigSaveLog(String("Avertissement sauvegarde ") + label + " (" + path +
-                        "): " + detail);
-  }
+  appendConfigSaveLogForRequest(
+      request,
+      String("Avertissement sauvegarde ") + label + " (" + path + "): " + detail);
 }
 
 static bool writeConfigTempFile(const ConfigSaveRequest &request,
@@ -486,8 +504,8 @@ static bool performConfigSave(const ConfigSaveRequest &request,
   if (!writeConfigTempFile(request, payload, errorDetail)) {
     LittleFS.remove(request.paths.tempPath);
     if (request.logToFile) {
-      appendConfigSaveLog(String("Erreur lors de l'écriture de ") +
-                          request.paths.tempPath);
+    appendConfigSaveLogForRequest(
+        request, String("Erreur lors de l'écriture de ") + request.paths.tempPath);
     }
     logConfigSaveFailure(request, request.paths.tempPath, errorDetail);
     return false;
@@ -521,10 +539,9 @@ static bool performConfigSave(const ConfigSaveRequest &request,
     return false;
   }
 
-  if (request.logToFile) {
-    appendConfigSaveLog(String("Configuration ") + configSaveLabel(request) +
-                        " enregistrée dans " + request.paths.primaryPath);
-  }
+  appendConfigSaveLogForRequest(
+      request, String("Configuration ") + configSaveLabel(request) +
+                   " enregistrée dans " + request.paths.primaryPath);
   return true;
 }
 
@@ -1919,6 +1936,7 @@ static uint32_t lastBroadcastUpdate = 0;
 
 // Forward declarations
 void loadConfig();
+bool saveIoConfigWithLogPath(const char *logPath);
 bool saveIoConfig();
 bool saveInterfaceConfig();
 bool saveVirtualConfig();
@@ -3177,14 +3195,19 @@ static bool saveJsonConfig(const ConfigSaveRequest &request) {
   return true;
 }
 
-bool saveIoConfig() {
+bool saveIoConfigWithLogPath(const char *logPath) {
   ConfigSaveRequest request = {
       static_cast<uint8_t>(CONFIG_SECTION_MODULES | CONFIG_SECTION_IO),
       IO_CONFIG_PATHS,
       "IO",
       true,
+      logPath,
   };
   return saveJsonConfig(request);
+}
+
+bool saveIoConfig() {
+  return saveIoConfigWithLogPath(IO_CONFIG_TRANSACTIONAL_LOG_PATH);
 }
 
 bool saveInterfaceConfig() {
@@ -3193,6 +3216,7 @@ bool saveInterfaceConfig() {
       INTERFACE_CONFIG_PATHS,
       "Interface",
       false,
+      nullptr,
   };
   return saveJsonConfig(request);
 }
@@ -3203,8 +3227,28 @@ bool saveVirtualConfig() {
       VIRTUAL_CONFIG_PATHS,
       "Virtual",
       false,
+      nullptr,
   };
   return saveJsonConfig(request);
+}
+
+static bool saveIoConfigDirect(String &errorDetail) {
+  String payload;
+  if (!buildConfigJsonPayload(payload,
+                              CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
+                              false, "IO direct", false)) {
+    errorDetail = "payload_generation_failed";
+    return false;
+  }
+  if (!ensureUserDirectory()) {
+    errorDetail = "private_directory_unavailable";
+    return false;
+  }
+  if (!writeTextFile(IO_CONFIG_FILE_PATH, payload)) {
+    errorDetail = "write_failed";
+    return false;
+  }
+  return true;
 }
 
 static const InputConfig *findInputByName(const Config &cfg, const String &name) {
@@ -3632,15 +3676,30 @@ static bool verifyConfigStored(const Config &expected,
   }
 }
 
+enum class IoSaveMethod { Transactional, Direct };
+
 template <typename ServerT>
-static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
-  appendConfigSaveLog("--- Début de sauvegarde de configuration IO ---");
+static void handleIoConfigSetRequest(ServerT *srv,
+                                     const String &body,
+                                     IoSaveMethod method) {
+  const bool transactional = (method == IoSaveMethod::Transactional);
+  const char *logPath = transactional ? IO_CONFIG_TRANSACTIONAL_LOG_PATH
+                                      : IO_CONFIG_DIRECT_LOG_PATH;
+  const char *methodDescriptor =
+      transactional ? "méthode standard" : "méthode directe";
+  appendConfigSaveLog(
+      logPath, String("--- Début de sauvegarde de configuration IO (") +
+                   methodDescriptor + ") ---");
   if (body.length() == 0) {
-    appendConfigSaveLog("Erreur : corps de requête vide");
+    appendConfigSaveLog(logPath, "Erreur : corps de requête vide");
     srv->send(400, "application/json", R"({"error":"No body"})");
+    appendConfigSaveLog(
+        logPath, String("--- Fin de sauvegarde de configuration IO (") +
+                     methodDescriptor + ") ---");
     return;
   }
-  appendConfigSaveLog(String("Requête reçue (") + body.length() + " octets)");
+  appendConfigSaveLog(logPath,
+                      String("Requête reçue (") + body.length() + " octets)");
   size_t docCapacity = configJsonCapacityForPayload(body.length());
   if (docCapacity == 0) {
     docCapacity = configJsonCapacityForPayload(0);
@@ -3660,24 +3719,31 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
                              static_cast<unsigned long>(docCapacity) + " -> " +
                              static_cast<unsigned long>(nextCapacity) +
                              " octets)";
-          appendConfigSaveLog(resizeMsg);
+          appendConfigSaveLog(logPath, resizeMsg);
           docCapacity = nextCapacity;
           continue;
         }
       }
-      appendConfigSaveLog("Erreur : charge utile trop volumineuse");
+      appendConfigSaveLog(logPath, "Erreur : charge utile trop volumineuse");
       srv->send(400, "application/json",
                 R"({"error":"payload_too_large"})");
+      appendConfigSaveLog(
+          logPath, String("--- Fin de sauvegarde de configuration IO (") +
+                       methodDescriptor + ") ---");
       return;
     }
     if (parseErr) {
-      appendConfigSaveLog(String("Erreur de parsing JSON: ") + parseErr.c_str());
+      appendConfigSaveLog(logPath,
+                          String("Erreur de parsing JSON: ") + parseErr.c_str());
       DynamicJsonDocument errDoc(256);
       errDoc["error"] = "invalid_json";
       errDoc["detail"] = parseErr.c_str();
       String errPayload;
       serializeJson(errDoc, errPayload);
       srv->send(400, "application/json", errPayload);
+      appendConfigSaveLog(
+          logPath, String("--- Fin de sauvegarde de configuration IO (") +
+                       methodDescriptor + ") ---");
       return;
     }
     if (doc.overflowed()) {
@@ -3691,17 +3757,21 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
                              static_cast<unsigned long>(docCapacity) + " -> " +
                              static_cast<unsigned long>(nextCapacity) +
                              " octets)";
-          appendConfigSaveLog(resizeMsg);
+          appendConfigSaveLog(logPath, resizeMsg);
           docCapacity = nextCapacity;
           continue;
         }
       }
-      appendConfigSaveLog("Erreur : mémoire insuffisante pour le JSON reçu");
+      appendConfigSaveLog(logPath,
+                          "Erreur : mémoire insuffisante pour le JSON reçu");
       srv->send(400, "application/json",
                 R"({"error":"json_overflow"})");
+      appendConfigSaveLog(
+          logPath, String("--- Fin de sauvegarde de configuration IO (") +
+                       methodDescriptor + ") ---");
       return;
     }
-    appendConfigSaveLog("JSON analysé avec succès");
+    appendConfigSaveLog(logPath, "JSON analysé avec succès");
     Config previousConfig = config;
     parseConfigFromJson(doc, config, &previousConfig, false,
                         CONFIG_SECTION_MODULES | CONFIG_SECTION_IO);
@@ -3735,9 +3805,9 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
       logPrintf("IO configuration request discarded: %s",
                 mismatchSummary.length() > 0 ? mismatchSummary.c_str()
                                              : "incomplete configuration");
-      appendConfigSaveLog(String("Erreur : ") +
-                          "certaines voies n'ont pas été interprétées (" +
-                          mismatchSummary + ")");
+      appendConfigSaveLog(logPath,
+                          String("Erreur : certaines voies n'ont pas été interprétées (") +
+                              mismatchSummary + ")");
       config = previousConfig;
       DynamicJsonDocument errDoc(256);
       errDoc["error"] = "invalid_io_config";
@@ -3756,58 +3826,95 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
       }
       String errPayload;
       serializeJson(errDoc, errPayload);
-      appendConfigSaveLog("Réponse d'erreur envoyée au client");
-      appendConfigSaveLog("--- Fin de sauvegarde de configuration IO ---");
+      appendConfigSaveLog(logPath, "Réponse d'erreur envoyée au client");
+      appendConfigSaveLog(
+          logPath, String("--- Fin de sauvegarde de configuration IO (") +
+                       methodDescriptor + ") ---");
       srv->send(422, "application/json", errPayload);
       return;
     }
-    appendConfigSaveLog("Configuration appliquée en mémoire");
-    if (!saveIoConfig()) {
-      appendConfigSaveLog("Erreur : écriture du fichier io_config.json");
-      config = previousConfig;
-      srv->send(500, "application/json",
-                R"({"error":"save_failed"})");
-      return;
-    }
-    appendConfigSaveLog("Vérification du fichier écrit");
-    String verifyError;
-    if (!verifyConfigStored(config, IO_CONFIG_FILE_PATH,
-                            CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
-                            verifyError)) {
-      logPrintf("IO configuration verification failed: %s",
-                verifyError.c_str());
-      appendConfigSaveLog(String("Erreur : vérification échouée (") +
-                          (verifyError.length() ? verifyError
-                                                 : String("inconnue")) +
-                          ")");
-      config = previousConfig;
-      if (!saveIoConfig()) {
+    appendConfigSaveLog(logPath, "Configuration appliquée en mémoire");
+    if (transactional) {
+      if (!saveIoConfigWithLogPath(logPath)) {
+        appendConfigSaveLog(logPath, "Erreur : écriture du fichier io_config.json");
+        config = previousConfig;
+        srv->send(500, "application/json",
+                  R"({"error":"save_failed"})");
         appendConfigSaveLog(
-            "Erreur : restauration de la configuration précédente échouée");
-        logMessage(
-            "Failed to restore IO configuration after verification failure");
-      } else {
-        appendConfigSaveLog("Configuration précédente restaurée");
+            logPath, String("--- Fin de sauvegarde de configuration IO (") +
+                         methodDescriptor + ") ---");
+        return;
       }
-      DynamicJsonDocument errDoc(256);
-      errDoc["error"] = "verify_failed";
-      if (verifyError.length() > 0) {
-        errDoc["detail"] = verifyError;
+      appendConfigSaveLog(logPath, "Vérification du fichier écrit");
+      String verifyError;
+      if (!verifyConfigStored(config, IO_CONFIG_FILE_PATH,
+                              CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
+                              verifyError)) {
+        logPrintf("IO configuration verification failed: %s",
+                  verifyError.c_str());
+        appendConfigSaveLog(
+            logPath,
+            String("Erreur : vérification échouée (") +
+                (verifyError.length() ? verifyError : String("inconnue")) + ")");
+        config = previousConfig;
+        if (!saveIoConfigWithLogPath(logPath)) {
+          appendConfigSaveLog(
+              logPath,
+              "Erreur : restauration de la configuration précédente échouée");
+          logMessage(
+              "Failed to restore IO configuration after verification failure");
+        } else {
+          appendConfigSaveLog(logPath, "Configuration précédente restaurée");
+        }
+        DynamicJsonDocument errDoc(256);
+        errDoc["error"] = "verify_failed";
+        if (verifyError.length() > 0) {
+          errDoc["detail"] = verifyError;
+        }
+        String errPayload;
+        serializeJson(errDoc, errPayload);
+        srv->send(500, "application/json", errPayload);
+        appendConfigSaveLog(logPath, "Réponse d'erreur envoyée au client");
+        appendConfigSaveLog(
+            logPath, String("--- Fin de sauvegarde de configuration IO (") +
+                         methodDescriptor + ") ---");
+        return;
       }
-      String errPayload;
-      serializeJson(errDoc, errPayload);
-      srv->send(500, "application/json", errPayload);
-      appendConfigSaveLog("Réponse d'erreur envoyée au client");
-      appendConfigSaveLog("--- Fin de sauvegarde de configuration IO ---");
-      return;
+      appendConfigSaveLog(logPath, "Vérification réussie");
+    } else {
+      appendConfigSaveLog(logPath, "Écriture directe du fichier io_config.json");
+      String directError;
+      if (!saveIoConfigDirect(directError)) {
+        appendConfigSaveLog(logPath,
+                            String("Erreur : méthode directe (") + directError + ")");
+        config = previousConfig;
+        DynamicJsonDocument errDoc(256);
+        errDoc["error"] = "save_failed";
+        if (directError.length() > 0) {
+          errDoc["detail"] = directError;
+        }
+        String errPayload;
+        serializeJson(errDoc, errPayload);
+        srv->send(500, "application/json", errPayload);
+        appendConfigSaveLog(logPath, "Réponse d'erreur envoyée au client");
+        appendConfigSaveLog(
+            logPath, String("--- Fin de sauvegarde de configuration IO (") +
+                         methodDescriptor + ") ---");
+        return;
+      }
+      appendConfigSaveLog(
+          logPath,
+          "Fichier io_config.json mis à jour sans vérification supplémentaire");
     }
-    appendConfigSaveLog("Vérification réussie");
     applyIoRuntimeChanges(previousConfig);
-    appendConfigSaveLog("Sauvegarde terminée avec succès");
-    appendConfigSaveLog("Configuration appliquée sans redémarrage");
+    appendConfigSaveLog(logPath, "Sauvegarde terminée avec succès");
+    appendConfigSaveLog(logPath, "Configuration appliquée sans redémarrage");
     DynamicJsonDocument respDoc(384);
     respDoc["status"] = "ok";
-    respDoc["message"] = "Configuration appliquée sans redémarrage.";
+    respDoc["method"] = transactional ? "transactional" : "direct";
+    respDoc["message"] =
+        transactional ? "Configuration appliquée sans redémarrage."
+                       : "Configuration appliquée via la méthode directe.";
     respDoc["requiresReboot"] = false;
     JsonObject applied = respDoc.createNestedObject("applied");
     applied["inputs"] = config.inputCount;
@@ -3815,8 +3922,10 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
     String payload;
     serializeJson(respDoc, payload);
     srv->send(200, "application/json", payload);
-    appendConfigSaveLog("Réponse envoyée au client");
-    appendConfigSaveLog("--- Fin de sauvegarde de configuration IO ---");
+    appendConfigSaveLog(logPath, "Réponse envoyée au client");
+    appendConfigSaveLog(
+        logPath, String("--- Fin de sauvegarde de configuration IO (") +
+                     methodDescriptor + ") ---");
     return;
   }
 }
@@ -4596,14 +4705,21 @@ void registerRoutes(ServerT &server) {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
     String body = extractPlainBody(srv);
-    handleIoConfigSetRequest(srv, body);
+    handleIoConfigSetRequest(srv, body, IoSaveMethod::Transactional);
+  });
+
+  server.on("/api/config/io/save-direct", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = extractPlainBody(srv);
+    handleIoConfigSetRequest(srv, body, IoSaveMethod::Direct);
   });
 
   server.on("/api/config/set", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
     String body = extractPlainBody(srv);
-    handleIoConfigSetRequest(srv, body);
+    handleIoConfigSetRequest(srv, body, IoSaveMethod::Transactional);
   });
 
   server.on("/api/config/interface/get", HTTP_GET, [&server]() {

@@ -126,7 +126,8 @@
   </fieldset>
 
   <div class="form-actions">
-    <button type="button" id="saveBtn" class="primary">Enregistrer</button>
+    <button type="button" id="saveBtnStandard" class="primary">Sauvegarde standard</button>
+    <button type="button" id="saveBtnDirect" class="secondary">Sauvegarde directe</button>
     <button type="button" id="rebootBtn" class="secondary">Redémarrer</button>
     <span id="status" style="margin-left:1em;"></span>
   </div>
@@ -393,7 +394,38 @@ const STATUS_SYNCED = 'synced';
 const STATUS_PENDING = 'pending';
 let lastAppliedInputs = new Map();
 let lastAppliedOutputs = new Map();
-let saveInProgress = false;
+const SAVE_METHODS = {
+  transactional: {
+    buttonId: 'saveBtnStandard',
+    endpoint: '/api/config/io/set',
+    label: 'standard',
+    busyLabel: 'Sauvegarde standard...',
+    statusInProgress: 'Sauvegarde standard en cours...',
+    statusDuplicate: 'Une sauvegarde standard est déjà en cours...',
+    defaultSuccess: 'Sauvegarde standard terminée.',
+  },
+  direct: {
+    buttonId: 'saveBtnDirect',
+    endpoint: '/api/config/io/save-direct',
+    label: 'directe',
+    busyLabel: 'Sauvegarde directe...',
+    statusInProgress: 'Sauvegarde directe en cours...',
+    statusDuplicate: 'Une sauvegarde directe est déjà en cours...',
+    defaultSuccess: 'Sauvegarde directe terminée.',
+  },
+};
+const saveState = {
+  transactional: false,
+  direct: false,
+};
+
+function isAnySaveInProgress() {
+  return saveState.transactional || saveState.direct;
+}
+
+function otherSaveMethod(method) {
+  return method === 'transactional' ? 'direct' : 'transactional';
+}
 
 function normaliseErrorForLog(err) {
   if (err instanceof Error) {
@@ -1554,50 +1586,80 @@ async function loadConfig() {
 }
 
 // Serialize form to config JSON and post to server
-async function saveConfig() {
+async function saveConfig(method) {
   const statusEl = document.getElementById('status');
-  if (saveInProgress) {
+  const meta = SAVE_METHODS[method];
+  if (!meta) {
+    console.warn('[IO Config] Méthode de sauvegarde inconnue :', method);
     if (statusEl) {
-      statusEl.textContent = 'Une sauvegarde est déjà en cours...';
+      statusEl.textContent = 'Méthode de sauvegarde inconnue.';
     }
     return;
   }
 
-  const saveBtn = document.getElementById('saveBtn');
+  if (saveState[method]) {
+    if (statusEl) {
+      statusEl.textContent = meta.statusDuplicate;
+    }
+    return;
+  }
+
+  const alternate = otherSaveMethod(method);
+  if (saveState[alternate]) {
+    if (statusEl) {
+      const otherLabel = SAVE_METHODS[alternate].label;
+      statusEl.textContent = `Une sauvegarde ${otherLabel} est déjà en cours...`;
+    }
+    return;
+  }
+
+  const button = document.getElementById(meta.buttonId);
+  const otherButtonId = SAVE_METHODS[alternate] ? SAVE_METHODS[alternate].buttonId : null;
+  const otherButton = otherButtonId ? document.getElementById(otherButtonId) : null;
   const rebootBtn = document.getElementById('rebootBtn');
-  const originalSaveLabel = saveBtn ? (saveBtn.dataset.label || saveBtn.textContent) : '';
-  if (saveBtn && !saveBtn.dataset.label) {
-    saveBtn.dataset.label = originalSaveLabel;
+  const originalLabel = button ? (button.dataset.label || button.textContent) : '';
+  if (button && !button.dataset.label) {
+    button.dataset.label = originalLabel;
   }
 
   const initialRebootDisabled = rebootBtn ? rebootBtn.disabled : false;
-
   let rebootShouldBeEnabled = false;
+
   const restoreUi = () => {
-    if (saveBtn) {
-      saveBtn.disabled = false;
-      const label = saveBtn.dataset.label || originalSaveLabel || 'Enregistrer';
-      saveBtn.textContent = label;
+    saveState[method] = false;
+    if (button) {
+      button.disabled = false;
+      const label = button.dataset.label || originalLabel || 'Enregistrer';
+      button.textContent = label;
+    }
+    if (otherButton) {
+      otherButton.disabled = saveState[alternate];
     }
     if (rebootBtn) {
-      rebootBtn.disabled = rebootShouldBeEnabled ? false : initialRebootDisabled;
+      if (rebootShouldBeEnabled) {
+        rebootBtn.disabled = false;
+      } else {
+        rebootBtn.disabled = isAnySaveInProgress() ? true : initialRebootDisabled;
+      }
     }
     markRebootPrompt(rebootShouldBeEnabled);
-    saveInProgress = false;
   };
 
-  saveInProgress = true;
+  saveState[method] = true;
   refreshModuleStateFromForm();
   markRebootPrompt(false);
-  if (saveBtn) {
-    saveBtn.disabled = true;
-    saveBtn.textContent = 'Sauvegarde...';
+  if (button) {
+    button.disabled = true;
+    button.textContent = meta.busyLabel;
+  }
+  if (otherButton) {
+    otherButton.disabled = true;
   }
   if (rebootBtn) {
     rebootBtn.disabled = true;
   }
   if (statusEl) {
-    statusEl.textContent = 'Sauvegarde en cours...';
+    statusEl.textContent = meta.statusInProgress;
   }
 
   let payload = '';
@@ -1660,22 +1722,21 @@ async function saveConfig() {
   }
 
   try {
-    const response = await authFetch('/api/config/io/set', {
+    const response = await authFetch(meta.endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: payload
     });
+    const rawBody = await response.text();
     if (!response.ok) {
-      const text = await response.text();
-      const message = text && text.length
-        ? `Erreur lors de la sauvegarde (${text})`
+      const message = rawBody && rawBody.length
+        ? `Erreur lors de la sauvegarde (${rawBody})`
         : `Erreur lors de la sauvegarde (${response.status})`;
       if (statusEl) {
         statusEl.textContent = message;
       }
       return;
     }
-    const rawBody = await response.text();
     let serverResult = null;
     if (rawBody && rawBody.trim().length) {
       try {
@@ -1693,13 +1754,14 @@ async function saveConfig() {
       } else if (rawBody && rawBody.trim().length) {
         statusEl.textContent = rawBody;
       } else {
-        statusEl.textContent = 'Fichier enregistré.';
+        statusEl.textContent = meta.defaultSuccess;
       }
     }
     markAllSnapshotsSaved();
     const logDetail = {
       inputs: inputs.length,
-      outputs: outputs.length
+      outputs: outputs.length,
+      method: meta.label,
     };
     if (serverResult) {
       logDetail.response = serverResult;
@@ -1710,7 +1772,7 @@ async function saveConfig() {
   } catch (err) {
     console.error(err);
     if (statusEl) {
-      statusEl.textContent = 'Erreur lors de la sauvegarde.';
+      statusEl.textContent = `Erreur lors de la sauvegarde (${meta.label}).`;
     }
   } finally {
     restoreUi();
@@ -1785,17 +1847,23 @@ window.addEventListener('DOMContentLoaded', () => {
     .catch(err => {
       console.error(err);
     });
-  const saveBtnEl = document.getElementById('saveBtn');
-  if (saveBtnEl) {
-    saveBtnEl.addEventListener('click', () => {
-      saveConfig();
+  const saveBtnStandard = document.getElementById('saveBtnStandard');
+  if (saveBtnStandard) {
+    saveBtnStandard.addEventListener('click', () => {
+      saveConfig('transactional');
+    });
+  }
+  const saveBtnDirect = document.getElementById('saveBtnDirect');
+  if (saveBtnDirect) {
+    saveBtnDirect.addEventListener('click', () => {
+      saveConfig('direct');
     });
   }
   const rebootBtnEl = document.getElementById('rebootBtn');
   if (rebootBtnEl) {
     rebootBtnEl.addEventListener('click', async () => {
       const statusEl = document.getElementById('status');
-      if (saveInProgress) {
+      if (isAnySaveInProgress()) {
         if (statusEl) {
           statusEl.textContent = 'Sauvegarde en cours, redémarrage différé.';
         }
@@ -1806,7 +1874,7 @@ window.addEventListener('DOMContentLoaded', () => {
       try {
         rebootSucceeded = await requestReboot(statusEl);
       } finally {
-        rebootBtnEl.disabled = saveInProgress;
+        rebootBtnEl.disabled = isAnySaveInProgress();
       }
       if (rebootSucceeded) {
         markRebootPrompt(false);
