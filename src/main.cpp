@@ -211,6 +211,7 @@ static const char *USER_FILES_DIR = "/private";
 static const char *SAMPLE_FILE_PATH = "/private/sample.html";
 static const char *IO_CONFIG_FILE_PATH = "/private/io_config.json";
 static const char *IO_CONFIG_BACKUP_FILE_PATH = "/private/io_config.bak";
+static const char *IO_CONFIG_TEMP_FILE_PATH = "/private/io_config.tmp";
 static const char *IO_SAVE_TRANSACTIONAL_LOG_PATH =
     "/private/io_save_transactionnel.log";
 static const char *IO_SAVE_DIRECT_LOG_PATH = "/private/io_save_direct.log";
@@ -226,6 +227,12 @@ struct ConfigSavePaths {
   const char *primaryPath;
   const char *tempPath;
   const char *backupPath;
+};
+
+static const ConfigSavePaths IO_CONFIG_PATHS = {
+    IO_CONFIG_FILE_PATH,
+    IO_CONFIG_TEMP_FILE_PATH,
+    IO_CONFIG_BACKUP_FILE_PATH,
 };
 
 struct ConfigSaveRequest {
@@ -461,6 +468,21 @@ static String describeIoSaveError(const String &code) {
   }
   if (code == "write_failed") {
     return "Erreur lors de l'écriture du fichier";
+  }
+  if (code == "temp_clear_failed") {
+    return "Impossible de nettoyer le fichier temporaire";
+  }
+  if (code == "temp_write_failed") {
+    return "Écriture du fichier temporaire impossible";
+  }
+  if (code == "backup_rotate_failed") {
+    return "Impossible de sauvegarder l'ancienne configuration";
+  }
+  if (code == "promote_failed") {
+    return "Impossible d'activer la nouvelle configuration";
+  }
+  if (code == "restore_failed") {
+    return "Restauration de la configuration précédente impossible";
   }
   if (code == "direct_open_failed") {
     return "Ouverture directe impossible";
@@ -3501,8 +3523,8 @@ bool saveVirtualConfig() {
   return saveJsonConfig(request);
 }
 
-static bool saveIoConfigWithProgress(IoSaveProgress *progress,
-                                     String &errorCode) {
+static bool saveIoConfigTransactional(IoSaveProgress *progress,
+                                      String &errorCode) {
   recordIoSaveStart(progress, "prepare_payload",
                     "Préparation du JSON de configuration");
   String payload;
@@ -3528,55 +3550,110 @@ static bool saveIoConfigWithProgress(IoSaveProgress *progress,
   recordIoSaveFinish(progress, "ensure_directory", true,
                      "Répertoire /private disponible");
 
-  recordIoSaveStart(progress, "check_existing",
-                    "Contrôle de l'existence de io_config.json");
-  bool existed = LittleFS.exists(IO_CONFIG_FILE_PATH);
-  recordIoSaveFinish(progress, "check_existing", true,
-                     existed ? "Le fichier existe, il sera remplacé."
-                             : "Le fichier sera créé.");
+  ConfigSaveRequest request = {
+      static_cast<uint8_t>(CONFIG_SECTION_MODULES | CONFIG_SECTION_IO),
+      IO_CONFIG_PATHS,
+      "IO",
+      false,
+      nullptr,
+  };
 
-  recordIoSaveStart(progress, "open_file",
-                    "Ouverture du fichier io_config.json en écriture");
-  File file = LittleFS.open(IO_CONFIG_FILE_PATH, "w");
-  if (!file) {
-    errorCode = "open_failed";
-    recordIoSaveFinish(progress, "open_file", false,
-                       "Impossible d'ouvrir le fichier en écriture");
-    return false;
+  bool hadTemp = LittleFS.exists(request.paths.tempPath);
+  recordIoSaveStart(progress, "clear_temp",
+                    hadTemp ? "Suppression de l'ancien fichier temporaire"
+                            : "Contrôle du fichier temporaire");
+  bool tempCleared = true;
+  if (hadTemp) {
+    tempCleared = LittleFS.remove(request.paths.tempPath);
   }
-  recordIoSaveFinish(progress, "open_file", true,
-                     "Fichier ouvert pour l'écriture");
-
-  recordIoSaveStart(progress, "write_file", "Écriture du contenu JSON");
-  size_t expected = payload.length();
-  size_t written = expected > 0
-                       ? file.write(reinterpret_cast<const uint8_t *>(
-                                         payload.c_str()),
-                                     expected)
-                       : 0;
-  bool writeOk = (written == expected);
-  recordIoSaveFinish(progress, "write_file", writeOk,
-                     writeOk ? String("Écriture terminée (") + written +
-                                   " octets)"
-                             : String("Écriture incomplète (") + written +
-                                   "/" + expected + " octets)");
-  if (!writeOk) {
-    file.close();
-    LittleFS.remove(IO_CONFIG_FILE_PATH);
-    errorCode = "write_failed";
+  recordIoSaveFinish(progress, "clear_temp", tempCleared,
+                     tempCleared
+                         ? (hadTemp ? "Ancien fichier temporaire supprimé"
+                                    : "Aucun fichier temporaire à supprimer")
+                         : "Impossible de supprimer le fichier temporaire");
+  if (!tempCleared) {
+    errorCode = "temp_clear_failed";
     return false;
   }
 
-  recordIoSaveStart(progress, "flush_file",
-                    "Vidage des données sur le support");
-  file.flush();
-  recordIoSaveFinish(progress, "flush_file", true,
-                     "Cache d'écriture vidé");
+  recordIoSaveStart(progress, "write_temp",
+                    "Écriture de la configuration dans io_config.tmp");
+  String tempError;
+  if (!writeConfigTempFile(request, payload, tempError)) {
+    String detail = tempError.length()
+                        ? tempError
+                        : String("Écriture du fichier temporaire impossible");
+    recordIoSaveFinish(progress, "write_temp", false, detail);
+    LittleFS.remove(request.paths.tempPath);
+    errorCode = "temp_write_failed";
+    return false;
+  }
+  recordIoSaveFinish(progress, "write_temp", true,
+                     String("Fichier temporaire préparé (") + payload.length() +
+                         " octets)");
 
-  recordIoSaveStart(progress, "close_file", "Fermeture du fichier");
-  file.close();
-  recordIoSaveFinish(progress, "close_file", true,
-                     "Fichier fermé correctement");
+  bool hadBackup = LittleFS.exists(request.paths.backupPath);
+  recordIoSaveStart(progress, "clear_backup",
+                    hadBackup ? "Suppression de l'ancienne sauvegarde"
+                              : "Contrôle de l'ancienne sauvegarde");
+  bool backupCleared = true;
+  if (hadBackup) {
+    backupCleared = LittleFS.remove(request.paths.backupPath);
+  }
+  recordIoSaveFinish(progress, "clear_backup", backupCleared,
+                     backupCleared
+                         ? (hadBackup ? "Ancienne sauvegarde supprimée"
+                                      : "Aucune sauvegarde à supprimer")
+                         : "Impossible de supprimer la sauvegarde précédente");
+  if (!backupCleared && hadBackup) {
+    logConfigSaveWarning(request, request.paths.backupPath,
+                         "failed to clear previous backup");
+  }
+
+  bool hadPrimary = LittleFS.exists(request.paths.primaryPath);
+  recordIoSaveStart(progress, "rotate_backup",
+                    hadPrimary ? "Sauvegarde de la configuration actuelle"
+                                : "Aucune configuration précédente à sauvegarder");
+  bool rotated = true;
+  if (hadPrimary) {
+    rotated = LittleFS.rename(request.paths.primaryPath,
+                              request.paths.backupPath);
+  }
+  recordIoSaveFinish(progress, "rotate_backup", rotated,
+                     rotated
+                         ? (hadPrimary ? "Configuration précédente sauvegardée"
+                                       : "Aucune configuration précédente")
+                         : "Impossible de sauvegarder la configuration précédente");
+  if (!rotated) {
+    LittleFS.remove(request.paths.tempPath);
+    errorCode = "backup_rotate_failed";
+    return false;
+  }
+
+  recordIoSaveStart(progress, "promote_primary",
+                    "Activation de la nouvelle configuration");
+  bool promoted = LittleFS.rename(request.paths.tempPath,
+                                  request.paths.primaryPath);
+  if (!promoted) {
+    recordIoSaveFinish(progress, "promote_primary", false,
+                       "Impossible d'activer la nouvelle configuration");
+    LittleFS.remove(request.paths.tempPath);
+    if (hadPrimary) {
+      recordIoSaveStart(progress, "restore_backup",
+                        "Restauration de la configuration précédente");
+      bool restored = LittleFS.rename(request.paths.backupPath,
+                                      request.paths.primaryPath);
+      recordIoSaveFinish(progress, "restore_backup", restored,
+                         restored ? "Configuration précédente restaurée"
+                                  : "Impossible de restaurer la configuration précédente");
+      errorCode = restored ? "promote_failed" : "restore_failed";
+    } else {
+      errorCode = "promote_failed";
+    }
+    return false;
+  }
+  recordIoSaveFinish(progress, "promote_primary", true,
+                     "Nouvelle configuration enregistrée");
 
   recordIoSaveStart(progress, "verify_file",
                     "Vérification de la configuration enregistrée");
@@ -3597,11 +3674,6 @@ static bool saveIoConfigWithProgress(IoSaveProgress *progress,
                      "Vérification réussie");
 
   return true;
-}
-
-static bool saveIoConfigTransactional(IoSaveProgress *progress,
-                                      String &errorCode) {
-  return saveIoConfigWithProgress(progress, errorCode);
 }
 
 static bool saveIoConfigDirect(IoSaveProgress *progress, String &errorCode) {
