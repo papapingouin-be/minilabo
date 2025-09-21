@@ -33,6 +33,20 @@ bool Multimeter::removeInput(const String &id) {
   return false;
 }
 
+void Multimeter::replaceInputs(const std::vector<MultimeterInputConfig> &configs) {
+  inputs_.clear();
+  inputs_.reserve(configs.size());
+  for (const auto &config : configs) {
+    if (config.id.length() == 0) {
+      continue;
+    }
+    if (config.signalId.length() == 0 && config.enabled) {
+      continue;
+    }
+    inputs_.push_back(config);
+  }
+}
+
 static bool computeSeriesMetrics(const std::vector<float> &samples, float &minValue,
                                  float &maxValue, float &average, float &rms) {
   if (samples.empty()) {
