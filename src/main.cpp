@@ -263,6 +263,8 @@ struct ConfigRecordMetadata {
 };
 
 static uint32_t crc32ForBuffer(const uint8_t *data, size_t length);
+static void writeUint16Le(uint8_t *data, uint16_t value);
+static void writeUint32Le(uint8_t *data, uint32_t value);
 static bool tryDecodeConfigRecord(const uint8_t *data,
                                   size_t length,
                                   ConfigRecordMetadata &meta,
@@ -423,17 +425,50 @@ static bool writeConfigTempFile(const ConfigSaveRequest &request,
     return false;
   }
 
-  size_t expected = payload.length();
-  size_t written = temp.write(
-      reinterpret_cast<const uint8_t *>(payload.c_str()), expected);
-  temp.flush();
-  temp.close();
-  if (written != expected) {
-    errorDetail = String("short write (") + written + "/" + expected + ")";
-    logPrintf("Short write when saving %s (%u/%u bytes)", request.paths.tempPath,
-              static_cast<unsigned>(written), static_cast<unsigned>(expected));
+  size_t payloadLength = payload.length();
+  uint32_t checksum =
+      crc32ForBuffer(reinterpret_cast<const uint8_t *>(payload.c_str()),
+                     payloadLength);
+  uint8_t header[CONFIG_RECORD_HEADER_SIZE];
+  writeUint32Le(header, CONFIG_RECORD_MAGIC);
+  writeUint16Le(header + 4, CONFIG_RECORD_VERSION);
+  writeUint16Le(header + 6, static_cast<uint16_t>(request.sections));
+  writeUint32Le(header + 8, static_cast<uint32_t>(payloadLength));
+  writeUint32Le(header + 12, checksum);
+
+  size_t headerWritten = temp.write(header, sizeof(header));
+  if (headerWritten != sizeof(header)) {
+    errorDetail = String("header short write (") + headerWritten + "/" +
+                  sizeof(header) + ")";
+    logPrintf("Short write when saving %s header (%u/%u bytes)",
+              request.paths.tempPath, static_cast<unsigned>(headerWritten),
+              static_cast<unsigned>(sizeof(header)));
+    temp.close();
     return false;
   }
+
+  size_t dataWritten = 0;
+  if (payloadLength > 0) {
+    dataWritten = temp.write(
+        reinterpret_cast<const uint8_t *>(payload.c_str()), payloadLength);
+    if (dataWritten != payloadLength) {
+      errorDetail = String("payload short write (") + dataWritten + "/" +
+                    payloadLength + ")";
+      logPrintf("Short write when saving %s payload (%u/%u bytes)",
+                request.paths.tempPath, static_cast<unsigned>(dataWritten),
+                static_cast<unsigned>(payloadLength));
+      temp.close();
+      return false;
+    }
+  }
+
+  temp.flush();
+  temp.close();
+  logPrintf("%s configuration record prepared: sections=0x%04X payload=%u checksum=%08X",
+            configSaveLabel(request),
+            static_cast<unsigned>(request.sections),
+            static_cast<unsigned>(payloadLength),
+            static_cast<unsigned>(checksum));
   return true;
 }
 
@@ -2866,6 +2901,18 @@ static uint32_t readUint32Le(const uint8_t *data) {
          (static_cast<uint32_t>(data[3]) << 24);
 }
 
+static void writeUint16Le(uint8_t *data, uint16_t value) {
+  data[0] = static_cast<uint8_t>(value & 0x00FFu);
+  data[1] = static_cast<uint8_t>((value >> 8) & 0x00FFu);
+}
+
+static void writeUint32Le(uint8_t *data, uint32_t value) {
+  data[0] = static_cast<uint8_t>(value & 0x000000FFu);
+  data[1] = static_cast<uint8_t>((value >> 8) & 0x000000FFu);
+  data[2] = static_cast<uint8_t>((value >> 16) & 0x000000FFu);
+  data[3] = static_cast<uint8_t>((value >> 24) & 0x000000FFu);
+}
+
 static bool tryDecodeConfigRecord(const uint8_t *data,
                                   size_t length,
                                   ConfigRecordMetadata &meta,
@@ -3268,6 +3315,15 @@ static bool verifyConfigStored(const Config &expected,
           "%s verification checksum mismatch: stored=%08X computed=%08X", path,
           static_cast<unsigned>(meta.checksum),
           static_cast<unsigned>(actualChecksum));
+      return false;
+    }
+    uint16_t expectedSections = static_cast<uint16_t>(sections);
+    if (meta.sections != expectedSections) {
+      errorDetail = "sections_mismatch";
+      logPrintf(
+          "%s verification sections mismatch: stored=0x%04X expected=0x%04X",
+          path, static_cast<unsigned>(meta.sections),
+          static_cast<unsigned>(expectedSections));
       return false;
     }
   }
