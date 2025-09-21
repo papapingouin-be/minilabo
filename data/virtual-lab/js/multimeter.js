@@ -189,6 +189,17 @@ function executeProcessing(channel, rawValue, scaledValue, environment = {}) {
     displayMode: null,
     measurementMode: null,
   };
+  const bits = channel && Number.isFinite(channel.bits)
+    ? Math.min(32, Math.max(1, Math.round(channel.bits)))
+    : 10;
+  const fullScale = Math.pow(2, bits) - 1;
+  const rangeMin = channel && Number.isFinite(channel.rangeMin) ? channel.rangeMin : null;
+  const rangeMax = channel && Number.isFinite(channel.rangeMax) ? channel.rangeMax : null;
+  const referenceVoltage = Number.isFinite(rangeMax) && Number.isFinite(rangeMin)
+    ? Math.abs(rangeMax - rangeMin)
+    : Number.isFinite(rangeMax)
+      ? rangeMax
+      : null;
   let processedValue = Number.isFinite(scaledValue) ? scaledValue : null;
   if (channel && channel.compiledProcessing && processedValue !== null) {
     try {
@@ -198,6 +209,11 @@ function executeProcessing(channel, rawValue, scaledValue, environment = {}) {
         scaled: scaledValue,
         scale: Number.isFinite(channel.scale) ? channel.scale : 1,
         offset: Number.isFinite(channel.offset) ? channel.offset : 0,
+        bits,
+        fullScale,
+        rangeMin,
+        rangeMax,
+        referenceVoltage,
         previous,
         history: history.slice(-32),
         timestamp,

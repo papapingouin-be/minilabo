@@ -1452,6 +1452,10 @@ struct MeterChannelConfig {
   bool hasRangeMax;
   float rangeMax;
   uint8_t bits;
+  String profile;
+  String displayMode;
+  String calibre;
+  String processing;
   MeterMeasurementConfig measurements[MAX_METER_MEASUREMENTS];
 };
 
@@ -2184,6 +2188,10 @@ static MeterChannelConfig makeEmptyMeterChannel() {
   channel.hasRangeMax = false;
   channel.rangeMax = 0.0f;
   channel.bits = 10;
+  channel.profile = "";
+  channel.displayMode = "";
+  channel.calibre = "";
+  channel.processing = "";
   for (uint8_t i = 0; i < MAX_METER_MEASUREMENTS; ++i) {
     channel.measurements[i] = makeDefaultMeterMeasurement(false);
   }
@@ -2193,6 +2201,8 @@ static MeterChannelConfig makeEmptyMeterChannel() {
 static MeterChannelConfig makeDefaultMeterChannel() {
   MeterChannelConfig channel = makeEmptyMeterChannel();
   channel.enabled = true;
+  channel.profile = "voltage";
+  channel.displayMode = "digital";
   if (MAX_METER_MEASUREMENTS > 0) {
     channel.measurements[0] = makeDefaultMeterMeasurement(true);
   }
@@ -2292,6 +2302,27 @@ static void parseMeterChannelEntry(JsonObjectConst obj,
   if (bitsValue < 1) bitsValue = 1;
   if (bitsValue > 32) bitsValue = 32;
   mc.bits = static_cast<uint8_t>(bitsValue);
+  if (obj.containsKey("profile")) {
+    mc.profile = obj["profile"].as<String>();
+    mc.profile.trim();
+  }
+  if (mc.profile.length() == 0) {
+    mc.profile = "voltage";
+  }
+  if (obj.containsKey("displayMode")) {
+    mc.displayMode = obj["displayMode"].as<String>();
+    mc.displayMode.trim();
+  }
+  if (mc.displayMode.length() == 0) {
+    mc.displayMode = "digital";
+  }
+  if (obj.containsKey("calibre")) {
+    mc.calibre = obj["calibre"].as<String>();
+    mc.calibre.trim();
+  }
+  if (obj.containsKey("processing")) {
+    mc.processing = obj["processing"].as<String>();
+  }
   if (obj.containsKey("measurements")) {
     JsonObjectConst measurementsObj = obj["measurements"].as<JsonObjectConst>();
     if (!measurementsObj.isNull()) {
@@ -2429,6 +2460,14 @@ static void populateVirtualMultimeterJson(JsonObject obj,
       entry["rangeMax"] = nullptr;
     }
     entry["bits"] = mc.bits;
+    entry["profile"] = mc.profile;
+    entry["displayMode"] = mc.displayMode;
+    if (mc.calibre.length() > 0) {
+      entry["calibre"] = mc.calibre;
+    } else {
+      entry["calibre"] = nullptr;
+    }
+    entry["processing"] = mc.processing;
     JsonObject measurementsObj = entry.createNestedObject("measurements");
     for (uint8_t j = 0; j < MAX_METER_MEASUREMENTS; ++j) {
       const MeterMeasurementConfig &mm = mc.measurements[j];
@@ -2448,6 +2487,50 @@ static void populateVirtualMultimeterJson(JsonObject obj,
       measurementEntry["formula"] = mm.formula;
     }
   }
+}
+
+static void applyVirtualMultimeterConfigToWorkspace(
+    const VirtualMultimeterConfig &cfg) {
+  std::vector<virtual_lab::MultimeterInputConfig> inputs;
+  inputs.reserve(cfg.channelCount);
+  for (uint8_t i = 0; i < cfg.channelCount && i < MAX_METER_CHANNELS; ++i) {
+    const MeterChannelConfig &mc = cfg.channels[i];
+    String id = mc.id;
+    id.trim();
+    if (id.length() == 0) {
+      id = mc.name;
+    }
+    if (id.length() == 0) {
+      id = String("meter") + String(i + 1);
+    }
+    if (id.length() == 0) {
+      continue;
+    }
+    String signalId = mc.input;
+    signalId.trim();
+    String label = mc.label;
+    label.trim();
+    virtual_lab::MultimeterInputConfig inputConfig;
+    inputConfig.id = id;
+    inputConfig.signalId = signalId;
+    inputConfig.label = label.length() ? label : id;
+    inputConfig.enabled = mc.enabled;
+    if (inputConfig.signalId.length() == 0 && inputConfig.enabled) {
+      continue;
+    }
+    bool replaced = false;
+    for (auto &existing : inputs) {
+      if (existing.id == inputConfig.id) {
+        existing = inputConfig;
+        replaced = true;
+        break;
+      }
+    }
+    if (!replaced) {
+      inputs.push_back(inputConfig);
+    }
+  }
+  virtual_lab::VirtualWorkspace::Instance().multimeter().replaceInputs(inputs);
 }
 
 void parseConfigFromJson(const JsonDocument &doc,
@@ -3132,11 +3215,13 @@ void loadConfig() {
   if (!ensureLittleFsReady(false)) {
     logMessage("LittleFS unavailable, applying defaults");
     setDefaultConfig();
+    applyVirtualMultimeterConfigToWorkspace(config.virtualMultimeter);
     return;
   }
   if (!ensureUserDirectory()) {
     logMessage("Failed to ensure private directory for config");
     setDefaultConfig();
+    applyVirtualMultimeterConfigToWorkspace(config.virtualMultimeter);
     return;
   }
 
@@ -3296,6 +3381,8 @@ void loadConfig() {
       logMessage("Failed to save default virtual configuration");
     }
   }
+
+  applyVirtualMultimeterConfigToWorkspace(config.virtualMultimeter);
 }
 
 // Save configuration sections to LittleFS.  Each helper persists a subset
@@ -5209,6 +5296,7 @@ void registerRoutes(ServerT &server) {
       }
       logPrintf("Virtual multimeter configuration updated (%u channels)",
                 static_cast<unsigned>(config.virtualMultimeter.channelCount));
+      applyVirtualMultimeterConfigToWorkspace(config.virtualMultimeter);
       DynamicJsonDocument resp(1024);
       resp["status"] = "ok";
       JsonObject applied = resp.createNestedObject("applied");

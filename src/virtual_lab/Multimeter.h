@@ -46,6 +46,7 @@ class Multimeter {
 
   bool configureInput(const MultimeterInputConfig &config);
   bool removeInput(const String &id);
+  void replaceInputs(const std::vector<MultimeterInputConfig> &configs);
   const std::vector<MultimeterInputConfig> &inputs() const { return inputs_; }
 
   bool measure(const MultimeterMeasurementRequest &request,
