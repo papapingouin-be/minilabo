@@ -82,6 +82,17 @@ static bool ensureLittleFsReady(bool allowFormat = false) {
   return false;
 }
 
+static bool ensureLittleFsReadyWithFormat() {
+  if (ensureLittleFsReady(false)) {
+    return true;
+  }
+  if (ensureLittleFsReady(true)) {
+    return true;
+  }
+  Serial.println("LittleFS unavailable even after format attempt");
+  return false;
+}
+
 static void initFirmwareVersion() {
   firmwareVersion = formatFirmwareVersion();
   logPrintf("Firmware version initialised to %s (major=%u minor=%u patch=%lu)",
@@ -298,7 +309,7 @@ static const char SAMPLE_FILE_CONTENT[] = R"rawliteral(
 )rawliteral";
 
 static bool ensureUserDirectory() {
-  if (!ensureLittleFsReady(false)) {
+  if (!ensureLittleFsReadyWithFormat()) {
     logMessage("LittleFS unavailable, cannot ensure private directory");
     return false;
   }
@@ -329,6 +340,11 @@ static void appendConfigSaveLog(const String &message) {
 
 static bool writeTextFile(const char *path, const String &content) {
   File f = LittleFS.open(path, "w");
+  if (!f) {
+    if (ensureLittleFsReadyWithFormat()) {
+      f = LittleFS.open(path, "w");
+    }
+  }
   if (!f) {
     logPrintf("Failed to open %s for writing", path);
     return false;
