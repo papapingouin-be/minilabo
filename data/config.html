@@ -134,7 +134,8 @@
   </fieldset>
 
   <div class="form-actions">
-    <button type="button" id="saveBtn" class="primary">Sauvegarder sans redémarrage</button>
+    <button type="button" id="saveTransactionalBtn" class="primary">Sauvegarde sécurisée (transactionnelle)</button>
+    <button type="button" id="saveDirectBtn" class="attention">Sauvegarde rapide (directe)</button>
     <button type="button" id="rebootBtn" class="secondary">Redémarrer</button>
     <span id="status" style="margin-left:1em;"></span>
   </div>
@@ -168,7 +169,8 @@
 
 <div id="saveProgressModal" class="modal hidden" role="dialog" aria-modal="true">
   <div class="modal-content">
-    <h2>Suivi de la sauvegarde</h2>
+    <h2 id="saveProgressTitle">Suivi de la sauvegarde</h2>
+    <p id="saveProgressSubtitle" class="hint"></p>
     <ul id="saveProgressList" class="progress-list"></ul>
     <div class="modal-actions">
       <button type="button" class="secondary" id="saveProgressClose">Fermer</button>
@@ -198,6 +200,28 @@ const OUTPUT_TYPES = [
   { value: 'mcp4725', label: 'DAC I²C MCP4725' },
   { value: 'disabled', label: 'Désactivée' }
 ];
+const SAVE_METHODS = {
+  transactional: {
+    id: 'transactional',
+    endpoint: '/api/config/io/save-transactional',
+    buttonId: 'saveTransactionalBtn',
+    title: 'Méthode transactionnelle',
+    subtitle:
+      'Écriture sécurisée via fichier temporaire, sauvegarde et vérification.',
+    status:
+      'Configuration sauvegardée via la méthode transactionnelle.',
+  },
+  direct: {
+    id: 'direct',
+    endpoint: '/api/config/io/save-direct',
+    buttonId: 'saveDirectBtn',
+    title: 'Méthode directe',
+    subtitle:
+      'Écriture immédiate du fichier principal sans vérification additionnelle.',
+    status:
+      'Configuration sauvegardée via la méthode directe.',
+  },
+};
 const MODULE_DEPENDENCIES = {
   input: {
     ads1115: 'ads1115',
@@ -412,9 +436,12 @@ const STATUS_PENDING = 'pending';
 let lastAppliedInputs = new Map();
 let lastAppliedOutputs = new Map();
 let saveInProgress = false;
+let activeSaveMethod = null;
 let saveProgressModal = null;
 let saveProgressList = null;
 let saveProgressClose = null;
+let saveProgressTitle = null;
+let saveProgressSubtitle = null;
 let rebootShouldBeEnabled = false;
 
 function normaliseErrorForLog(err) {
@@ -512,9 +539,26 @@ function markRebootPrompt(active) {
   }
 }
 
-function openSaveProgressModal() {
+function openSaveProgressModal(method) {
   if (!saveProgressModal) return;
   saveProgressModal.classList.remove('hidden');
+  activeSaveMethod = method ? method.id : null;
+  if (saveProgressTitle) {
+    if (method && method.title) {
+      saveProgressTitle.textContent = `Suivi de la sauvegarde – ${method.title}`;
+    } else {
+      saveProgressTitle.textContent = 'Suivi de la sauvegarde';
+    }
+  }
+  if (saveProgressSubtitle) {
+    if (method && method.subtitle) {
+      saveProgressSubtitle.textContent = method.subtitle;
+      saveProgressSubtitle.classList.remove('hidden');
+    } else {
+      saveProgressSubtitle.textContent = '';
+      saveProgressSubtitle.classList.add('hidden');
+    }
+  }
   if (saveProgressList) {
     saveProgressList.innerHTML = '';
     saveProgressList.scrollTop = 0;
@@ -526,6 +570,7 @@ function openSaveProgressModal() {
 
 function closeSaveProgressModal() {
   if (!saveProgressModal) return;
+  activeSaveMethod = null;
   saveProgressModal.classList.add('hidden');
 }
 
@@ -1614,26 +1659,52 @@ async function loadConfig() {
 }
 
 // Serialize form to config JSON and post to server
-async function saveConfig() {
+async function saveConfig(methodKey) {
   const statusEl = document.getElementById('status');
+  const method = SAVE_METHODS[methodKey];
+  if (!method) {
+    console.error('Méthode de sauvegarde inconnue:', methodKey);
+    if (statusEl) {
+      statusEl.textContent = 'Méthode de sauvegarde inconnue.';
+    }
+    return;
+  }
   if (saveInProgress) {
     if (statusEl) {
-      statusEl.textContent = 'Une sauvegarde est déjà en cours...';
+      const running = activeSaveMethod && SAVE_METHODS[activeSaveMethod]
+        ? SAVE_METHODS[activeSaveMethod].title
+        : 'une autre méthode';
+      statusEl.textContent = `Une sauvegarde est déjà en cours (${running}).`;
     }
     return;
   }
 
-  const saveBtnEl = document.getElementById('saveBtn');
+  const methodButton = document.getElementById(method.buttonId);
+  const otherButtons = Object.keys(SAVE_METHODS)
+    .filter(key => key !== methodKey)
+    .map(key => document.getElementById(SAVE_METHODS[key].buttonId))
+    .filter(btn => !!btn);
+  const buttonsToDisable = [];
+  if (methodButton) {
+    buttonsToDisable.push(methodButton);
+  }
+  buttonsToDisable.push(...otherButtons);
   const rebootBtn = document.getElementById('rebootBtn');
-  const originalLabel = saveBtnEl ? (saveBtnEl.dataset.label || saveBtnEl.textContent) : '';
+
+  buttonsToDisable.forEach(btn => {
+    if (btn && !btn.dataset.label) {
+      btn.dataset.label = btn.textContent;
+    }
+  });
 
   const restoreUi = () => {
-    if (saveBtnEl) {
-      saveBtnEl.disabled = false;
-      if (saveBtnEl.dataset.label) {
-        saveBtnEl.textContent = saveBtnEl.dataset.label;
+    buttonsToDisable.forEach(btn => {
+      if (!btn) return;
+      btn.disabled = false;
+      if (btn.dataset.label) {
+        btn.textContent = btn.dataset.label;
       }
-    }
+    });
     if (rebootBtn) {
       rebootBtn.disabled = false;
     }
@@ -1642,21 +1713,22 @@ async function saveConfig() {
   };
 
   saveInProgress = true;
-  if (saveBtnEl) {
-    if (!saveBtnEl.dataset.label) {
-      saveBtnEl.dataset.label = originalLabel || 'Sauvegarder';
+  buttonsToDisable.forEach(btn => {
+    if (btn) {
+      btn.disabled = true;
     }
-    saveBtnEl.textContent = 'Sauvegarde en cours...';
-    saveBtnEl.disabled = true;
+  });
+  if (methodButton) {
+    methodButton.textContent = 'Sauvegarde en cours...';
   }
   if (rebootBtn) {
     rebootBtn.disabled = true;
   }
   if (statusEl) {
-    statusEl.textContent = 'Sauvegarde en cours...';
+    statusEl.textContent = `Sauvegarde ${method.title} en cours...`;
   }
 
-  openSaveProgressModal();
+  openSaveProgressModal(method);
   appendSaveProgressEvent('Préparation de la configuration locale', 'start');
 
   let payload = '';
@@ -1731,7 +1803,7 @@ async function saveConfig() {
   let rawBody = '';
 
   try {
-    const response = await authFetch('/api/config/io/set', {
+    const response = await authFetch(method.endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: payload,
@@ -1780,15 +1852,20 @@ async function saveConfig() {
       ? !!serverResult.requiresReboot
       : false;
     if (statusEl) {
+      let message = method.status;
       if (serverResult && typeof serverResult.message === 'string' && serverResult.message.length) {
-        statusEl.textContent = serverResult.message;
+        message = serverResult.message;
+      }
+      if (serverResult && typeof serverResult.logFile === 'string' && serverResult.logFile.length) {
+        statusEl.textContent = `${message} (journal : ${serverResult.logFile})`;
       } else {
-        statusEl.textContent = 'Configuration sauvegardée sans redémarrage.';
+        statusEl.textContent = message;
       }
     }
     markAllSnapshotsSaved();
     markRebootPrompt(rebootShouldBeEnabled);
     logIoStep('Configuration IO sauvegardée côté serveur', {
+      method: method.id,
       inputs: inputs.length,
       outputs: outputs.length,
       response: serverResult || rawBody,
@@ -1880,6 +1957,11 @@ window.addEventListener('DOMContentLoaded', () => {
   saveProgressModal = document.getElementById('saveProgressModal');
   saveProgressList = document.getElementById('saveProgressList');
   saveProgressClose = document.getElementById('saveProgressClose');
+  saveProgressTitle = document.getElementById('saveProgressTitle');
+  saveProgressSubtitle = document.getElementById('saveProgressSubtitle');
+  if (saveProgressSubtitle) {
+    saveProgressSubtitle.classList.add('hidden');
+  }
   if (saveProgressClose) {
     saveProgressClose.addEventListener('click', () => {
       if (!saveInProgress) {
@@ -1894,10 +1976,16 @@ window.addEventListener('DOMContentLoaded', () => {
       }
     });
   }
-  const saveBtn = document.getElementById('saveBtn');
-  if (saveBtn) {
-    saveBtn.addEventListener('click', () => {
-      saveConfig();
+  const saveTransactionalBtn = document.getElementById('saveTransactionalBtn');
+  if (saveTransactionalBtn) {
+    saveTransactionalBtn.addEventListener('click', () => {
+      saveConfig('transactional');
+    });
+  }
+  const saveDirectBtn = document.getElementById('saveDirectBtn');
+  if (saveDirectBtn) {
+    saveDirectBtn.addEventListener('click', () => {
+      saveConfig('direct');
     });
   }
   const rebootBtnEl = document.getElementById('rebootBtn');

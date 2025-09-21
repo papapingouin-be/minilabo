@@ -208,6 +208,9 @@ static const char *USER_FILES_DIR = "/private";
 static const char *SAMPLE_FILE_PATH = "/private/sample.html";
 static const char *IO_CONFIG_FILE_PATH = "/private/io_config.json";
 static const char *IO_LOG_CSV_PATH = "/private/io-config-events.csv";
+static const char *IO_SAVE_TRANSACTIONAL_LOG_PATH =
+    "/private/io_save_transactionnel.log";
+static const char *IO_SAVE_DIRECT_LOG_PATH = "/private/io_save_direct.log";
 static const char *INTERFACE_CONFIG_FILE_PATH = "/private/interface_config.json";
 static const char *INTERFACE_CONFIG_BACKUP_FILE_PATH = "/private/interface_config.bak";
 static const char *INTERFACE_CONFIG_TEMP_FILE_PATH = "/private/interface_config.tmp";
@@ -310,6 +313,66 @@ struct IoSaveProgress {
   bool overflow;
 };
 
+static const char *activeIoSaveLogPath = nullptr;
+static const char *activeIoSaveMethodLabel = nullptr;
+
+struct IoSaveLogScope {
+  const char *previousPath;
+  const char *previousLabel;
+  IoSaveLogScope(const char *path, const char *label)
+      : previousPath(activeIoSaveLogPath), previousLabel(activeIoSaveMethodLabel) {
+    activeIoSaveLogPath = path;
+    activeIoSaveMethodLabel = label;
+  }
+  ~IoSaveLogScope() {
+    activeIoSaveLogPath = previousPath;
+    activeIoSaveMethodLabel = previousLabel;
+  }
+};
+
+static void appendIoSaveLogLine(bool start, bool success, const char *step,
+                                const String &message) {
+  if (!activeIoSaveLogPath) {
+    return;
+  }
+  if (!ensureUserDirectory()) {
+    return;
+  }
+  File logFile = LittleFS.open(activeIoSaveLogPath, "a");
+  if (!logFile) {
+    logPrintf("Failed to append io save log: %s", activeIoSaveLogPath);
+    return;
+  }
+  String sanitizedMessage = message;
+  sanitizedMessage.replace('\n', ' ');
+  sanitizedMessage.replace('\r', ' ');
+  String line;
+  line.reserve(64 + sanitizedMessage.length());
+  line += '[';
+  line += millis();
+  line += F(" ms] ");
+  if (activeIoSaveMethodLabel && strlen(activeIoSaveMethodLabel) > 0) {
+    line += activeIoSaveMethodLabel;
+    line += F(" | ");
+  }
+  if (start) {
+    line += F("DEBUT");
+  } else {
+    line += success ? F("FIN OK") : F("FIN ERREUR");
+  }
+  if (step && step[0] != '\0') {
+    line += F(" [");
+    line += step;
+    line += ']';
+  }
+  if (sanitizedMessage.length() > 0) {
+    line += F(" : ");
+    line += sanitizedMessage;
+  }
+  logFile.println(line);
+  logFile.close();
+}
+
 static void initIoSaveProgress(IoSaveProgress &progress) {
   progress.count = 0;
   progress.overflow = false;
@@ -320,6 +383,7 @@ static void recordIoSaveEvent(IoSaveProgress *progress,
                               const char *step,
                               const String &message,
                               bool success) {
+  appendIoSaveLogLine(start, success, step, message);
   if (!progress) {
     return;
   }
@@ -348,6 +412,16 @@ static void recordIoSaveFinish(IoSaveProgress *progress,
   recordIoSaveEvent(progress, false, step,
                     String("Fin : ") + description, success);
 }
+
+typedef bool (*IoConfigSaveFn)(IoSaveProgress *, String &);
+
+struct IoSaveMethodOptions {
+  const char *methodId;
+  const char *displayName;
+  const char *logPath;
+  const char *successMessage;
+  IoConfigSaveFn saver;
+};
 
 static void appendIoSaveEventsToJson(const IoSaveProgress &progress,
                                      JsonArray array) {
@@ -383,6 +457,12 @@ static String describeIoSaveError(const String &code) {
   }
   if (code == "write_failed") {
     return "Erreur lors de l'écriture du fichier";
+  }
+  if (code == "direct_open_failed") {
+    return "Ouverture directe impossible";
+  }
+  if (code == "direct_write_failed") {
+    return "Écriture directe incomplète";
   }
   if (code == "verify_failed") {
     return "Échec de la vérification du fichier";
@@ -3370,9 +3450,97 @@ static bool saveIoConfigWithProgress(IoSaveProgress *progress,
   return true;
 }
 
+static bool saveIoConfigTransactional(IoSaveProgress *progress,
+                                      String &errorCode) {
+  return saveIoConfigWithProgress(progress, errorCode);
+}
+
+static bool saveIoConfigDirect(IoSaveProgress *progress, String &errorCode) {
+  recordIoSaveStart(progress, "prepare_payload",
+                    "Préparation du JSON de configuration");
+  String payload;
+  if (!buildConfigJsonPayload(payload,
+                              CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
+                              false, "IO", false)) {
+    errorCode = "payload_generation_failed";
+    recordIoSaveFinish(progress, "prepare_payload", false,
+                       "Préparation du JSON impossible");
+    return false;
+  }
+  recordIoSaveFinish(progress, "prepare_payload", true,
+                     String("JSON prêt (") + payload.length() + " octets)");
+
+  recordIoSaveStart(progress, "ensure_directory",
+                    "Vérification du répertoire /private");
+  if (!ensureUserDirectory()) {
+    errorCode = "private_directory_unavailable";
+    recordIoSaveFinish(progress, "ensure_directory", false,
+                       "Répertoire /private indisponible");
+    return false;
+  }
+  recordIoSaveFinish(progress, "ensure_directory", true,
+                     "Répertoire /private disponible");
+
+  recordIoSaveStart(progress, "check_existing",
+                    "Présence du fichier io_config.json");
+  bool existing = LittleFS.exists(IO_CONFIG_FILE_PATH);
+  recordIoSaveFinish(progress, "check_existing", true,
+                     existing ? "Ancien fichier détecté"
+                              : "Aucun fichier existant");
+
+  recordIoSaveStart(progress, "open_file",
+                    "Ouverture directe du fichier de configuration");
+  File file = LittleFS.open(IO_CONFIG_FILE_PATH, "w");
+  if (!file) {
+    recordIoSaveFinish(progress, "open_file", false,
+                       "Impossible d'ouvrir io_config.json");
+    errorCode = "direct_open_failed";
+    return false;
+  }
+  recordIoSaveFinish(progress, "open_file", true,
+                     "Fichier ouvert en écriture");
+
+  recordIoSaveStart(progress, "write_file",
+                    "Écriture directe du contenu JSON");
+  size_t expected = payload.length();
+  size_t written = expected > 0
+                       ? file.write(reinterpret_cast<const uint8_t *>(
+                                         payload.c_str()),
+                                     expected)
+                       : 0;
+  bool writeOk = (written == expected);
+  recordIoSaveFinish(progress, "write_file", writeOk,
+                     writeOk ? String("Écriture directe réussie (") + written +
+                                   " octets)"
+                             : String("Écriture incomplète (") + written + "/" +
+                                   expected + " octets)");
+  if (!writeOk) {
+    file.close();
+    LittleFS.remove(IO_CONFIG_FILE_PATH);
+    errorCode = "direct_write_failed";
+    return false;
+  }
+
+  recordIoSaveStart(progress, "flush_file", "Vidage du cache interne");
+  file.flush();
+  recordIoSaveFinish(progress, "flush_file", true,
+                     "Cache d'écriture vidé");
+
+  recordIoSaveStart(progress, "close_file", "Fermeture du fichier");
+  file.close();
+  recordIoSaveFinish(progress, "close_file", true,
+                     "Fichier fermé correctement");
+
+  recordIoSaveStart(progress, "verify_file",
+                    "Vérification (méthode directe)");
+  recordIoSaveFinish(progress, "verify_file", true,
+                     "Vérification non effectuée (méthode directe)");
+  return true;
+}
+
 bool saveIoConfig() {
   String errorCode;
-  if (!saveIoConfigWithProgress(nullptr, errorCode)) {
+  if (!saveIoConfigTransactional(nullptr, errorCode)) {
     if (errorCode.length() == 0) {
       errorCode = "unknown";
     }
@@ -3402,6 +3570,36 @@ bool saveVirtualConfig() {
       nullptr,
   };
   return saveJsonConfig(request);
+}
+
+static const IoSaveMethodOptions IO_SAVE_METHOD_TRANSACTIONAL = {
+    "transactional",
+    "Méthode transactionnelle",
+    IO_SAVE_TRANSACTIONAL_LOG_PATH,
+    "Configuration sauvegardée sans redémarrage (méthode transactionnelle).",
+    saveIoConfigTransactional,
+};
+
+static const IoSaveMethodOptions IO_SAVE_METHOD_DIRECT = {
+    "direct",
+    "Méthode directe",
+    IO_SAVE_DIRECT_LOG_PATH,
+    "Configuration sauvegardée sans redémarrage (méthode directe).",
+    saveIoConfigDirect,
+};
+
+static void decorateIoSaveJson(const IoSaveMethodOptions &method,
+                               JsonVariant target) {
+  if (target.isNull()) {
+    return;
+  }
+  target["method"] = method.methodId;
+  target["methodLabel"] = method.displayName;
+  String relative = toRelativeUserPath(String(method.logPath));
+  if (relative.length() == 0) {
+    relative = method.logPath;
+  }
+  target["logFile"] = relative;
 }
 
 static const InputConfig *findInputByName(const Config &cfg, const String &name) {
@@ -3830,9 +4028,20 @@ static bool verifyConfigStored(const Config &expected,
 }
 
 template <typename ServerT>
-static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
+static void handleIoConfigSaveRequest(ServerT *srv, const String &body,
+                                      const IoSaveMethodOptions &method) {
   IoSaveProgress progress;
   initIoSaveProgress(progress);
+  IoSaveLogScope logScope(method.logPath, method.displayName);
+  String logRelative = toRelativeUserPath(String(method.logPath));
+  if (logRelative.length() == 0) {
+    logRelative = method.logPath;
+  }
+  recordIoSaveStart(&progress, "select_method",
+                    String("Méthode choisie : ") + method.displayName);
+  recordIoSaveFinish(&progress, "select_method", true,
+                     String("Journal : ") + logRelative);
+
   recordIoSaveStart(&progress, "receive_request",
                     "Réception de la configuration du client");
   if (body.length() == 0) {
@@ -3840,6 +4049,7 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
                        "Aucun contenu fourni");
     DynamicJsonDocument errDoc(256);
     errDoc["error"] = "no_body";
+    decorateIoSaveJson(method, errDoc.as<JsonVariant>());
     JsonArray events = errDoc.createNestedArray("events");
     appendIoSaveEventsToJson(progress, events);
     String payload;
@@ -3884,6 +4094,7 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
       DynamicJsonDocument errDoc(256);
       errDoc["error"] = "invalid_json";
       errDoc["detail"] = parseErr.c_str();
+      decorateIoSaveJson(method, errDoc.as<JsonVariant>());
       JsonArray events = errDoc.createNestedArray("events");
       appendIoSaveEventsToJson(progress, events);
       String payload;
@@ -3906,6 +4117,7 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
                          "Mémoire insuffisante pour analyser le JSON");
       DynamicJsonDocument errDoc(256);
       errDoc["error"] = "json_overflow";
+      decorateIoSaveJson(method, errDoc.as<JsonVariant>());
       JsonArray events = errDoc.createNestedArray("events");
       appendIoSaveEventsToJson(progress, events);
       String payload;
@@ -3921,6 +4133,7 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
                        "Allocation mémoire impossible pour le JSON");
     DynamicJsonDocument errDoc(256);
     errDoc["error"] = "alloc_failed";
+    decorateIoSaveJson(method, errDoc.as<JsonVariant>());
     JsonArray events = errDoc.createNestedArray("events");
     appendIoSaveEventsToJson(progress, events);
     String payload;
@@ -3989,6 +4202,7 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
       errDoc["requestedOutputs"] = static_cast<uint8_t>(expectedOutputs);
       errDoc["appliedOutputs"] = config.outputCount;
     }
+    decorateIoSaveJson(method, errDoc.as<JsonVariant>());
     JsonArray events = errDoc.createNestedArray("events");
     appendIoSaveEventsToJson(progress, events);
     String payload;
@@ -4003,7 +4217,7 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
   recordIoSaveStart(&progress, "save_storage",
                     "Sauvegarde sur le stockage interne");
   String saveError;
-  if (!saveIoConfigWithProgress(&progress, saveError)) {
+  if (!method.saver(&progress, saveError)) {
     String detail = describeIoSaveError(saveError);
     recordIoSaveFinish(&progress, "save_storage", false, detail);
     config = previousConfig;
@@ -4012,6 +4226,7 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
     if (saveError.length() > 0) {
       errDoc["detail"] = saveError;
     }
+    decorateIoSaveJson(method, errDoc.as<JsonVariant>());
     JsonArray events = errDoc.createNestedArray("events");
     appendIoSaveEventsToJson(progress, events);
     String payload;
@@ -4019,8 +4234,11 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
     srv->send(500, "application/json", payload);
     return;
   }
-  recordIoSaveFinish(&progress, "save_storage", true,
-                     "Fichier io_config.json mis à jour");
+  const char *storageSuccess =
+      (strcmp(method.methodId, "direct") == 0)
+          ? "Fichier io_config.json écrit (méthode directe)"
+          : "Fichier io_config.json mis à jour";
+  recordIoSaveFinish(&progress, "save_storage", true, storageSuccess);
 
   recordIoSaveStart(&progress, "apply_runtime",
                     "Application sans redémarrage");
@@ -4030,13 +4248,18 @@ static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
 
   DynamicJsonDocument respDoc(512);
   respDoc["status"] = "ok";
-  respDoc["message"] = "Configuration sauvegardée sans redémarrage.";
+  if (method.successMessage && method.successMessage[0] != '\0') {
+    respDoc["message"] = method.successMessage;
+  } else {
+    respDoc["message"] = "Configuration sauvegardée sans redémarrage.";
+  }
   respDoc["requiresReboot"] = false;
   JsonObject applied = respDoc.createNestedObject("applied");
   applied["inputs"] = config.inputCount;
   applied["outputs"] = config.outputCount;
   JsonArray events = respDoc.createNestedArray("events");
   appendIoSaveEventsToJson(progress, events);
+  decorateIoSaveJson(method, respDoc.as<JsonVariant>());
   String payload;
   serializeJson(respDoc, payload);
   srv->send(200, "application/json", payload);
@@ -4813,18 +5036,32 @@ void registerRoutes(ServerT &server) {
     srv->send(200, "application/json", payload);
   });
 
+  server.on("/api/config/io/save-transactional", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = extractPlainBody(srv);
+    handleIoConfigSaveRequest(srv, body, IO_SAVE_METHOD_TRANSACTIONAL);
+  });
+
+  server.on("/api/config/io/save-direct", HTTP_POST, [&server]() {
+    auto *srv = &server;
+    if (!requireAuth(srv)) return;
+    String body = extractPlainBody(srv);
+    handleIoConfigSaveRequest(srv, body, IO_SAVE_METHOD_DIRECT);
+  });
+
   server.on("/api/config/io/set", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
     String body = extractPlainBody(srv);
-    handleIoConfigSetRequest(srv, body);
+    handleIoConfigSaveRequest(srv, body, IO_SAVE_METHOD_TRANSACTIONAL);
   });
 
   server.on("/api/config/set", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
     String body = extractPlainBody(srv);
-    handleIoConfigSetRequest(srv, body);
+    handleIoConfigSaveRequest(srv, body, IO_SAVE_METHOD_TRANSACTIONAL);
   });
 
   server.on("/api/config/interface/get", HTTP_GET, [&server]() {
