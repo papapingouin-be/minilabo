@@ -68,6 +68,14 @@
     .modal-info ul { margin: 0.4em 0 0 1.2em; padding: 0; }
     .modal-info li { margin-bottom: 0.3em; }
     button.small { padding: 0.35em 0.75em; font-size: 0.85em; }
+    .progress-list { list-style: none; margin: 0; padding: 0.6em 0.8em; border: 1px solid #d0d0d0; border-radius: 6px; max-height: 260px; overflow-y: auto; background: #fafafa; }
+    .progress-list li { margin: 0.35em 0; font-size: 0.9em; display: flex; align-items: center; gap: 0.4em; color: #2c3e50; }
+    .progress-list li::before { content: '•'; color: #7f8c8d; }
+    .progress-list li.progress-start { color: #2c3e50; }
+    .progress-list li.progress-success { color: #256029; }
+    .progress-list li.progress-success::before { color: #27ae60; }
+    .progress-list li.progress-failure { color: #c0392b; }
+    .progress-list li.progress-failure::before { color: #c0392b; }
   </style>
   <script src="auth.js"></script>
 </head>
@@ -126,7 +134,7 @@
   </fieldset>
 
   <div class="form-actions">
-    <button type="button" id="saveBtn" class="primary">Enregistrer</button>
+    <button type="button" id="saveBtn" class="primary">Sauvegarder sans redémarrage</button>
     <button type="button" id="rebootBtn" class="secondary">Redémarrer</button>
     <span id="status" style="margin-left:1em;"></span>
   </div>
@@ -155,6 +163,16 @@
         <button type="submit">Enregistrer</button>
       </div>
     </form>
+  </div>
+</div>
+
+<div id="saveProgressModal" class="modal hidden" role="dialog" aria-modal="true">
+  <div class="modal-content">
+    <h2>Suivi de la sauvegarde</h2>
+    <ul id="saveProgressList" class="progress-list"></ul>
+    <div class="modal-actions">
+      <button type="button" class="secondary" id="saveProgressClose">Fermer</button>
+    </div>
   </div>
 </div>
 
@@ -394,6 +412,10 @@ const STATUS_PENDING = 'pending';
 let lastAppliedInputs = new Map();
 let lastAppliedOutputs = new Map();
 let saveInProgress = false;
+let saveProgressModal = null;
+let saveProgressList = null;
+let saveProgressClose = null;
+let rebootShouldBeEnabled = false;
 
 function normaliseErrorForLog(err) {
   if (err instanceof Error) {
@@ -487,6 +509,44 @@ function markRebootPrompt(active) {
     rebootBtn.classList.add('attention');
   } else {
     rebootBtn.classList.remove('attention');
+  }
+}
+
+function openSaveProgressModal() {
+  if (!saveProgressModal) return;
+  saveProgressModal.classList.remove('hidden');
+  if (saveProgressList) {
+    saveProgressList.innerHTML = '';
+    saveProgressList.scrollTop = 0;
+  }
+  if (saveProgressClose) {
+    saveProgressClose.disabled = true;
+  }
+}
+
+function closeSaveProgressModal() {
+  if (!saveProgressModal) return;
+  saveProgressModal.classList.add('hidden');
+}
+
+function appendSaveProgressEvent(message, type = 'start', success = true) {
+  if (!saveProgressList) return;
+  const item = document.createElement('li');
+  item.textContent = message;
+  if (type === 'start') {
+    item.classList.add('progress-start');
+  } else if (success) {
+    item.classList.add('progress-success');
+  } else {
+    item.classList.add('progress-failure');
+  }
+  saveProgressList.appendChild(item);
+  saveProgressList.scrollTop = saveProgressList.scrollHeight;
+}
+
+function allowSaveProgressClose() {
+  if (saveProgressClose) {
+    saveProgressClose.disabled = false;
   }
 }
 
@@ -1563,35 +1623,31 @@ async function saveConfig() {
     return;
   }
 
-  const saveBtn = document.getElementById('saveBtn');
+  const saveBtnEl = document.getElementById('saveBtn');
   const rebootBtn = document.getElementById('rebootBtn');
-  const originalSaveLabel = saveBtn ? (saveBtn.dataset.label || saveBtn.textContent) : '';
-  if (saveBtn && !saveBtn.dataset.label) {
-    saveBtn.dataset.label = originalSaveLabel;
-  }
+  const originalLabel = saveBtnEl ? (saveBtnEl.dataset.label || saveBtnEl.textContent) : '';
 
-  const initialRebootDisabled = rebootBtn ? rebootBtn.disabled : false;
-
-  let rebootShouldBeEnabled = false;
   const restoreUi = () => {
-    if (saveBtn) {
-      saveBtn.disabled = false;
-      const label = saveBtn.dataset.label || originalSaveLabel || 'Enregistrer';
-      saveBtn.textContent = label;
+    if (saveBtnEl) {
+      saveBtnEl.disabled = false;
+      if (saveBtnEl.dataset.label) {
+        saveBtnEl.textContent = saveBtnEl.dataset.label;
+      }
     }
     if (rebootBtn) {
-      rebootBtn.disabled = rebootShouldBeEnabled ? false : initialRebootDisabled;
+      rebootBtn.disabled = false;
     }
-    markRebootPrompt(rebootShouldBeEnabled);
     saveInProgress = false;
+    allowSaveProgressClose();
   };
 
   saveInProgress = true;
-  refreshModuleStateFromForm();
-  markRebootPrompt(false);
-  if (saveBtn) {
-    saveBtn.disabled = true;
-    saveBtn.textContent = 'Sauvegarde...';
+  if (saveBtnEl) {
+    if (!saveBtnEl.dataset.label) {
+      saveBtnEl.dataset.label = originalLabel || 'Sauvegarder';
+    }
+    saveBtnEl.textContent = 'Sauvegarde en cours...';
+    saveBtnEl.disabled = true;
   }
   if (rebootBtn) {
     rebootBtn.disabled = true;
@@ -1600,26 +1656,28 @@ async function saveConfig() {
     statusEl.textContent = 'Sauvegarde en cours...';
   }
 
+  openSaveProgressModal();
+  appendSaveProgressEvent('Préparation de la configuration locale', 'start');
+
   let payload = '';
   try {
     const cfg = {};
     cfg.modules = {
-      adc:      true,
-      ads1115: document.getElementById('modAds').checked,
-      pwm010:  document.getElementById('modPwm').checked,
-      mcp4725: document.getElementById('modDac').checked,
-      zmpt:    document.getElementById('modZmpt').checked,
-      zmct:    document.getElementById('modZmct').checked,
-      div:     document.getElementById('modDiv').checked
+      ads1115: !!moduleState.ads1115,
+      pwm010: !!moduleState.pwm010,
+      mcp4725: !!moduleState.mcp4725,
+      zmpt: !!moduleState.zmpt,
+      zmct: !!moduleState.zmct,
+      div: !!moduleState.div,
     };
     cfg.inputs = inputs.slice(0, MAX_INPUTS).map((item, idx) => {
       const obj = {
         name: item.name || `IN${idx + 1}`,
         type: item.type,
-        active: !!item.active
+        active: !!item.active,
       };
-      if (['adc','div','zmpt','zmct'].includes(item.type)) {
-        obj.pin = item.pin || '';
+      if (['adc', 'zmpt', 'zmct', 'div'].includes(item.type)) {
+        obj.pin = item.pin || 'A0';
       }
       if (item.type === 'ads1115') {
         obj.adsChannel = toInteger(item.adsChannel, 0, { min: 0, max: 3 });
@@ -1635,16 +1693,18 @@ async function saveConfig() {
       const obj = {
         name: item.name || `OUT${idx + 1}`,
         type: item.type,
-        active: !!item.active
+        active: !!item.active,
       };
-      if (['pwm010','gpio'].includes(item.type)) {
+      if (['pwm010', 'gpio'].includes(item.type)) {
         obj.pin = item.pin || '';
       }
       if (item.type === 'pwm010') {
         obj.pwmFreq = toInteger(item.pwmFreq, 2000, { min: 1 });
       }
       if (item.type === 'mcp4725') {
-        obj.i2cAddress = item.i2cAddress && item.i2cAddress.length ? item.i2cAddress : '0x60';
+        obj.i2cAddress = item.i2cAddress && item.i2cAddress.length
+          ? item.i2cAddress
+          : '0x60';
       }
       return obj;
     });
@@ -1652,6 +1712,11 @@ async function saveConfig() {
     payload = JSON.stringify(cfg);
   } catch (err) {
     console.error(err);
+    appendSaveProgressEvent(
+      'Fin : préparation de la configuration locale (erreur)',
+      'finish',
+      false,
+    );
     if (statusEl) {
       statusEl.textContent = 'Erreur lors de la préparation de la configuration.';
     }
@@ -1659,24 +1724,19 @@ async function saveConfig() {
     return;
   }
 
+  appendSaveProgressEvent('Fin : préparation de la configuration locale', 'finish', true);
+  appendSaveProgressEvent('Envoi de la configuration au serveur', 'start');
+
+  let serverResult = null;
+  let rawBody = '';
+
   try {
     const response = await authFetch('/api/config/io/set', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: payload
+      body: payload,
     });
-    if (!response.ok) {
-      const text = await response.text();
-      const message = text && text.length
-        ? `Erreur lors de la sauvegarde (${text})`
-        : `Erreur lors de la sauvegarde (${response.status})`;
-      if (statusEl) {
-        statusEl.textContent = message;
-      }
-      return;
-    }
-    const rawBody = await response.text();
-    let serverResult = null;
+    rawBody = await response.text();
     if (rawBody && rawBody.trim().length) {
       try {
         serverResult = JSON.parse(rawBody);
@@ -1684,33 +1744,61 @@ async function saveConfig() {
         console.warn('Réponse JSON inattendue lors de la sauvegarde IO', err, rawBody);
       }
     }
+
+    appendSaveProgressEvent(
+      response.ok
+        ? 'Fin : envoi de la configuration (réussi)'
+        : 'Fin : envoi de la configuration (échec)',
+      'finish',
+      response.ok,
+    );
+
+    if (serverResult && Array.isArray(serverResult.events)) {
+      serverResult.events.forEach(ev => {
+        if (!ev || typeof ev.message !== 'string') return;
+        const type = ev.type === 'finish' ? 'finish' : 'start';
+        const success = ev.success !== false;
+        appendSaveProgressEvent(ev.message, type, success);
+      });
+    }
+
+    if (!response.ok) {
+      if (statusEl) {
+        if (serverResult && serverResult.error) {
+          const detail = serverResult.detail ? ` (${serverResult.detail})` : '';
+          statusEl.textContent = `Erreur lors de la sauvegarde (${serverResult.error}${detail})`;
+        } else if (rawBody && rawBody.trim().length) {
+          statusEl.textContent = `Erreur lors de la sauvegarde (${rawBody.trim()})`;
+        } else {
+          statusEl.textContent = `Erreur lors de la sauvegarde (${response.status})`;
+        }
+      }
+      return;
+    }
+
     rebootShouldBeEnabled = serverResult && typeof serverResult.requiresReboot === 'boolean'
       ? !!serverResult.requiresReboot
       : false;
     if (statusEl) {
       if (serverResult && typeof serverResult.message === 'string' && serverResult.message.length) {
         statusEl.textContent = serverResult.message;
-      } else if (rawBody && rawBody.trim().length) {
-        statusEl.textContent = rawBody;
       } else {
-        statusEl.textContent = 'Fichier enregistré.';
+        statusEl.textContent = 'Configuration sauvegardée sans redémarrage.';
       }
     }
     markAllSnapshotsSaved();
-    const logDetail = {
+    markRebootPrompt(rebootShouldBeEnabled);
+    logIoStep('Configuration IO sauvegardée côté serveur', {
       inputs: inputs.length,
-      outputs: outputs.length
-    };
-    if (serverResult) {
-      logDetail.response = serverResult;
-    } else if (rawBody && rawBody.trim().length) {
-      logDetail.raw = rawBody;
-    }
-    logIoStep('Configuration IO sauvegardée côté serveur', logDetail);
+      outputs: outputs.length,
+      response: serverResult || rawBody,
+    });
   } catch (err) {
     console.error(err);
+    appendSaveProgressEvent('Fin : envoi de la configuration (erreur)', 'finish', false);
     if (statusEl) {
-      statusEl.textContent = 'Erreur lors de la sauvegarde.';
+      const message = describeErrorMessage(err, 'erreur inconnue');
+      statusEl.textContent = `Erreur lors de la sauvegarde (${message}).`;
     }
   } finally {
     restoreUi();
@@ -1772,8 +1860,12 @@ window.addEventListener('DOMContentLoaded', () => {
     });
   }
   window.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape' && modalState) {
-      closeIoModal(true);
+    if (ev.key === 'Escape') {
+      if (modalState) {
+        closeIoModal(true);
+      } else if (!saveInProgress && saveProgressModal && !saveProgressModal.classList.contains('hidden')) {
+        closeSaveProgressModal();
+      }
     }
   });
   renderIoList('input');
@@ -1785,9 +1877,26 @@ window.addEventListener('DOMContentLoaded', () => {
     .catch(err => {
       console.error(err);
     });
-  const saveBtnEl = document.getElementById('saveBtn');
-  if (saveBtnEl) {
-    saveBtnEl.addEventListener('click', () => {
+  saveProgressModal = document.getElementById('saveProgressModal');
+  saveProgressList = document.getElementById('saveProgressList');
+  saveProgressClose = document.getElementById('saveProgressClose');
+  if (saveProgressClose) {
+    saveProgressClose.addEventListener('click', () => {
+      if (!saveInProgress) {
+        closeSaveProgressModal();
+      }
+    });
+  }
+  if (saveProgressModal) {
+    saveProgressModal.addEventListener('click', (ev) => {
+      if (ev.target === saveProgressModal && !saveInProgress) {
+        closeSaveProgressModal();
+      }
+    });
+  }
+  const saveBtn = document.getElementById('saveBtn');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', () => {
       saveConfig();
     });
   }

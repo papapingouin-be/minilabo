@@ -207,10 +207,7 @@ static const char *LOG_PATH = "/log.txt";
 static const char *USER_FILES_DIR = "/private";
 static const char *SAMPLE_FILE_PATH = "/private/sample.html";
 static const char *IO_CONFIG_FILE_PATH = "/private/io_config.json";
-static const char *CONFIG_SAVE_LOG_PATH = "/private/sauvegardeconfig.log";
 static const char *IO_LOG_CSV_PATH = "/private/io-config-events.csv";
-static const char *IO_CONFIG_BACKUP_FILE_PATH = "/private/io_config.bak";
-static const char *IO_CONFIG_TEMP_FILE_PATH = "/private/io_config.tmp";
 static const char *INTERFACE_CONFIG_FILE_PATH = "/private/interface_config.json";
 static const char *INTERFACE_CONFIG_BACKUP_FILE_PATH = "/private/interface_config.bak";
 static const char *INTERFACE_CONFIG_TEMP_FILE_PATH = "/private/interface_config.tmp";
@@ -229,12 +226,7 @@ struct ConfigSaveRequest {
   ConfigSavePaths paths;
   const char *label;
   bool logToFile;
-};
-
-static const ConfigSavePaths IO_CONFIG_PATHS = {
-    IO_CONFIG_FILE_PATH,
-    IO_CONFIG_TEMP_FILE_PATH,
-    IO_CONFIG_BACKUP_FILE_PATH,
+  const char *logPath;
 };
 
 static const ConfigSavePaths INTERFACE_CONFIG_PATHS = {
@@ -303,6 +295,115 @@ static size_t growConfigJsonCapacity(size_t current) {
   }
   return next;
 }
+static const uint8_t IO_SAVE_EVENT_CAPACITY = 32;
+
+struct IoSaveEvent {
+  bool start;
+  bool success;
+  const char *step;
+  String message;
+};
+
+struct IoSaveProgress {
+  IoSaveEvent events[IO_SAVE_EVENT_CAPACITY];
+  uint8_t count;
+  bool overflow;
+};
+
+static void initIoSaveProgress(IoSaveProgress &progress) {
+  progress.count = 0;
+  progress.overflow = false;
+}
+
+static void recordIoSaveEvent(IoSaveProgress *progress,
+                              bool start,
+                              const char *step,
+                              const String &message,
+                              bool success) {
+  if (!progress) {
+    return;
+  }
+  if (progress->count >= IO_SAVE_EVENT_CAPACITY) {
+    progress->overflow = true;
+    return;
+  }
+  IoSaveEvent &event = progress->events[progress->count++];
+  event.start = start;
+  event.success = success;
+  event.step = step;
+  event.message = message;
+}
+
+static void recordIoSaveStart(IoSaveProgress *progress,
+                              const char *step,
+                              const String &description) {
+  recordIoSaveEvent(progress, true, step,
+                    String("Début : ") + description, true);
+}
+
+static void recordIoSaveFinish(IoSaveProgress *progress,
+                               const char *step,
+                               bool success,
+                               const String &description) {
+  recordIoSaveEvent(progress, false, step,
+                    String("Fin : ") + description, success);
+}
+
+static void appendIoSaveEventsToJson(const IoSaveProgress &progress,
+                                     JsonArray array) {
+  for (uint8_t i = 0; i < progress.count; ++i) {
+    const IoSaveEvent &event = progress.events[i];
+    JsonObject obj = array.createNestedObject();
+    obj["step"] = event.step ? event.step : "";
+    obj["type"] = event.start ? "start" : "finish";
+    obj["message"] = event.message;
+    if (!event.start) {
+      obj["success"] = event.success;
+    }
+  }
+  if (progress.overflow) {
+    JsonObject overflow = array.createNestedObject();
+    overflow["step"] = "events";
+    overflow["type"] = "finish";
+    overflow["message"] =
+        "Fin : certains événements n'ont pas été conservés (limite atteinte)";
+    overflow["success"] = false;
+  }
+}
+
+static String describeIoSaveError(const String &code) {
+  if (code == "payload_generation_failed") {
+    return "Préparation du JSON impossible";
+  }
+  if (code == "private_directory_unavailable") {
+    return "Répertoire /private indisponible";
+  }
+  if (code == "open_failed") {
+    return "Impossible d'ouvrir io_config.json";
+  }
+  if (code == "write_failed") {
+    return "Erreur lors de l'écriture du fichier";
+  }
+  if (code == "verify_failed") {
+    return "Échec de la vérification du fichier";
+  }
+  if (code == "record_header_invalid") {
+    return "Format de fichier inattendu";
+  }
+  if (code == "checksum_mismatch") {
+    return "Somme de contrôle incorrecte";
+  }
+  if (code == "sections_mismatch") {
+    return "Sections sauvegardées incohérentes";
+  }
+  if (code == "json parse failed") {
+    return "Impossible de relire le fichier enregistré";
+  }
+  if (code.length() > 0) {
+    return String("Erreur : ") + code;
+  }
+  return String("Erreur inconnue");
+}
 static const char SAMPLE_FILE_CONTENT[] = R"rawliteral(
 <!DOCTYPE html>
 <html lang="fr">
@@ -333,14 +434,17 @@ static bool ensureUserDirectory() {
   return true;
 }
 
-static void appendConfigSaveLog(const String &message) {
+static void appendConfigSaveLog(const char *logPath, const String &message) {
+  if (!logPath || !logPath[0]) {
+    return;
+  }
   if (!ensureUserDirectory()) {
     logMessage("Unable to open private directory for config save log");
     return;
   }
-  File logFile = LittleFS.open(CONFIG_SAVE_LOG_PATH, "a");
+  File logFile = LittleFS.open(logPath, "a");
   if (!logFile) {
-    logPrintf("Failed to append config save log: %s", CONFIG_SAVE_LOG_PATH);
+    logPrintf("Failed to append config save log: %s", logPath);
     return;
   }
   String line = String("[") + millis() + "] " + message;
@@ -376,16 +480,29 @@ static const char *configSaveLabel(const ConfigSaveRequest &request) {
   return request.label ? request.label : "Config";
 }
 
+static const char *configSaveLogPath(const ConfigSaveRequest &request) {
+  if (request.logPath && request.logPath[0]) {
+    return request.logPath;
+  }
+  return nullptr;
+}
+
+static void appendConfigSaveLogForRequest(const ConfigSaveRequest &request,
+                                          const String &message) {
+  if (!request.logToFile) {
+    return;
+  }
+  appendConfigSaveLog(configSaveLogPath(request), message);
+}
+
 static bool ensureConfigDirectory(const ConfigSaveRequest &request) {
   if (ensureUserDirectory()) {
     return true;
   }
   const char *label = configSaveLabel(request);
   logMessage(String(label) + " config directory unavailable");
-  if (request.logToFile) {
-    appendConfigSaveLog(String("Erreur sauvegarde ") + label +
-                        ": répertoire indisponible");
-  }
+  appendConfigSaveLogForRequest(
+      request, String("Erreur sauvegarde ") + label + ": répertoire indisponible");
   return false;
 }
 
@@ -394,10 +511,9 @@ static void logConfigSaveFailure(const ConfigSaveRequest &request,
                                  const String &detail) {
   const char *label = configSaveLabel(request);
   logPrintf("%s configuration save failure: %s (%s)", label, detail.c_str(), path);
-  if (request.logToFile) {
-    appendConfigSaveLog(String("Erreur sauvegarde ") + label + " (" + path + "): " +
-                        detail);
-  }
+  appendConfigSaveLogForRequest(
+      request,
+      String("Erreur sauvegarde ") + label + " (" + path + "): " + detail);
 }
 
 static void logConfigSaveWarning(const ConfigSaveRequest &request,
@@ -405,10 +521,9 @@ static void logConfigSaveWarning(const ConfigSaveRequest &request,
                                  const String &detail) {
   const char *label = configSaveLabel(request);
   logPrintf("%s configuration save warning: %s (%s)", label, detail.c_str(), path);
-  if (request.logToFile) {
-    appendConfigSaveLog(String("Avertissement sauvegarde ") + label + " (" + path +
-                        "): " + detail);
-  }
+  appendConfigSaveLogForRequest(
+      request,
+      String("Avertissement sauvegarde ") + label + " (" + path + "): " + detail);
 }
 
 static bool writeConfigTempFile(const ConfigSaveRequest &request,
@@ -486,8 +601,8 @@ static bool performConfigSave(const ConfigSaveRequest &request,
   if (!writeConfigTempFile(request, payload, errorDetail)) {
     LittleFS.remove(request.paths.tempPath);
     if (request.logToFile) {
-      appendConfigSaveLog(String("Erreur lors de l'écriture de ") +
-                          request.paths.tempPath);
+    appendConfigSaveLogForRequest(
+        request, String("Erreur lors de l'écriture de ") + request.paths.tempPath);
     }
     logConfigSaveFailure(request, request.paths.tempPath, errorDetail);
     return false;
@@ -521,10 +636,9 @@ static bool performConfigSave(const ConfigSaveRequest &request,
     return false;
   }
 
-  if (request.logToFile) {
-    appendConfigSaveLog(String("Configuration ") + configSaveLabel(request) +
-                        " enregistrée dans " + request.paths.primaryPath);
-  }
+  appendConfigSaveLogForRequest(
+      request, String("Configuration ") + configSaveLabel(request) +
+                   " enregistrée dans " + request.paths.primaryPath);
   return true;
 }
 
@@ -1919,6 +2033,7 @@ static uint32_t lastBroadcastUpdate = 0;
 
 // Forward declarations
 void loadConfig();
+static bool saveIoConfigWithProgress(IoSaveProgress *progress, String &errorCode);
 bool saveIoConfig();
 bool saveInterfaceConfig();
 bool saveVirtualConfig();
@@ -3000,26 +3115,6 @@ void loadConfig() {
       logMessage("Primary IO configuration load failed");
     }
   }
-  if (!ioLoaded && LittleFS.exists(IO_CONFIG_BACKUP_FILE_PATH)) {
-    logMessage("Attempting to load IO configuration from backup");
-    if (loadConfigFromPath(IO_CONFIG_BACKUP_FILE_PATH, "IO backup",
-                           ioSections)) {
-      ioLoaded = true;
-      ioNeedsRewrite = true;
-      if (!interfaceLoaded &&
-          (ioSections & (CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS))) {
-        interfaceLoaded = true;
-        interfaceNeedsRewrite = true;
-      }
-      if (!virtualLoaded && (ioSections & CONFIG_SECTION_VIRTUAL)) {
-        virtualLoaded = true;
-        virtualNeedsRewrite = true;
-      }
-    } else {
-      logMessage("IO backup configuration load failed");
-    }
-  }
-
   bool legacyUsed = false;
   if ((!ioLoaded || !interfaceLoaded || !virtualLoaded) &&
       LittleFS.exists(LEGACY_CONFIG_FILE_PATH)) {
@@ -3177,14 +3272,114 @@ static bool saveJsonConfig(const ConfigSaveRequest &request) {
   return true;
 }
 
-bool saveIoConfig() {
-  ConfigSaveRequest request = {
+static bool saveIoConfigWithProgress(IoSaveProgress *progress,
+                                     String &errorCode) {
+  recordIoSaveStart(progress, "prepare_payload",
+                    "Préparation du JSON de configuration");
+  String payload;
+  if (!buildConfigJsonPayload(payload,
+                              CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
+                              false, "IO", false)) {
+    errorCode = "payload_generation_failed";
+    recordIoSaveFinish(progress, "prepare_payload", false,
+                       "Préparation du JSON impossible");
+    return false;
+  }
+  recordIoSaveFinish(progress, "prepare_payload", true,
+                     String("JSON prêt (") + payload.length() + " octets)");
+
+  recordIoSaveStart(progress, "ensure_directory",
+                    "Vérification du répertoire /private");
+  if (!ensureUserDirectory()) {
+    errorCode = "private_directory_unavailable";
+    recordIoSaveFinish(progress, "ensure_directory", false,
+                       "Répertoire /private indisponible");
+    return false;
+  }
+  recordIoSaveFinish(progress, "ensure_directory", true,
+                     "Répertoire /private disponible");
+
+  recordIoSaveStart(progress, "check_existing",
+                    "Contrôle de l'existence de io_config.json");
+  bool existed = LittleFS.exists(IO_CONFIG_FILE_PATH);
+  recordIoSaveFinish(progress, "check_existing", true,
+                     existed ? "Le fichier existe, il sera remplacé."
+                             : "Le fichier sera créé.");
+
+  recordIoSaveStart(progress, "open_file",
+                    "Ouverture du fichier io_config.json en écriture");
+  File file = LittleFS.open(IO_CONFIG_FILE_PATH, "w");
+  if (!file) {
+    errorCode = "open_failed";
+    recordIoSaveFinish(progress, "open_file", false,
+                       "Impossible d'ouvrir le fichier en écriture");
+    return false;
+  }
+  recordIoSaveFinish(progress, "open_file", true,
+                     "Fichier ouvert pour l'écriture");
+
+  recordIoSaveStart(progress, "write_file",
+                    "Écriture du contenu JSON");
+  size_t expected = payload.length();
+  size_t written = expected > 0
+                       ? file.write(reinterpret_cast<const uint8_t *>(
+                                         payload.c_str()),
+                                     expected)
+                       : 0;
+  bool writeOk = (written == expected);
+  recordIoSaveFinish(progress, "write_file", writeOk,
+                     writeOk ? String("Écriture terminée (") + written + " octets)"
+                             : String("Écriture incomplète (") + written + "/" +
+                                   expected + " octets)");
+  if (!writeOk) {
+    file.close();
+    LittleFS.remove(IO_CONFIG_FILE_PATH);
+    errorCode = "write_failed";
+    return false;
+  }
+
+  recordIoSaveStart(progress, "flush_file",
+                    "Vidage des données sur le support");
+  file.flush();
+  recordIoSaveFinish(progress, "flush_file", true,
+                     "Cache d'écriture vidé");
+
+  recordIoSaveStart(progress, "close_file", "Fermeture du fichier");
+  file.close();
+  recordIoSaveFinish(progress, "close_file", true,
+                     "Fichier fermé correctement");
+
+  recordIoSaveStart(progress, "verify_file",
+                    "Vérification de la configuration enregistrée");
+  String verifyError;
+  bool verified = verifyConfigStored(
+      config, IO_CONFIG_FILE_PATH,
       static_cast<uint8_t>(CONFIG_SECTION_MODULES | CONFIG_SECTION_IO),
-      IO_CONFIG_PATHS,
-      "IO",
-      true,
-  };
-  return saveJsonConfig(request);
+      verifyError);
+  if (!verified) {
+    String detail = verifyError.length()
+                        ? String("Échec de vérification (") + verifyError + ")"
+                        : String("Échec de la vérification");
+    recordIoSaveFinish(progress, "verify_file", false, detail);
+    errorCode = verifyError.length() ? verifyError : "verify_failed";
+    return false;
+  }
+  recordIoSaveFinish(progress, "verify_file", true,
+                     "Vérification réussie");
+
+  return true;
+}
+
+bool saveIoConfig() {
+  String errorCode;
+  if (!saveIoConfigWithProgress(nullptr, errorCode)) {
+    if (errorCode.length() == 0) {
+      errorCode = "unknown";
+    }
+    logPrintf("saveIoConfig failed: %s", errorCode.c_str());
+    return false;
+  }
+  return true;
 }
 
 bool saveInterfaceConfig() {
@@ -3193,6 +3388,7 @@ bool saveInterfaceConfig() {
       INTERFACE_CONFIG_PATHS,
       "Interface",
       false,
+      nullptr,
   };
   return saveJsonConfig(request);
 }
@@ -3203,6 +3399,7 @@ bool saveVirtualConfig() {
       VIRTUAL_CONFIG_PATHS,
       "Virtual",
       false,
+      nullptr,
   };
   return saveJsonConfig(request);
 }
@@ -3634,191 +3831,215 @@ static bool verifyConfigStored(const Config &expected,
 
 template <typename ServerT>
 static void handleIoConfigSetRequest(ServerT *srv, const String &body) {
-  appendConfigSaveLog("--- Début de sauvegarde de configuration IO ---");
+  IoSaveProgress progress;
+  initIoSaveProgress(progress);
+  recordIoSaveStart(&progress, "receive_request",
+                    "Réception de la configuration du client");
   if (body.length() == 0) {
-    appendConfigSaveLog("Erreur : corps de requête vide");
-    srv->send(400, "application/json", R"({"error":"No body"})");
+    recordIoSaveFinish(&progress, "receive_request", false,
+                       "Aucun contenu fourni");
+    DynamicJsonDocument errDoc(256);
+    errDoc["error"] = "no_body";
+    JsonArray events = errDoc.createNestedArray("events");
+    appendIoSaveEventsToJson(progress, events);
+    String payload;
+    serializeJson(errDoc, payload);
+    srv->send(400, "application/json", payload);
     return;
   }
-  appendConfigSaveLog(String("Requête reçue (") + body.length() + " octets)");
+  recordIoSaveFinish(&progress, "receive_request", true,
+                     String("Configuration reçue (") + body.length() +
+                         " octets)");
+
   size_t docCapacity = configJsonCapacityForPayload(body.length());
   if (docCapacity == 0) {
     docCapacity = configJsonCapacityForPayload(0);
   }
+
+  recordIoSaveStart(&progress, "parse_json", "Analyse du JSON reçu");
+  std::unique_ptr<DynamicJsonDocument> docPtr;
   while (true) {
-    DynamicJsonDocument doc(docCapacity);
-    DeserializationError parseErr = deserializeJson(doc, body);
-    if (parseErr == DeserializationError::NoMemory) {
-      if (docCapacity < CONFIG_JSON_MAX_CAPACITY) {
-        size_t nextCapacity = growConfigJsonCapacity(docCapacity);
-        if (nextCapacity > docCapacity) {
-          logPrintf(
-              "IO configuration JSON parse exceeded %u bytes; retrying with %u",
-              static_cast<unsigned>(docCapacity),
-              static_cast<unsigned>(nextCapacity));
-          String resizeMsg = String("Extension du tampon JSON (") +
-                             static_cast<unsigned long>(docCapacity) + " -> " +
-                             static_cast<unsigned long>(nextCapacity) +
-                             " octets)";
-          appendConfigSaveLog(resizeMsg);
-          docCapacity = nextCapacity;
-          continue;
-        }
+    docPtr.reset(new DynamicJsonDocument(docCapacity));
+    if (docCapacity > 0 && docPtr->capacity() == 0) {
+      break;
+    }
+    DeserializationError parseErr = deserializeJson(*docPtr, body);
+    if (parseErr == DeserializationError::NoMemory &&
+        docCapacity < CONFIG_JSON_MAX_CAPACITY) {
+      size_t nextCapacity = growConfigJsonCapacity(docCapacity);
+      if (nextCapacity == docCapacity) {
+        break;
       }
-      appendConfigSaveLog("Erreur : charge utile trop volumineuse");
-      srv->send(400, "application/json",
-                R"({"error":"payload_too_large"})");
-      return;
+      logPrintf(
+          "IO configuration JSON parse exceeded %u bytes; retrying with %u",
+          static_cast<unsigned>(docCapacity),
+          static_cast<unsigned>(nextCapacity));
+      docCapacity = nextCapacity;
+      continue;
     }
     if (parseErr) {
-      appendConfigSaveLog(String("Erreur de parsing JSON: ") + parseErr.c_str());
+      recordIoSaveFinish(&progress, "parse_json", false,
+                         String("Analyse impossible (") + parseErr.c_str() +
+                             ")");
       DynamicJsonDocument errDoc(256);
       errDoc["error"] = "invalid_json";
       errDoc["detail"] = parseErr.c_str();
-      String errPayload;
-      serializeJson(errDoc, errPayload);
-      srv->send(400, "application/json", errPayload);
+      JsonArray events = errDoc.createNestedArray("events");
+      appendIoSaveEventsToJson(progress, events);
+      String payload;
+      serializeJson(errDoc, payload);
+      srv->send(400, "application/json", payload);
       return;
     }
-    if (doc.overflowed()) {
+    if (docPtr->overflowed()) {
       if (docCapacity < CONFIG_JSON_MAX_CAPACITY) {
         size_t nextCapacity = growConfigJsonCapacity(docCapacity);
-        if (nextCapacity > docCapacity) {
+        if (nextCapacity != docCapacity) {
           logPrintf("IO configuration JSON buffer overflowed %u bytes; retrying with %u",
                     static_cast<unsigned>(docCapacity),
                     static_cast<unsigned>(nextCapacity));
-          String resizeMsg = String("Extension du tampon JSON (") +
-                             static_cast<unsigned long>(docCapacity) + " -> " +
-                             static_cast<unsigned long>(nextCapacity) +
-                             " octets)";
-          appendConfigSaveLog(resizeMsg);
           docCapacity = nextCapacity;
           continue;
         }
       }
-      appendConfigSaveLog("Erreur : mémoire insuffisante pour le JSON reçu");
-      srv->send(400, "application/json",
-                R"({"error":"json_overflow"})");
-      return;
-    }
-    appendConfigSaveLog("JSON analysé avec succès");
-    Config previousConfig = config;
-    parseConfigFromJson(doc, config, &previousConfig, false,
-                        CONFIG_SECTION_MODULES | CONFIG_SECTION_IO);
-    size_t requestedInputEntries = countConfigEntries(doc["inputs"]);
-    size_t requestedOutputEntries = countConfigEntries(doc["outputs"]);
-    size_t expectedInputs = requestedInputEntries;
-    if (expectedInputs > MAX_INPUTS) {
-      expectedInputs = MAX_INPUTS;
-    }
-    size_t expectedOutputs = requestedOutputEntries;
-    if (expectedOutputs > MAX_OUTPUTS) {
-      expectedOutputs = MAX_OUTPUTS;
-    }
-    bool inputMismatch = config.inputCount < expectedInputs;
-    bool outputMismatch = config.outputCount < expectedOutputs;
-    if (inputMismatch || outputMismatch) {
-      String mismatchSummary;
-      if (inputMismatch) {
-        mismatchSummary += String("entrées demandées ") +
-                           static_cast<unsigned>(expectedInputs) + " appliquées " +
-                           static_cast<unsigned>(config.inputCount);
-      }
-      if (outputMismatch) {
-        if (mismatchSummary.length() > 0) {
-          mismatchSummary += "; ";
-        }
-        mismatchSummary += String("sorties demandées ") +
-                           static_cast<unsigned>(expectedOutputs) + " appliquées " +
-                           static_cast<unsigned>(config.outputCount);
-      }
-      logPrintf("IO configuration request discarded: %s",
-                mismatchSummary.length() > 0 ? mismatchSummary.c_str()
-                                             : "incomplete configuration");
-      appendConfigSaveLog(String("Erreur : ") +
-                          "certaines voies n'ont pas été interprétées (" +
-                          mismatchSummary + ")");
-      config = previousConfig;
+      recordIoSaveFinish(&progress, "parse_json", false,
+                         "Mémoire insuffisante pour analyser le JSON");
       DynamicJsonDocument errDoc(256);
-      errDoc["error"] = "invalid_io_config";
-      if (inputMismatch) {
-        errDoc["detail"] = outputMismatch ? "inputs_outputs_dropped"
-                                           : "inputs_dropped";
-        errDoc["requestedInputs"] = static_cast<uint8_t>(expectedInputs);
-        errDoc["appliedInputs"] = config.inputCount;
-      }
-      if (outputMismatch) {
-        if (!inputMismatch) {
-          errDoc["detail"] = "outputs_dropped";
-        }
-        errDoc["requestedOutputs"] = static_cast<uint8_t>(expectedOutputs);
-        errDoc["appliedOutputs"] = config.outputCount;
-      }
-      String errPayload;
-      serializeJson(errDoc, errPayload);
-      appendConfigSaveLog("Réponse d'erreur envoyée au client");
-      appendConfigSaveLog("--- Fin de sauvegarde de configuration IO ---");
-      srv->send(422, "application/json", errPayload);
+      errDoc["error"] = "json_overflow";
+      JsonArray events = errDoc.createNestedArray("events");
+      appendIoSaveEventsToJson(progress, events);
+      String payload;
+      serializeJson(errDoc, payload);
+      srv->send(400, "application/json", payload);
       return;
     }
-    appendConfigSaveLog("Configuration appliquée en mémoire");
-    if (!saveIoConfig()) {
-      appendConfigSaveLog("Erreur : écriture du fichier io_config.json");
-      config = previousConfig;
-      srv->send(500, "application/json",
-                R"({"error":"save_failed"})");
-      return;
-    }
-    appendConfigSaveLog("Vérification du fichier écrit");
-    String verifyError;
-    if (!verifyConfigStored(config, IO_CONFIG_FILE_PATH,
-                            CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
-                            verifyError)) {
-      logPrintf("IO configuration verification failed: %s",
-                verifyError.c_str());
-      appendConfigSaveLog(String("Erreur : vérification échouée (") +
-                          (verifyError.length() ? verifyError
-                                                 : String("inconnue")) +
-                          ")");
-      config = previousConfig;
-      if (!saveIoConfig()) {
-        appendConfigSaveLog(
-            "Erreur : restauration de la configuration précédente échouée");
-        logMessage(
-            "Failed to restore IO configuration after verification failure");
-      } else {
-        appendConfigSaveLog("Configuration précédente restaurée");
-      }
-      DynamicJsonDocument errDoc(256);
-      errDoc["error"] = "verify_failed";
-      if (verifyError.length() > 0) {
-        errDoc["detail"] = verifyError;
-      }
-      String errPayload;
-      serializeJson(errDoc, errPayload);
-      srv->send(500, "application/json", errPayload);
-      appendConfigSaveLog("Réponse d'erreur envoyée au client");
-      appendConfigSaveLog("--- Fin de sauvegarde de configuration IO ---");
-      return;
-    }
-    appendConfigSaveLog("Vérification réussie");
-    applyIoRuntimeChanges(previousConfig);
-    appendConfigSaveLog("Sauvegarde terminée avec succès");
-    appendConfigSaveLog("Configuration appliquée sans redémarrage");
-    DynamicJsonDocument respDoc(384);
-    respDoc["status"] = "ok";
-    respDoc["message"] = "Configuration appliquée sans redémarrage.";
-    respDoc["requiresReboot"] = false;
-    JsonObject applied = respDoc.createNestedObject("applied");
-    applied["inputs"] = config.inputCount;
-    applied["outputs"] = config.outputCount;
+    break;
+  }
+
+  if (!docPtr || docPtr->capacity() == 0) {
+    recordIoSaveFinish(&progress, "parse_json", false,
+                       "Allocation mémoire impossible pour le JSON");
+    DynamicJsonDocument errDoc(256);
+    errDoc["error"] = "alloc_failed";
+    JsonArray events = errDoc.createNestedArray("events");
+    appendIoSaveEventsToJson(progress, events);
     String payload;
-    serializeJson(respDoc, payload);
-    srv->send(200, "application/json", payload);
-    appendConfigSaveLog("Réponse envoyée au client");
-    appendConfigSaveLog("--- Fin de sauvegarde de configuration IO ---");
+    serializeJson(errDoc, payload);
+    srv->send(500, "application/json", payload);
     return;
   }
+
+  recordIoSaveFinish(&progress, "parse_json", true,
+                     "JSON analysé avec succès");
+
+  DynamicJsonDocument &doc = *docPtr;
+  Config previousConfig = config;
+
+  recordIoSaveStart(&progress, "apply_memory",
+                    "Application de la configuration en mémoire");
+  parseConfigFromJson(doc, config, &previousConfig, false,
+                      CONFIG_SECTION_MODULES | CONFIG_SECTION_IO);
+  size_t requestedInputEntries = countConfigEntries(doc["inputs"]);
+  size_t requestedOutputEntries = countConfigEntries(doc["outputs"]);
+  size_t expectedInputs = requestedInputEntries;
+  if (expectedInputs > MAX_INPUTS) {
+    expectedInputs = MAX_INPUTS;
+  }
+  size_t expectedOutputs = requestedOutputEntries;
+  if (expectedOutputs > MAX_OUTPUTS) {
+    expectedOutputs = MAX_OUTPUTS;
+  }
+  bool inputMismatch = config.inputCount < expectedInputs;
+  bool outputMismatch = config.outputCount < expectedOutputs;
+  if (inputMismatch || outputMismatch) {
+    String mismatchSummary;
+    if (inputMismatch) {
+      mismatchSummary += String("entrées demandées ") +
+                         static_cast<unsigned>(expectedInputs) +
+                         " appliquées " +
+                         static_cast<unsigned>(config.inputCount);
+    }
+    if (outputMismatch) {
+      if (mismatchSummary.length() > 0) {
+        mismatchSummary += "; ";
+      }
+      mismatchSummary += String("sorties demandées ") +
+                         static_cast<unsigned>(expectedOutputs) +
+                         " appliquées " +
+                         static_cast<unsigned>(config.outputCount);
+    }
+    recordIoSaveFinish(&progress, "apply_memory", false,
+                       mismatchSummary.length() ? mismatchSummary
+                                                : "Configuration incomplète");
+    config = previousConfig;
+    DynamicJsonDocument errDoc(320);
+    errDoc["error"] = "invalid_io_config";
+    if (inputMismatch && outputMismatch) {
+      errDoc["detail"] = "inputs_outputs_dropped";
+    } else if (inputMismatch) {
+      errDoc["detail"] = "inputs_dropped";
+    } else if (outputMismatch) {
+      errDoc["detail"] = "outputs_dropped";
+    }
+    if (inputMismatch) {
+      errDoc["requestedInputs"] = static_cast<uint8_t>(expectedInputs);
+      errDoc["appliedInputs"] = config.inputCount;
+    }
+    if (outputMismatch) {
+      errDoc["requestedOutputs"] = static_cast<uint8_t>(expectedOutputs);
+      errDoc["appliedOutputs"] = config.outputCount;
+    }
+    JsonArray events = errDoc.createNestedArray("events");
+    appendIoSaveEventsToJson(progress, events);
+    String payload;
+    serializeJson(errDoc, payload);
+    srv->send(422, "application/json", payload);
+    return;
+  }
+  recordIoSaveFinish(&progress, "apply_memory", true,
+                     String("Configuration en mémoire (") + config.inputCount +
+                         " entrées, " + config.outputCount + " sorties)");
+
+  recordIoSaveStart(&progress, "save_storage",
+                    "Sauvegarde sur le stockage interne");
+  String saveError;
+  if (!saveIoConfigWithProgress(&progress, saveError)) {
+    String detail = describeIoSaveError(saveError);
+    recordIoSaveFinish(&progress, "save_storage", false, detail);
+    config = previousConfig;
+    DynamicJsonDocument errDoc(320);
+    errDoc["error"] = "save_failed";
+    if (saveError.length() > 0) {
+      errDoc["detail"] = saveError;
+    }
+    JsonArray events = errDoc.createNestedArray("events");
+    appendIoSaveEventsToJson(progress, events);
+    String payload;
+    serializeJson(errDoc, payload);
+    srv->send(500, "application/json", payload);
+    return;
+  }
+  recordIoSaveFinish(&progress, "save_storage", true,
+                     "Fichier io_config.json mis à jour");
+
+  recordIoSaveStart(&progress, "apply_runtime",
+                    "Application sans redémarrage");
+  applyIoRuntimeChanges(previousConfig);
+  recordIoSaveFinish(&progress, "apply_runtime", true,
+                     "Configuration active actualisée");
+
+  DynamicJsonDocument respDoc(512);
+  respDoc["status"] = "ok";
+  respDoc["message"] = "Configuration sauvegardée sans redémarrage.";
+  respDoc["requiresReboot"] = false;
+  JsonObject applied = respDoc.createNestedObject("applied");
+  applied["inputs"] = config.inputCount;
+  applied["outputs"] = config.outputCount;
+  JsonArray events = respDoc.createNestedArray("events");
+  appendIoSaveEventsToJson(progress, events);
+  String payload;
+  serializeJson(respDoc, payload);
+  srv->send(200, "application/json", payload);
 }
 
 template <typename ServerT>
