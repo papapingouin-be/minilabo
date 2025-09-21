@@ -208,6 +208,7 @@ static const char *USER_FILES_DIR = "/private";
 static const char *SAMPLE_FILE_PATH = "/private/sample.html";
 static const char *IO_CONFIG_FILE_PATH = "/private/io_config.json";
 static const char *CONFIG_SAVE_LOG_PATH = "/private/sauvegardeconfig.log";
+static const char *IO_LOG_CSV_PATH = "/private/io-config-events.csv";
 static const char *IO_CONFIG_BACKUP_FILE_PATH = "/private/io_config.bak";
 static const char *IO_CONFIG_TEMP_FILE_PATH = "/private/io_config.tmp";
 static const char *INTERFACE_CONFIG_FILE_PATH = "/private/interface_config.json";
@@ -844,6 +845,218 @@ static String summariseLogDetail(JsonVariantConst detail) {
     output += F("...");
   }
   return output;
+}
+
+struct IoLogEvent {
+  String timestamp;
+  String source;
+  String eventType;
+  String message;
+  String detail;
+  String sessionKind;
+  String sessionTitle;
+  uint32_t step = 0;
+  bool hasStep = false;
+};
+
+static void normaliseIoLogEvent(IoLogEvent &event) {
+  if (event.source.length() == 0) {
+    event.source = F("client");
+  }
+  if (event.eventType.length() == 0) {
+    event.eventType = F("message");
+  }
+  static const size_t kMaxDetail = 512;
+  if (event.detail.length() > kMaxDetail) {
+    event.detail.remove(kMaxDetail);
+    event.detail += F("...");
+  }
+}
+
+static String formatIoLogMessage(const IoLogEvent &event) {
+  String line;
+  line.reserve(128 + event.detail.length());
+  line += '[';
+  line += event.source;
+  if (event.sessionKind.length() > 0) {
+    line += '/';
+    line += event.sessionKind;
+  }
+  line += "] ";
+  if (event.sessionTitle.length() > 0) {
+    line += event.sessionTitle;
+    if (event.hasStep && event.step > 0) {
+      line += F(" - etape ");
+      line += event.step;
+    }
+    line += F(" : ");
+  } else if (event.hasStep && event.step > 0) {
+    line += F("Etape ");
+    line += event.step;
+    line += F(" : ");
+  }
+  if (event.message.length() > 0) {
+    line += event.message;
+  } else {
+    line += F("evenement ");
+    line += event.eventType;
+  }
+  if (event.detail.length() > 0) {
+    line += F(" | ");
+    line += event.detail;
+  }
+  return line;
+}
+
+static String escapeCsvField(const String &value) {
+  String escaped = value;
+  bool needsQuotes = false;
+  if (escaped.indexOf('"') >= 0) {
+    escaped.replace("\"", "\"\"");
+    needsQuotes = true;
+  }
+  for (size_t i = 0; i < escaped.length() && !needsQuotes; i++) {
+    char c = escaped.charAt(i);
+    if (c == ',' || c == '\n' || c == '\r') {
+      needsQuotes = true;
+    }
+  }
+  if (needsQuotes) {
+    String quoted;
+    quoted.reserve(escaped.length() + 2);
+    quoted += '"';
+    quoted += escaped;
+    quoted += '"';
+    return quoted;
+  }
+  return escaped;
+}
+
+static String buildIoLogCsvLine(const IoLogEvent &event) {
+  String stepStr;
+  if (event.hasStep) {
+    stepStr = String(event.step);
+  }
+  const String fields[8] = {
+      event.timestamp,     event.source,       event.eventType,
+      event.sessionKind,   event.sessionTitle, stepStr,
+      event.message,       event.detail};
+  String line;
+  for (size_t i = 0; i < 8; i++) {
+    if (i > 0) {
+      line += ',';
+    }
+    line += escapeCsvField(fields[i]);
+  }
+  line += '\n';
+  return line;
+}
+
+static bool parseCsvFields(const String &line, String *fields, size_t maxFields,
+                           size_t &fieldCount) {
+  fieldCount = 0;
+  String current;
+  bool inQuotes = false;
+  size_t length = line.length();
+  for (size_t i = 0; i < length; i++) {
+    char c = line.charAt(i);
+    if (c == '\r') {
+      continue;
+    }
+    if (inQuotes) {
+      if (c == '"') {
+        if (i + 1 < length && line.charAt(i + 1) == '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        current += c;
+      }
+    } else {
+      if (c == '"') {
+        inQuotes = true;
+      } else if (c == ',') {
+        if (fieldCount >= maxFields) {
+          return false;
+        }
+        fields[fieldCount++] = current;
+        current = String();
+      } else if (c == '\n') {
+        break;
+      } else {
+        current += c;
+      }
+    }
+  }
+  if (inQuotes) {
+    return false;
+  }
+  if (fieldCount < maxFields) {
+    fields[fieldCount++] = current;
+  }
+  return true;
+}
+
+static bool parseIoLogCsvEvent(const String &line, IoLogEvent &event) {
+  String fields[8];
+  size_t count = 0;
+  if (!parseCsvFields(line, fields, 8, count)) {
+    return false;
+  }
+  if (count < 3) {
+    return false;
+  }
+  event.timestamp = fields[0];
+  event.source = fields[1];
+  event.eventType = fields[2];
+  if (count > 3) {
+    event.sessionKind = fields[3];
+  } else {
+    event.sessionKind = String();
+  }
+  if (count > 4) {
+    event.sessionTitle = fields[4];
+  } else {
+    event.sessionTitle = String();
+  }
+  if (count > 5 && fields[5].length() > 0) {
+    event.step = static_cast<uint32_t>(fields[5].toInt());
+    event.hasStep = true;
+  } else {
+    event.step = 0;
+    event.hasStep = false;
+  }
+  if (count > 6) {
+    event.message = fields[6];
+  } else {
+    event.message = String();
+  }
+  if (count > 7) {
+    event.detail = fields[7];
+  } else {
+    event.detail = String();
+  }
+  return true;
+}
+
+static void appendIoLogCsvEntry(const IoLogEvent &event) {
+  if (!ensureUserDirectory()) {
+    return;
+  }
+  bool exists = LittleFS.exists(IO_LOG_CSV_PATH);
+  File logFile = LittleFS.open(IO_LOG_CSV_PATH, exists ? "a" : "w");
+  if (!logFile) {
+    logPrintf("Failed to append io log csv: %s", IO_LOG_CSV_PATH);
+    return;
+  }
+  if (!exists) {
+    logFile.println(F("timestamp,source,event,session_kind,session_title,step,message,detail"));
+  }
+  String line = buildIoLogCsvLine(event);
+  logFile.print(line);
+  logFile.close();
 }
 
 static bool otaUploadAuthorized = false;
@@ -4822,68 +5035,60 @@ void registerRoutes(ServerT &server) {
       srv->send(400, "application/json", R"({"error":"empty_body"})");
       return;
     }
-    DynamicJsonDocument doc(2048);
-    DeserializationError err = deserializeJson(doc, body);
-    if (err) {
-      DynamicJsonDocument errDoc(192);
-      errDoc["error"] = "invalid_json";
-      errDoc["detail"] = err.c_str();
-      String payload;
-      serializeJson(errDoc, payload);
-      srv->send(400, "application/json", payload);
+    String trimmed = body;
+    trimmed.trim();
+    if (trimmed.length() == 0) {
+      srv->send(400, "application/json", R"({"error":"empty_body"})");
       return;
     }
-    String source = doc["source"].as<String>();
-    if (source.length() == 0) {
-      source = F("client");
-    }
-    String eventType = doc["event"].as<String>();
-    if (eventType.length() == 0) {
-      eventType = F("message");
-    }
-    String message = doc["message"].as<String>();
-    uint32_t step = doc["step"] | 0;
-    JsonVariantConst detailVar = doc["detail"];
-    String detailText = summariseLogDetail(detailVar);
-    JsonVariantConst sessionVar = doc["session"];
-    String sessionKind;
-    String sessionTitle;
-    if (!sessionVar.isNull()) {
-      sessionKind = sessionVar["kind"].as<String>();
-      sessionTitle = sessionVar["title"].as<String>();
-    }
-    String line;
-    line.reserve(128 + detailText.length());
-    line += '[';
-    line += source;
-    if (sessionKind.length() > 0) {
-      line += '/';
-      line += sessionKind;
-    }
-    line += "] ";
-    if (sessionTitle.length() > 0) {
-      line += sessionTitle;
-      if (step > 0) {
-        line += F(" - etape ");
-        line += step;
+    IoLogEvent event;
+    bool parsed = false;
+    if (trimmed.charAt(0) == '{') {
+      DynamicJsonDocument doc(2048);
+      DeserializationError err = deserializeJson(doc, trimmed);
+      if (err) {
+        DynamicJsonDocument errDoc(192);
+        errDoc["error"] = "invalid_json";
+        errDoc["detail"] = err.c_str();
+        String payload;
+        serializeJson(errDoc, payload);
+        srv->send(400, "application/json", payload);
+        return;
       }
-      line += F(" : ");
-    } else if (step > 0) {
-      line += F("Etape ");
-      line += step;
-      line += F(" : ");
-    }
-    if (message.length() > 0) {
-      line += message;
+      event.timestamp = doc["timestamp"].as<String>();
+      event.source = doc["source"].as<String>();
+      event.eventType = doc["event"].as<String>();
+      event.message = doc["message"].as<String>();
+      if (doc.containsKey("step")) {
+        event.step = doc["step"] | 0;
+        event.hasStep = true;
+      }
+      JsonVariantConst detailVar = doc["detail"];
+      event.detail = summariseLogDetail(detailVar);
+      JsonVariantConst sessionVar = doc["session"];
+      if (!sessionVar.isNull()) {
+        event.sessionKind = sessionVar["kind"].as<String>();
+        event.sessionTitle = sessionVar["title"].as<String>();
+      }
+      parsed = true;
     } else {
-      line += F("evenement ");
-      line += eventType;
+      if (!parseIoLogCsvEvent(trimmed, event)) {
+        srv->send(400, "application/json", R"({"error":"invalid_csv"})");
+        return;
+      }
+      parsed = true;
     }
-    if (detailText.length() > 0) {
-      line += F(" | ");
-      line += detailText;
+    if (!parsed) {
+      srv->send(400, "application/json", R"({"error":"invalid_payload"})");
+      return;
     }
+    if (event.timestamp.length() == 0) {
+      event.timestamp = String(millis());
+    }
+    normaliseIoLogEvent(event);
+    String line = formatIoLogMessage(event);
     logMessage(line);
+    appendIoLogCsvEntry(event);
     srv->send(200, "application/json", R"({"status":"ok"})");
   });
 

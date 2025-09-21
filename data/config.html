@@ -438,6 +438,48 @@ function describeErrorMessage(err, fallback) {
   return fallback;
 }
 
+function serialiseIoLogDetail(detail) {
+  if (detail === undefined || detail === null) {
+    return '';
+  }
+  if (typeof detail === 'string') {
+    return detail;
+  }
+  try {
+    return JSON.stringify(detail);
+  } catch (err) {
+    try {
+      return String(detail);
+    } catch (stringErr) {
+      return '';
+    }
+  }
+}
+
+function escapeIoLogCsvField(value) {
+  if (value === undefined || value === null) {
+    return '';
+  }
+  const str = String(value);
+  const escaped = str.replace(/"/g, '""');
+  return /[",\n\r]/.test(escaped) ? `"${escaped}"` : escaped;
+}
+
+function buildIoLogCsv(entry) {
+  const session = entry.session || {};
+  const fields = [
+    entry.timestamp !== undefined && entry.timestamp !== null ? entry.timestamp : '',
+    entry.source || '',
+    entry.event || '',
+    session.kind || '',
+    session.title || '',
+    entry.step !== undefined && entry.step !== null ? entry.step : '',
+    entry.message || '',
+    entry.detail || ''
+  ];
+  return fields.map(escapeIoLogCsvField).join(',') + '\n';
+}
+
 function markRebootPrompt(active) {
   const rebootBtn = document.getElementById('rebootBtn');
   if (!rebootBtn) return;
@@ -467,7 +509,7 @@ function recordIoLogEvent(event, message, detail, { stepIncrement = false, force
     timestamp: Date.now()
   };
   if (detail !== undefined) {
-    payload.detail = detail;
+    payload.detail = serialiseIoLogDetail(detail);
   }
   if (session) {
     if (typeof session.step !== 'number') {
@@ -496,10 +538,11 @@ function triggerIoLogFlush() {
       while (ioLogQueue.length) {
         const entry = ioLogQueue.shift();
         try {
+          const csvBody = buildIoLogCsv(entry);
           await authFetch(IO_LOG_ENDPOINT, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(entry)
+            headers: { 'Content-Type': 'text/csv' },
+            body: csvBody
           });
         } catch (err) {
           console.warn('Impossible d\'envoyer un événement de configuration', err);
