@@ -68,6 +68,14 @@
     .modal-info ul { margin: 0.4em 0 0 1.2em; padding: 0; }
     .modal-info li { margin-bottom: 0.3em; }
     button.small { padding: 0.35em 0.75em; font-size: 0.85em; }
+    .progress-list { list-style: none; margin: 0; padding: 0.6em 0.8em; border: 1px solid #d0d0d0; border-radius: 6px; max-height: 260px; overflow-y: auto; background: #fafafa; }
+    .progress-list li { margin: 0.35em 0; font-size: 0.9em; display: flex; align-items: center; gap: 0.4em; color: #2c3e50; }
+    .progress-list li::before { content: '•'; color: #7f8c8d; }
+    .progress-list li.progress-start { color: #2c3e50; }
+    .progress-list li.progress-success { color: #256029; }
+    .progress-list li.progress-success::before { color: #27ae60; }
+    .progress-list li.progress-failure { color: #c0392b; }
+    .progress-list li.progress-failure::before { color: #c0392b; }
   </style>
   <script src="auth.js"></script>
 </head>
@@ -126,8 +134,8 @@
   </fieldset>
 
   <div class="form-actions">
-    <button type="button" id="saveBtnStandard" class="primary">Sauvegarde standard</button>
-    <button type="button" id="saveBtnDirect" class="secondary">Sauvegarde directe</button>
+    <button type="button" id="saveTransactionalBtn" class="primary">Sauvegarde sécurisée (transactionnelle)</button>
+    <button type="button" id="saveDirectBtn" class="attention">Sauvegarde rapide (directe)</button>
     <button type="button" id="rebootBtn" class="secondary">Redémarrer</button>
     <span id="status" style="margin-left:1em;"></span>
   </div>
@@ -159,6 +167,17 @@
   </div>
 </div>
 
+<div id="saveProgressModal" class="modal hidden" role="dialog" aria-modal="true">
+  <div class="modal-content">
+    <h2 id="saveProgressTitle">Suivi de la sauvegarde</h2>
+    <p id="saveProgressSubtitle" class="hint"></p>
+    <ul id="saveProgressList" class="progress-list"></ul>
+    <div class="modal-actions">
+      <button type="button" class="secondary" id="saveProgressClose">Fermer</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const MAX_INPUTS = 4;
 const MAX_OUTPUTS = 2;
@@ -181,6 +200,28 @@ const OUTPUT_TYPES = [
   { value: 'mcp4725', label: 'DAC I²C MCP4725' },
   { value: 'disabled', label: 'Désactivée' }
 ];
+const SAVE_METHODS = {
+  transactional: {
+    id: 'transactional',
+    endpoint: '/api/config/io/save-transactional',
+    buttonId: 'saveTransactionalBtn',
+    title: 'Méthode transactionnelle',
+    subtitle:
+      'Écriture sécurisée via fichier temporaire, sauvegarde et vérification.',
+    status:
+      'Configuration sauvegardée via la méthode transactionnelle.',
+  },
+  direct: {
+    id: 'direct',
+    endpoint: '/api/config/io/save-direct',
+    buttonId: 'saveDirectBtn',
+    title: 'Méthode directe',
+    subtitle:
+      'Écriture immédiate du fichier principal sans vérification additionnelle.',
+    status:
+      'Configuration sauvegardée via la méthode directe.',
+  },
+};
 const MODULE_DEPENDENCIES = {
   input: {
     ads1115: 'ads1115',
@@ -394,39 +435,14 @@ const STATUS_SYNCED = 'synced';
 const STATUS_PENDING = 'pending';
 let lastAppliedInputs = new Map();
 let lastAppliedOutputs = new Map();
-const SAVE_METHODS = {
-  transactional: {
-    buttonId: 'saveBtnStandard',
-    endpoint: '/api/config/io/set',
-    label: 'standard',
-    busyLabel: 'Sauvegarde standard...',
-    statusInProgress: 'Sauvegarde standard en cours...',
-    statusDuplicate: 'Une sauvegarde standard est déjà en cours...',
-    defaultSuccess: 'Sauvegarde standard terminée.',
-  },
-  direct: {
-    buttonId: 'saveBtnDirect',
-    endpoint: '/api/config/io/save-direct',
-    label: 'directe',
-    busyLabel: 'Sauvegarde directe...',
-    statusInProgress: 'Sauvegarde directe en cours...',
-    statusDuplicate: 'Une sauvegarde directe est déjà en cours...',
-    defaultSuccess: 'Sauvegarde directe terminée.',
-  },
-};
-const saveState = {
-  transactional: false,
-  direct: false,
-};
-
-function isAnySaveInProgress() {
-  return saveState.transactional || saveState.direct;
-}
-
-function otherSaveMethod(method) {
-  return method === 'transactional' ? 'direct' : 'transactional';
-}
-
+let saveInProgress = false;
+let activeSaveMethod = null;
+let saveProgressModal = null;
+let saveProgressList = null;
+let saveProgressClose = null;
+let saveProgressTitle = null;
+let saveProgressSubtitle = null;
+let rebootShouldBeEnabled = false;
 function normaliseErrorForLog(err) {
   if (err instanceof Error) {
     return { message: err.message, stack: err.stack };
@@ -519,6 +535,62 @@ function markRebootPrompt(active) {
     rebootBtn.classList.add('attention');
   } else {
     rebootBtn.classList.remove('attention');
+  }
+}
+
+function openSaveProgressModal(method) {
+  if (!saveProgressModal) return;
+  saveProgressModal.classList.remove('hidden');
+  activeSaveMethod = method ? method.id : null;
+  if (saveProgressTitle) {
+    if (method && method.title) {
+      saveProgressTitle.textContent = `Suivi de la sauvegarde – ${method.title}`;
+    } else {
+      saveProgressTitle.textContent = 'Suivi de la sauvegarde';
+    }
+  }
+  if (saveProgressSubtitle) {
+    if (method && method.subtitle) {
+      saveProgressSubtitle.textContent = method.subtitle;
+      saveProgressSubtitle.classList.remove('hidden');
+    } else {
+      saveProgressSubtitle.textContent = '';
+      saveProgressSubtitle.classList.add('hidden');
+    }
+  }
+  if (saveProgressList) {
+    saveProgressList.innerHTML = '';
+    saveProgressList.scrollTop = 0;
+  }
+  if (saveProgressClose) {
+    saveProgressClose.disabled = true;
+  }
+}
+
+function closeSaveProgressModal() {
+  if (!saveProgressModal) return;
+  activeSaveMethod = null;
+  saveProgressModal.classList.add('hidden');
+}
+
+function appendSaveProgressEvent(message, type = 'start', success = true) {
+  if (!saveProgressList) return;
+  const item = document.createElement('li');
+  item.textContent = message;
+  if (type === 'start') {
+    item.classList.add('progress-start');
+  } else if (success) {
+    item.classList.add('progress-success');
+  } else {
+    item.classList.add('progress-failure');
+  }
+  saveProgressList.appendChild(item);
+  saveProgressList.scrollTop = saveProgressList.scrollHeight;
+}
+
+function allowSaveProgressClose() {
+  if (saveProgressClose) {
+    saveProgressClose.disabled = false;
   }
 }
 
@@ -1586,102 +1658,101 @@ async function loadConfig() {
 }
 
 // Serialize form to config JSON and post to server
-async function saveConfig(method) {
+async function saveConfig(methodKey) {
   const statusEl = document.getElementById('status');
-  const meta = SAVE_METHODS[method];
-  if (!meta) {
-    console.warn('[IO Config] Méthode de sauvegarde inconnue :', method);
+  const method = SAVE_METHODS[methodKey];
+  if (!method) {
+    console.error('Méthode de sauvegarde inconnue:', methodKey);
     if (statusEl) {
       statusEl.textContent = 'Méthode de sauvegarde inconnue.';
     }
     return;
   }
-
-  if (saveState[method]) {
+  if (saveInProgress) {
     if (statusEl) {
-      statusEl.textContent = meta.statusDuplicate;
+      const running = activeSaveMethod && SAVE_METHODS[activeSaveMethod]
+        ? SAVE_METHODS[activeSaveMethod].title
+        : 'une autre méthode';
+      statusEl.textContent = `Une sauvegarde est déjà en cours (${running}).`;
     }
     return;
   }
 
-  const alternate = otherSaveMethod(method);
-  if (saveState[alternate]) {
-    if (statusEl) {
-      const otherLabel = SAVE_METHODS[alternate].label;
-      statusEl.textContent = `Une sauvegarde ${otherLabel} est déjà en cours...`;
-    }
-    return;
+  const methodButton = document.getElementById(method.buttonId);
+  const otherButtons = Object.keys(SAVE_METHODS)
+    .filter(key => key !== methodKey)
+    .map(key => document.getElementById(SAVE_METHODS[key].buttonId))
+    .filter(btn => !!btn);
+  const buttonsToDisable = [];
+  if (methodButton) {
+    buttonsToDisable.push(methodButton);
   }
-
-  const button = document.getElementById(meta.buttonId);
-  const otherButtonId = SAVE_METHODS[alternate] ? SAVE_METHODS[alternate].buttonId : null;
-  const otherButton = otherButtonId ? document.getElementById(otherButtonId) : null;
+  buttonsToDisable.push(...otherButtons);
   const rebootBtn = document.getElementById('rebootBtn');
-  const originalLabel = button ? (button.dataset.label || button.textContent) : '';
-  if (button && !button.dataset.label) {
-    button.dataset.label = originalLabel;
-  }
 
-  const initialRebootDisabled = rebootBtn ? rebootBtn.disabled : false;
-  let rebootShouldBeEnabled = false;
+  buttonsToDisable.forEach(btn => {
+    if (btn && !btn.dataset.label) {
+      btn.dataset.label = btn.textContent;
+    }
+  });
 
   const restoreUi = () => {
-    saveState[method] = false;
-    if (button) {
-      button.disabled = false;
-      const label = button.dataset.label || originalLabel || 'Enregistrer';
-      button.textContent = label;
-    }
-    if (otherButton) {
-      otherButton.disabled = saveState[alternate];
-    }
-    if (rebootBtn) {
-      if (rebootShouldBeEnabled) {
-        rebootBtn.disabled = false;
-      } else {
-        rebootBtn.disabled = isAnySaveInProgress() ? true : initialRebootDisabled;
+    buttonsToDisable.forEach(btn => {
+      if (!btn) return;
+      btn.disabled = false;
+      if (btn.dataset.label) {
+        btn.textContent = btn.dataset.label;
       }
+    });
+    if (rebootBtn) {
+      rebootBtn.disabled = false;
     }
     markRebootPrompt(rebootShouldBeEnabled);
+    saveInProgress = false;
+    allowSaveProgressClose();
   };
 
-  saveState[method] = true;
+  saveInProgress = true;
   refreshModuleStateFromForm();
+  rebootShouldBeEnabled = false;
   markRebootPrompt(false);
-  if (button) {
-    button.disabled = true;
-    button.textContent = meta.busyLabel;
-  }
-  if (otherButton) {
-    otherButton.disabled = true;
+  buttonsToDisable.forEach(btn => {
+    if (btn) {
+      btn.disabled = true;
+    }
+  });
+  if (methodButton) {
+    methodButton.textContent = 'Sauvegarde en cours...';
   }
   if (rebootBtn) {
     rebootBtn.disabled = true;
   }
   if (statusEl) {
-    statusEl.textContent = meta.statusInProgress;
+    statusEl.textContent = `Sauvegarde ${method.title} en cours...`;
   }
+
+  openSaveProgressModal(method);
+  appendSaveProgressEvent('Préparation de la configuration locale', 'start');
 
   let payload = '';
   try {
     const cfg = {};
     cfg.modules = {
-      adc:      true,
-      ads1115: document.getElementById('modAds').checked,
-      pwm010:  document.getElementById('modPwm').checked,
-      mcp4725: document.getElementById('modDac').checked,
-      zmpt:    document.getElementById('modZmpt').checked,
-      zmct:    document.getElementById('modZmct').checked,
-      div:     document.getElementById('modDiv').checked
+      ads1115: !!moduleState.ads1115,
+      pwm010: !!moduleState.pwm010,
+      mcp4725: !!moduleState.mcp4725,
+      zmpt: !!moduleState.zmpt,
+      zmct: !!moduleState.zmct,
+      div: !!moduleState.div,
     };
     cfg.inputs = inputs.slice(0, MAX_INPUTS).map((item, idx) => {
       const obj = {
         name: item.name || `IN${idx + 1}`,
         type: item.type,
-        active: !!item.active
+        active: !!item.active,
       };
-      if (['adc','div','zmpt','zmct'].includes(item.type)) {
-        obj.pin = item.pin || '';
+      if (['adc', 'div', 'zmpt', 'zmct'].includes(item.type)) {
+        obj.pin = item.pin || 'A0';
       }
       if (item.type === 'ads1115') {
         obj.adsChannel = toInteger(item.adsChannel, 0, { min: 0, max: 3 });
@@ -1697,16 +1768,18 @@ async function saveConfig(method) {
       const obj = {
         name: item.name || `OUT${idx + 1}`,
         type: item.type,
-        active: !!item.active
+        active: !!item.active,
       };
-      if (['pwm010','gpio'].includes(item.type)) {
+      if (['pwm010', 'gpio'].includes(item.type)) {
         obj.pin = item.pin || '';
       }
       if (item.type === 'pwm010') {
         obj.pwmFreq = toInteger(item.pwmFreq, 2000, { min: 1 });
       }
       if (item.type === 'mcp4725') {
-        obj.i2cAddress = item.i2cAddress && item.i2cAddress.length ? item.i2cAddress : '0x60';
+        obj.i2cAddress = item.i2cAddress && item.i2cAddress.length
+          ? item.i2cAddress
+          : '0x60';
       }
       return obj;
     });
@@ -1714,6 +1787,11 @@ async function saveConfig(method) {
     payload = JSON.stringify(cfg);
   } catch (err) {
     console.error(err);
+    appendSaveProgressEvent(
+      'Fin : préparation de la configuration locale (erreur)',
+      'finish',
+      false,
+    );
     if (statusEl) {
       statusEl.textContent = 'Erreur lors de la préparation de la configuration.';
     }
@@ -1721,23 +1799,19 @@ async function saveConfig(method) {
     return;
   }
 
+  appendSaveProgressEvent('Fin : préparation de la configuration locale', 'finish', true);
+  appendSaveProgressEvent('Envoi de la configuration au serveur', 'start');
+
+  let serverResult = null;
+  let rawBody = '';
+
   try {
-    const response = await authFetch(meta.endpoint, {
+    const response = await authFetch(method.endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: payload
+      body: payload,
     });
-    const rawBody = await response.text();
-    if (!response.ok) {
-      const message = rawBody && rawBody.length
-        ? `Erreur lors de la sauvegarde (${rawBody})`
-        : `Erreur lors de la sauvegarde (${response.status})`;
-      if (statusEl) {
-        statusEl.textContent = message;
-      }
-      return;
-    }
-    let serverResult = null;
+    rawBody = await response.text();
     if (rawBody && rawBody.trim().length) {
       try {
         serverResult = JSON.parse(rawBody);
@@ -1745,34 +1819,66 @@ async function saveConfig(method) {
         console.warn('Réponse JSON inattendue lors de la sauvegarde IO', err, rawBody);
       }
     }
+
+    appendSaveProgressEvent(
+      response.ok
+        ? 'Fin : envoi de la configuration (réussi)'
+        : 'Fin : envoi de la configuration (échec)',
+      'finish',
+      response.ok,
+    );
+
+    if (serverResult && Array.isArray(serverResult.events)) {
+      serverResult.events.forEach(ev => {
+        if (!ev || typeof ev.message !== 'string') return;
+        const type = ev.type === 'finish' ? 'finish' : 'start';
+        const success = ev.success !== false;
+        appendSaveProgressEvent(ev.message, type, success);
+      });
+    }
+
+    if (!response.ok) {
+      if (statusEl) {
+        if (serverResult && serverResult.error) {
+          const detail = serverResult.detail ? ` (${serverResult.detail})` : '';
+          statusEl.textContent = `Erreur lors de la sauvegarde (${serverResult.error}${detail})`;
+        } else if (rawBody && rawBody.trim().length) {
+          statusEl.textContent = `Erreur lors de la sauvegarde (${rawBody.trim()})`;
+        } else {
+          statusEl.textContent = `Erreur lors de la sauvegarde (${response.status})`;
+        }
+      }
+      return;
+    }
+
     rebootShouldBeEnabled = serverResult && typeof serverResult.requiresReboot === 'boolean'
       ? !!serverResult.requiresReboot
       : false;
     if (statusEl) {
+      let message = method.status;
       if (serverResult && typeof serverResult.message === 'string' && serverResult.message.length) {
-        statusEl.textContent = serverResult.message;
-      } else if (rawBody && rawBody.trim().length) {
-        statusEl.textContent = rawBody;
+        message = serverResult.message;
+      }
+      if (serverResult && typeof serverResult.logFile === 'string' && serverResult.logFile.length) {
+        statusEl.textContent = `${message} (journal : ${serverResult.logFile})`;
       } else {
-        statusEl.textContent = meta.defaultSuccess;
+        statusEl.textContent = message;
       }
     }
     markAllSnapshotsSaved();
-    const logDetail = {
+    markRebootPrompt(rebootShouldBeEnabled);
+    logIoStep('Configuration IO sauvegardée côté serveur', {
+      method: method.id,
       inputs: inputs.length,
       outputs: outputs.length,
-      method: meta.label,
-    };
-    if (serverResult) {
-      logDetail.response = serverResult;
-    } else if (rawBody && rawBody.trim().length) {
-      logDetail.raw = rawBody;
-    }
-    logIoStep('Configuration IO sauvegardée côté serveur', logDetail);
+      response: serverResult || rawBody,
+    });
   } catch (err) {
     console.error(err);
+    appendSaveProgressEvent('Fin : envoi de la configuration (erreur)', 'finish', false);
     if (statusEl) {
-      statusEl.textContent = `Erreur lors de la sauvegarde (${meta.label}).`;
+      const message = describeErrorMessage(err, 'erreur inconnue');
+      statusEl.textContent = `Erreur lors de la sauvegarde (${message}).`;
     }
   } finally {
     restoreUi();
@@ -1834,8 +1940,12 @@ window.addEventListener('DOMContentLoaded', () => {
     });
   }
   window.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape' && modalState) {
-      closeIoModal(true);
+    if (ev.key === 'Escape') {
+      if (modalState) {
+        closeIoModal(true);
+      } else if (!saveInProgress && saveProgressModal && !saveProgressModal.classList.contains('hidden')) {
+        closeSaveProgressModal();
+      }
     }
   });
   renderIoList('input');
@@ -1847,15 +1957,37 @@ window.addEventListener('DOMContentLoaded', () => {
     .catch(err => {
       console.error(err);
     });
-  const saveBtnStandard = document.getElementById('saveBtnStandard');
-  if (saveBtnStandard) {
-    saveBtnStandard.addEventListener('click', () => {
+  saveProgressModal = document.getElementById('saveProgressModal');
+  saveProgressList = document.getElementById('saveProgressList');
+  saveProgressClose = document.getElementById('saveProgressClose');
+  saveProgressTitle = document.getElementById('saveProgressTitle');
+  saveProgressSubtitle = document.getElementById('saveProgressSubtitle');
+  if (saveProgressSubtitle) {
+    saveProgressSubtitle.classList.add('hidden');
+  }
+  if (saveProgressClose) {
+    saveProgressClose.addEventListener('click', () => {
+      if (!saveInProgress) {
+        closeSaveProgressModal();
+      }
+    });
+  }
+  if (saveProgressModal) {
+    saveProgressModal.addEventListener('click', (ev) => {
+      if (ev.target === saveProgressModal && !saveInProgress) {
+        closeSaveProgressModal();
+      }
+    });
+  }
+  const saveTransactionalBtn = document.getElementById('saveTransactionalBtn');
+  if (saveTransactionalBtn) {
+    saveTransactionalBtn.addEventListener('click', () => {
       saveConfig('transactional');
     });
   }
-  const saveBtnDirect = document.getElementById('saveBtnDirect');
-  if (saveBtnDirect) {
-    saveBtnDirect.addEventListener('click', () => {
+  const saveDirectBtn = document.getElementById('saveDirectBtn');
+  if (saveDirectBtn) {
+    saveDirectBtn.addEventListener('click', () => {
       saveConfig('direct');
     });
   }
@@ -1863,7 +1995,7 @@ window.addEventListener('DOMContentLoaded', () => {
   if (rebootBtnEl) {
     rebootBtnEl.addEventListener('click', async () => {
       const statusEl = document.getElementById('status');
-      if (isAnySaveInProgress()) {
+      if (saveInProgress) {
         if (statusEl) {
           statusEl.textContent = 'Sauvegarde en cours, redémarrage différé.';
         }
@@ -1874,7 +2006,7 @@ window.addEventListener('DOMContentLoaded', () => {
       try {
         rebootSucceeded = await requestReboot(statusEl);
       } finally {
-        rebootBtnEl.disabled = isAnySaveInProgress();
+        rebootBtnEl.disabled = saveInProgress;
       }
       if (rebootSucceeded) {
         markRebootPrompt(false);
