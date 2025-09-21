@@ -223,6 +223,13 @@ struct ConfigSavePaths {
   const char *backupPath;
 };
 
+struct ConfigSaveRequest {
+  uint8_t sections;
+  ConfigSavePaths paths;
+  const char *label;
+  bool logToFile;
+};
+
 static const ConfigSavePaths IO_CONFIG_PATHS = {
     IO_CONFIG_FILE_PATH,
     IO_CONFIG_TEMP_FILE_PATH,
@@ -362,74 +369,125 @@ static bool writeTextFile(const char *path, const String &content) {
   return true;
 }
 
-static void logConfigSaveFailure(const char *label,
+static const char *configSaveLabel(const ConfigSaveRequest &request) {
+  return request.label ? request.label : "Config";
+}
+
+static bool ensureConfigDirectory(const ConfigSaveRequest &request) {
+  if (ensureUserDirectory()) {
+    return true;
+  }
+  const char *label = configSaveLabel(request);
+  logMessage(String(label) + " config directory unavailable");
+  if (request.logToFile) {
+    appendConfigSaveLog(String("Erreur sauvegarde ") + label +
+                        ": répertoire indisponible");
+  }
+  return false;
+}
+
+static void logConfigSaveFailure(const ConfigSaveRequest &request,
                                  const char *path,
-                                 const String &detail,
-                                 bool logToFile) {
+                                 const String &detail) {
+  const char *label = configSaveLabel(request);
   logPrintf("%s configuration save failure: %s (%s)", label, detail.c_str(), path);
-  if (logToFile) {
+  if (request.logToFile) {
     appendConfigSaveLog(String("Erreur sauvegarde ") + label + " (" + path + "): " +
                         detail);
   }
 }
 
-static void logConfigSaveWarning(const char *label,
+static void logConfigSaveWarning(const ConfigSaveRequest &request,
                                  const char *path,
-                                 const String &detail,
-                                 bool logToFile) {
+                                 const String &detail) {
+  const char *label = configSaveLabel(request);
   logPrintf("%s configuration save warning: %s (%s)", label, detail.c_str(), path);
-  if (logToFile) {
+  if (request.logToFile) {
     appendConfigSaveLog(String("Avertissement sauvegarde ") + label + " (" + path +
                         "): " + detail);
   }
 }
 
-static bool atomicWriteConfig(const ConfigSavePaths &paths,
-                              const char *label,
-                              const String &payload,
-                              bool logToFile) {
-  if (LittleFS.exists(paths.tempPath) && !LittleFS.remove(paths.tempPath)) {
-    logConfigSaveFailure(label, paths.tempPath, "failed to clear temp file", logToFile);
-    return false;
-  }
-  if (!writeTextFile(paths.tempPath, payload)) {
-    if (logToFile) {
-      appendConfigSaveLog(String("Erreur lors de l'écriture de ") + paths.tempPath);
+static bool writeConfigTempFile(const ConfigSaveRequest &request,
+                                const String &payload,
+                                String &errorDetail) {
+  File temp = LittleFS.open(request.paths.tempPath, "w");
+  if (!temp) {
+    if (ensureLittleFsReadyWithFormat()) {
+      temp = LittleFS.open(request.paths.tempPath, "w");
     }
+  }
+  if (!temp) {
+    errorDetail = "open failed";
+    logPrintf("Failed to open %s for writing", request.paths.tempPath);
     return false;
   }
 
-  if (LittleFS.exists(paths.backupPath) && !LittleFS.remove(paths.backupPath)) {
-    logConfigSaveWarning(label, paths.backupPath,
-                         "failed to clear previous backup", logToFile);
+  size_t expected = payload.length();
+  size_t written = temp.write(
+      reinterpret_cast<const uint8_t *>(payload.c_str()), expected);
+  temp.flush();
+  temp.close();
+  if (written != expected) {
+    errorDetail = String("short write (") + written + "/" + expected + ")";
+    logPrintf("Short write when saving %s (%u/%u bytes)", request.paths.tempPath,
+              static_cast<unsigned>(written), static_cast<unsigned>(expected));
+    return false;
+  }
+  return true;
+}
+
+static bool performConfigSave(const ConfigSaveRequest &request,
+                              const String &payload) {
+  if (LittleFS.exists(request.paths.tempPath) &&
+      !LittleFS.remove(request.paths.tempPath)) {
+    logConfigSaveFailure(request, request.paths.tempPath,
+                         "failed to clear temp file");
+    return false;
   }
 
-  bool hadPrimary = LittleFS.exists(paths.primaryPath);
+  String errorDetail;
+  if (!writeConfigTempFile(request, payload, errorDetail)) {
+    LittleFS.remove(request.paths.tempPath);
+    if (request.logToFile) {
+      appendConfigSaveLog(String("Erreur lors de l'écriture de ") +
+                          request.paths.tempPath);
+    }
+    logConfigSaveFailure(request, request.paths.tempPath, errorDetail);
+    return false;
+  }
+
+  if (LittleFS.exists(request.paths.backupPath) &&
+      !LittleFS.remove(request.paths.backupPath)) {
+    logConfigSaveWarning(request, request.paths.backupPath,
+                         "failed to clear previous backup");
+  }
+
+  bool hadPrimary = LittleFS.exists(request.paths.primaryPath);
   if (hadPrimary) {
-    if (!LittleFS.rename(paths.primaryPath, paths.backupPath)) {
-      logConfigSaveFailure(label, paths.primaryPath,
-                           "failed to rotate existing configuration", logToFile);
-      LittleFS.remove(paths.tempPath);
+    if (!LittleFS.rename(request.paths.primaryPath, request.paths.backupPath)) {
+      logConfigSaveFailure(request, request.paths.primaryPath,
+                           "failed to rotate existing configuration");
+      LittleFS.remove(request.paths.tempPath);
       return false;
     }
   }
 
-  if (!LittleFS.rename(paths.tempPath, paths.primaryPath)) {
-    logConfigSaveFailure(label, paths.primaryPath,
-                         "failed to promote new configuration", logToFile);
-    LittleFS.remove(paths.tempPath);
-    if (hadPrimary) {
-      if (!LittleFS.rename(paths.backupPath, paths.primaryPath)) {
-        logConfigSaveWarning(label, paths.backupPath,
-                             "unable to restore previous configuration", logToFile);
-      }
+  if (!LittleFS.rename(request.paths.tempPath, request.paths.primaryPath)) {
+    logConfigSaveFailure(request, request.paths.primaryPath,
+                         "failed to promote new configuration");
+    LittleFS.remove(request.paths.tempPath);
+    if (hadPrimary &&
+        !LittleFS.rename(request.paths.backupPath, request.paths.primaryPath)) {
+      logConfigSaveWarning(request, request.paths.backupPath,
+                           "unable to restore previous configuration");
     }
     return false;
   }
 
-  if (logToFile) {
-    appendConfigSaveLog(String("Configuration ") + label + " enregistrée dans " +
-                        paths.primaryPath);
+  if (request.logToFile) {
+    appendConfigSaveLog(String("Configuration ") + configSaveLabel(request) +
+                        " enregistrée dans " + request.paths.primaryPath);
   }
   return true;
 }
@@ -2808,22 +2866,6 @@ static uint32_t readUint32Le(const uint8_t *data) {
          (static_cast<uint32_t>(data[3]) << 24);
 }
 
-static bool writeUint16Le(File &f, uint16_t value) {
-  uint8_t buf[2];
-  buf[0] = static_cast<uint8_t>(value & 0xFFu);
-  buf[1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
-  return f.write(buf, sizeof(buf)) == sizeof(buf);
-}
-
-static bool writeUint32Le(File &f, uint32_t value) {
-  uint8_t buf[4];
-  buf[0] = static_cast<uint8_t>(value & 0xFFu);
-  buf[1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
-  buf[2] = static_cast<uint8_t>((value >> 16) & 0xFFu);
-  buf[3] = static_cast<uint8_t>((value >> 24) & 0xFFu);
-  return f.write(buf, sizeof(buf)) == sizeof(buf);
-}
-
 static bool tryDecodeConfigRecord(const uint8_t *data,
                                   size_t length,
                                   ConfigRecordMetadata &meta,
@@ -2857,24 +2899,18 @@ static bool tryDecodeConfigRecord(const uint8_t *data,
   return true;
 }
 
-static bool saveJsonConfig(uint8_t sections,
-                           const ConfigSavePaths &paths,
-                           const char *label,
-                           bool logToFile = false) {
+static bool saveJsonConfig(const ConfigSaveRequest &request) {
+  const char *label = configSaveLabel(request);
   logConfigSummary(label);
   String payload;
-  if (!buildConfigJsonPayload(payload, sections, false, label, false)) {
+  if (!buildConfigJsonPayload(payload, request.sections, false, request.label,
+                              false)) {
     return false;
   }
-  if (!ensureUserDirectory()) {
-    logMessage(String(label) + " config directory unavailable");
-    if (logToFile) {
-      appendConfigSaveLog(String("Erreur sauvegarde ") + label +
-                          ": répertoire indisponible");
-    }
+  if (!ensureConfigDirectory(request)) {
     return false;
   }
-  if (!atomicWriteConfig(paths, label, payload, logToFile)) {
+  if (!performConfigSave(request, payload)) {
     return false;
   }
   logMessage(String(label) + " configuration saved");
@@ -2882,18 +2918,33 @@ static bool saveJsonConfig(uint8_t sections,
 }
 
 bool saveIoConfig() {
-  return saveJsonConfig(CONFIG_SECTION_MODULES | CONFIG_SECTION_IO,
-                       IO_CONFIG_PATHS, "IO", true);
+  ConfigSaveRequest request = {
+      static_cast<uint8_t>(CONFIG_SECTION_MODULES | CONFIG_SECTION_IO),
+      IO_CONFIG_PATHS,
+      "IO",
+      true,
+  };
+  return saveJsonConfig(request);
 }
 
 bool saveInterfaceConfig() {
-  return saveJsonConfig(CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS,
-                       INTERFACE_CONFIG_PATHS, "Interface");
+  ConfigSaveRequest request = {
+      static_cast<uint8_t>(CONFIG_SECTION_INTERFACE | CONFIG_SECTION_PEERS),
+      INTERFACE_CONFIG_PATHS,
+      "Interface",
+      false,
+  };
+  return saveJsonConfig(request);
 }
 
 bool saveVirtualConfig() {
-  return saveJsonConfig(CONFIG_SECTION_VIRTUAL,
-                       VIRTUAL_CONFIG_PATHS, "Virtual");
+  ConfigSaveRequest request = {
+      static_cast<uint8_t>(CONFIG_SECTION_VIRTUAL),
+      VIRTUAL_CONFIG_PATHS,
+      "Virtual",
+      false,
+  };
+  return saveJsonConfig(request);
 }
 
 static const InputConfig *findInputByName(const Config &cfg, const String &name) {
