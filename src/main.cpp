@@ -207,6 +207,7 @@ static const char *LOG_PATH = "/log.txt";
 static const char *USER_FILES_DIR = "/private";
 static const char *SAMPLE_FILE_PATH = "/private/sample.html";
 static const char *IO_CONFIG_FILE_PATH = "/private/io_config.json";
+static const char *IO_CONFIG_BACKUP_FILE_PATH = "/private/io_config.bak";
 static const char *IO_SAVE_TRANSACTIONAL_LOG_PATH =
     "/private/io_save_transactionnel.log";
 static const char *IO_SAVE_DIRECT_LOG_PATH = "/private/io_save_direct.log";
@@ -2147,7 +2148,12 @@ static String diffInputConfig(const InputConfig &before, const InputConfig &afte
 static String diffOutputConfig(const OutputConfig &before, const OutputConfig &after);
 static const char *describeJsonType(const JsonVariantConst &value);
 static void logIoDelta(const Config &before, const Config &after);
-static bool verifyConfigStored(const Config &expected, String &errorDetail);
+static bool ensureUserDirectory();
+static String toRelativeUserPath(const String &fsPath);
+static bool verifyConfigStored(const Config &expected,
+                               const char *path,
+                               uint8_t sections,
+                               String &errorDetail);
 static void applyIoRuntimeChanges(const Config &previousConfig);
 
 static MeterMeasurementConfig makeDefaultMeterMeasurement(bool enabled = false) {
@@ -4043,9 +4049,6 @@ static bool verifyConfigStored(const Config &expected,
     }
     logPrintf("Configuration verification succeeded for %s", path);
     return true;
-  }
-}
-
   }
 }
 
