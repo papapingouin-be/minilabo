@@ -199,42 +199,35 @@ static const char *IO_CONFIG_FILE_PATH = "/private/io_config.json";
 static const char *CONFIG_SAVE_LOG_PATH = "/private/sauvegardeconfig.log";
 static const char *IO_CONFIG_BACKUP_FILE_PATH = "/private/io_config.bak";
 static const char *IO_CONFIG_TEMP_FILE_PATH = "/private/io_config.tmp";
-static const char *IO_CONFIG_BACKUP_STAGING_PATH = "/private/io_config.bak.tmp";
 static const char *INTERFACE_CONFIG_FILE_PATH = "/private/interface_config.json";
 static const char *INTERFACE_CONFIG_BACKUP_FILE_PATH = "/private/interface_config.bak";
 static const char *INTERFACE_CONFIG_TEMP_FILE_PATH = "/private/interface_config.tmp";
-static const char *INTERFACE_CONFIG_BACKUP_STAGING_PATH = "/private/interface_config.bak.tmp";
 static const char *VIRTUAL_CONFIG_FILE_PATH = "/private/virtual_config.json";
 static const char *VIRTUAL_CONFIG_BACKUP_FILE_PATH = "/private/virtual_config.bak";
 static const char *VIRTUAL_CONFIG_TEMP_FILE_PATH = "/private/virtual_config.tmp";
-static const char *VIRTUAL_CONFIG_BACKUP_STAGING_PATH = "/private/virtual_config.bak.tmp";
 
 struct ConfigSavePaths {
   const char *primaryPath;
   const char *tempPath;
   const char *backupPath;
-  const char *backupStagingPath;
 };
 
 static const ConfigSavePaths IO_CONFIG_PATHS = {
     IO_CONFIG_FILE_PATH,
     IO_CONFIG_TEMP_FILE_PATH,
     IO_CONFIG_BACKUP_FILE_PATH,
-    IO_CONFIG_BACKUP_STAGING_PATH,
 };
 
 static const ConfigSavePaths INTERFACE_CONFIG_PATHS = {
     INTERFACE_CONFIG_FILE_PATH,
     INTERFACE_CONFIG_TEMP_FILE_PATH,
     INTERFACE_CONFIG_BACKUP_FILE_PATH,
-    INTERFACE_CONFIG_BACKUP_STAGING_PATH,
 };
 
 static const ConfigSavePaths VIRTUAL_CONFIG_PATHS = {
     VIRTUAL_CONFIG_FILE_PATH,
     VIRTUAL_CONFIG_TEMP_FILE_PATH,
     VIRTUAL_CONFIG_BACKUP_FILE_PATH,
-    VIRTUAL_CONFIG_BACKUP_STAGING_PATH,
 };
 static const char *LEGACY_CONFIG_FILE_PATH = "/config.json";
 static const uint32_t CONFIG_RECORD_MAGIC = 0x4D4C4243; // 'MLBC'
@@ -375,25 +368,6 @@ static void logConfigSaveWarning(const char *label,
   }
 }
 
-static void promoteBackup(const ConfigSavePaths &paths,
-                          const char *label,
-                          bool logToFile) {
-  if (!LittleFS.exists(paths.backupStagingPath)) {
-    return;
-  }
-  if (LittleFS.exists(paths.backupPath) && !LittleFS.remove(paths.backupPath)) {
-    logConfigSaveWarning(label, paths.backupPath,
-                         "failed to remove previous backup", logToFile);
-    LittleFS.remove(paths.backupStagingPath);
-    return;
-  }
-  if (!LittleFS.rename(paths.backupStagingPath, paths.backupPath)) {
-    logConfigSaveWarning(label, paths.backupStagingPath,
-                         "failed to promote staged backup", logToFile);
-    LittleFS.remove(paths.backupStagingPath);
-  }
-}
-
 static bool atomicWriteConfig(const ConfigSavePaths &paths,
                               const char *label,
                               const String &payload,
@@ -409,40 +383,32 @@ static bool atomicWriteConfig(const ConfigSavePaths &paths,
     return false;
   }
 
-  bool stagedOriginal = false;
-  if (LittleFS.exists(paths.backupStagingPath) &&
-      !LittleFS.remove(paths.backupStagingPath)) {
-    logConfigSaveFailure(label, paths.backupStagingPath,
-                         "failed to clear backup staging", logToFile);
-    LittleFS.remove(paths.tempPath);
-    return false;
+  if (LittleFS.exists(paths.backupPath) && !LittleFS.remove(paths.backupPath)) {
+    logConfigSaveWarning(label, paths.backupPath,
+                         "failed to clear previous backup", logToFile);
   }
 
-  if (LittleFS.exists(paths.primaryPath)) {
-    if (!LittleFS.rename(paths.primaryPath, paths.backupStagingPath)) {
+  bool hadPrimary = LittleFS.exists(paths.primaryPath);
+  if (hadPrimary) {
+    if (!LittleFS.rename(paths.primaryPath, paths.backupPath)) {
       logConfigSaveFailure(label, paths.primaryPath,
-                           "failed to stage existing configuration", logToFile);
+                           "failed to rotate existing configuration", logToFile);
       LittleFS.remove(paths.tempPath);
       return false;
     }
-    stagedOriginal = true;
   }
 
   if (!LittleFS.rename(paths.tempPath, paths.primaryPath)) {
     logConfigSaveFailure(label, paths.primaryPath,
                          "failed to promote new configuration", logToFile);
-    // Attempt to restore the original file if we staged it previously.
-    if (stagedOriginal) {
-      if (!LittleFS.rename(paths.backupStagingPath, paths.primaryPath)) {
-        logPrintf("%s configuration restore failed after promotion error", label);
+    LittleFS.remove(paths.tempPath);
+    if (hadPrimary) {
+      if (!LittleFS.rename(paths.backupPath, paths.primaryPath)) {
+        logConfigSaveWarning(label, paths.backupPath,
+                             "unable to restore previous configuration", logToFile);
       }
     }
-    LittleFS.remove(paths.tempPath);
     return false;
-  }
-
-  if (stagedOriginal) {
-    promoteBackup(paths, label, logToFile);
   }
 
   if (logToFile) {
