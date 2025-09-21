@@ -41,6 +41,9 @@
 static void logPrintf(const char *fmt, ...);
 static void logMessage(const String &msg);
 
+static bool ensureUserDirectory();
+static String toRelativeUserPath(const String &fsPath);
+
 static bool logStorageReady = false;
 static bool littleFsFormatAttempted = false;
 static String firmwareVersion = "0.0.0";
@@ -2148,8 +2151,6 @@ static String diffInputConfig(const InputConfig &before, const InputConfig &afte
 static String diffOutputConfig(const OutputConfig &before, const OutputConfig &after);
 static const char *describeJsonType(const JsonVariantConst &value);
 static void logIoDelta(const Config &before, const Config &after);
-static bool ensureUserDirectory();
-static String toRelativeUserPath(const String &fsPath);
 static bool verifyConfigStored(const Config &expected,
                                const char *path,
                                uint8_t sections,
