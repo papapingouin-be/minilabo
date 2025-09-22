@@ -3800,6 +3800,11 @@ static uint32_t crc32ForBuffer(const uint8_t *data, size_t length) {
         crc >>= 1;
       }
     }
+    if ((i & 0x3FF) == 0) {
+      // Feeding the watchdog while computing checksums prevents boot loops
+      // when processing large configuration files.
+      yield();
+    }
   }
   return crc ^ 0xFFFFFFFFu;
 }
