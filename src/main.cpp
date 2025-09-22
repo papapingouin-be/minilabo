@@ -59,6 +59,13 @@ static bool scheduleRestart(const String &reason);
 static bool scheduleRestart(const __FlashStringHelper *reason);
 static bool scheduleRestart(const char *reason);
 
+// Forward declarations for hardware lifecycle helpers defined later in the
+// file.  serviceRestartGuard() invokes these when leaving safe mode, so the
+// compiler needs to know about them before their definitions.
+void setupSensors();
+void updateOutputs();
+void updateInputs();
+
 static void updateSafeModeStateFromGuard();
 static const char *safeModeReasonKey(SafeModeReason reason);
 static const char *safeModeReasonDescription(SafeModeReason reason);
