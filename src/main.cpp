@@ -48,11 +48,17 @@ static bool logStorageReady = false;
 static bool littleFsFormatAttempted = false;
 static String firmwareVersion = "0.0.0";
 
-// Preallocate a JSON document for virtual multimeter updates to avoid
-// large heap allocations that can fail when the memory becomes fragmented.
-static constexpr size_t VIRTUAL_MULTIMETER_REQUEST_DOC_CAPACITY = 7168;
-static StaticJsonDocument<VIRTUAL_MULTIMETER_REQUEST_DOC_CAPACITY>
+// Preallocate JSON documents and buffers for virtual multimeter operations to
+// avoid repeated heap allocations that fragment memory on the ESP8266.
+static constexpr size_t VIRTUAL_MULTIMETER_JSON_DOC_CAPACITY = 7168;
+static constexpr size_t VIRTUAL_MULTIMETER_MAX_PAYLOAD = 8192;
+static StaticJsonDocument<VIRTUAL_MULTIMETER_JSON_DOC_CAPACITY>
     virtualMultimeterRequestDoc;
+static StaticJsonDocument<VIRTUAL_MULTIMETER_JSON_DOC_CAPACITY>
+    virtualMultimeterStorageDoc;
+static String virtualMultimeterSaveBuffer;
+static char
+    virtualMultimeterVerifyBuffer[VIRTUAL_MULTIMETER_MAX_PAYLOAD + 1];
 
 static String formatFirmwareVersion() {
   String version = String(static_cast<unsigned>(BuildInfo::kFirmwareMajor));
@@ -3507,6 +3513,100 @@ static bool tryDecodeConfigRecord(const uint8_t *data,
   return true;
 }
 
+static bool verifyVirtualMultimeterConfigStored(
+    const VirtualMultimeterConfig &expected,
+    String &errorDetail) {
+  File f = LittleFS.open(VIRTUAL_CONFIG_FILE_PATH, "r");
+  if (!f) {
+    errorDetail = String("open failed: ") + VIRTUAL_CONFIG_FILE_PATH;
+    return false;
+  }
+  size_t fileSize = f.size();
+  if (fileSize < CONFIG_RECORD_HEADER_SIZE) {
+    errorDetail = "record_header_invalid";
+    f.close();
+    return false;
+  }
+  uint8_t header[CONFIG_RECORD_HEADER_SIZE];
+  size_t headerRead = f.read(header, sizeof(header));
+  if (headerRead != sizeof(header)) {
+    errorDetail = "header_short_read";
+    f.close();
+    return false;
+  }
+  uint32_t magic = readUint32Le(header);
+  if (magic != CONFIG_RECORD_MAGIC) {
+    errorDetail = "record_header_invalid";
+    f.close();
+    return false;
+  }
+  uint16_t version = readUint16Le(header + 4);
+  if (version != CONFIG_RECORD_VERSION) {
+    errorDetail = "record_version_invalid";
+    f.close();
+    return false;
+  }
+  uint16_t sections = readUint16Le(header + 6);
+  if (sections != CONFIG_SECTION_VIRTUAL) {
+    errorDetail = "sections_mismatch";
+    f.close();
+    return false;
+  }
+  uint32_t payloadLength = readUint32Le(header + 8);
+  uint32_t storedChecksum = readUint32Le(header + 12);
+  size_t available = (fileSize > CONFIG_RECORD_HEADER_SIZE)
+                         ? (fileSize - CONFIG_RECORD_HEADER_SIZE)
+                         : 0;
+  if (payloadLength > available) {
+    errorDetail = "payload_length_mismatch";
+    f.close();
+    return false;
+  }
+  if (payloadLength > VIRTUAL_MULTIMETER_MAX_PAYLOAD) {
+    errorDetail = "payload_too_large";
+    f.close();
+    return false;
+  }
+  if (payloadLength > 0) {
+    size_t readLength =
+        f.read(reinterpret_cast<uint8_t *>(virtualMultimeterVerifyBuffer),
+               payloadLength);
+    if (readLength != payloadLength) {
+      errorDetail = "payload_short_read";
+      f.close();
+      return false;
+    }
+  }
+  f.close();
+  virtualMultimeterVerifyBuffer[payloadLength] = '\0';
+  uint32_t actualChecksum = crc32ForBuffer(
+      reinterpret_cast<const uint8_t *>(virtualMultimeterVerifyBuffer),
+      payloadLength);
+  if (actualChecksum != storedChecksum) {
+    errorDetail = "checksum_mismatch";
+    return false;
+  }
+  virtualMultimeterStorageDoc.clear();
+  DeserializationError err = deserializeJson(
+      virtualMultimeterStorageDoc, virtualMultimeterVerifyBuffer, payloadLength);
+  if (err) {
+    errorDetail = String("json parse failed: ") + err.c_str();
+    return false;
+  }
+  VirtualMultimeterConfig reloaded;
+  clearVirtualMultimeterConfig(reloaded);
+  JsonVariantConst meterVar = virtualMultimeterStorageDoc["virtualMultimeter"];
+  if (!meterVar.isNull()) {
+    parseVirtualMultimeterVariant(meterVar, reloaded);
+  }
+  if (!virtualMultimeterConfigsMatch(expected, reloaded, errorDetail)) {
+    return false;
+  }
+  logPrintf("Configuration verification succeeded for %s",
+            VIRTUAL_CONFIG_FILE_PATH);
+  return true;
+}
+
 static bool saveJsonConfig(const ConfigSaveRequest &request) {
   const char *label = configSaveLabel(request);
   logConfigSummary(label);
@@ -3544,7 +3644,29 @@ bool saveVirtualConfig() {
       false,
       nullptr,
   };
-  return saveJsonConfig(request);
+  const char *label = configSaveLabel(request);
+  logConfigSummary(label);
+  if (!ensureConfigDirectory(request)) {
+    return false;
+  }
+  virtualMultimeterStorageDoc.clear();
+  JsonObject meterObj =
+      virtualMultimeterStorageDoc.createNestedObject("virtualMultimeter");
+  populateVirtualMultimeterJson(meterObj, config.virtualMultimeter);
+  if (virtualMultimeterSaveBuffer.capacity() < VIRTUAL_MULTIMETER_MAX_PAYLOAD) {
+    virtualMultimeterSaveBuffer.reserve(VIRTUAL_MULTIMETER_MAX_PAYLOAD);
+  }
+  virtualMultimeterSaveBuffer = "";
+  if (serializeJson(virtualMultimeterStorageDoc, virtualMultimeterSaveBuffer) ==
+      0) {
+    logMessage(String(label) + " config JSON encode failed");
+    return false;
+  }
+  if (!performConfigSave(request, virtualMultimeterSaveBuffer)) {
+    return false;
+  }
+  logMessage(String(label) + " configuration saved");
+  return true;
 }
 
 static bool saveIoConfigTransactional(IoSaveProgress *progress,
@@ -3951,6 +4073,148 @@ static bool floatsDiffer(float a, float b) {
   return fabsf(a - b) > 0.0001f;
 }
 
+static bool meterMeasurementsMatch(const MeterMeasurementConfig &expected,
+                                   const MeterMeasurementConfig &actual,
+                                   const String &channelLabel,
+                                   const char *measurementKey,
+                                   String &errorDetail) {
+  if (expected.enabled != actual.enabled) {
+    errorDetail = String(channelLabel) + "/" + measurementKey +
+                  " enabled mismatch";
+    return false;
+  }
+  if (expected.hasMin != actual.hasMin) {
+    errorDetail = String(channelLabel) + "/" + measurementKey +
+                  " min flag mismatch";
+    return false;
+  }
+  if (expected.hasMin && floatsDiffer(expected.minValue, actual.minValue)) {
+    errorDetail = String(channelLabel) + "/" + measurementKey +
+                  " min value mismatch";
+    return false;
+  }
+  if (expected.hasMax != actual.hasMax) {
+    errorDetail = String(channelLabel) + "/" + measurementKey +
+                  " max flag mismatch";
+    return false;
+  }
+  if (expected.hasMax && floatsDiffer(expected.maxValue, actual.maxValue)) {
+    errorDetail = String(channelLabel) + "/" + measurementKey +
+                  " max value mismatch";
+    return false;
+  }
+  if (expected.formula != actual.formula) {
+    errorDetail = String(channelLabel) + "/" + measurementKey +
+                  " formula mismatch";
+    return false;
+  }
+  return true;
+}
+
+static bool meterChannelsMatch(const MeterChannelConfig &expected,
+                               const MeterChannelConfig &actual,
+                               uint8_t index,
+                               String &errorDetail) {
+  String label = expected.id.length() ? expected.id : String(index + 1);
+  if (expected.id != actual.id) {
+    errorDetail = String("channel[") + index + "] id mismatch";
+    return false;
+  }
+  if (expected.name != actual.name) {
+    errorDetail = label + " name mismatch";
+    return false;
+  }
+  if (expected.label != actual.label) {
+    errorDetail = label + " label mismatch";
+    return false;
+  }
+  if (expected.input != actual.input) {
+    errorDetail = label + " input mismatch";
+    return false;
+  }
+  if (expected.unit != actual.unit) {
+    errorDetail = label + " unit mismatch";
+    return false;
+  }
+  if (expected.symbol != actual.symbol) {
+    errorDetail = label + " symbol mismatch";
+    return false;
+  }
+  if (expected.enabled != actual.enabled) {
+    errorDetail = label + " enabled mismatch";
+    return false;
+  }
+  if (floatsDiffer(expected.scale, actual.scale)) {
+    errorDetail = label + " scale mismatch";
+    return false;
+  }
+  if (floatsDiffer(expected.offset, actual.offset)) {
+    errorDetail = label + " offset mismatch";
+    return false;
+  }
+  if (expected.hasRangeMin != actual.hasRangeMin) {
+    errorDetail = label + " rangeMin flag mismatch";
+    return false;
+  }
+  if (expected.hasRangeMin && floatsDiffer(expected.rangeMin, actual.rangeMin)) {
+    errorDetail = label + " rangeMin mismatch";
+    return false;
+  }
+  if (expected.hasRangeMax != actual.hasRangeMax) {
+    errorDetail = label + " rangeMax flag mismatch";
+    return false;
+  }
+  if (expected.hasRangeMax && floatsDiffer(expected.rangeMax, actual.rangeMax)) {
+    errorDetail = label + " rangeMax mismatch";
+    return false;
+  }
+  if (expected.bits != actual.bits) {
+    errorDetail = label + " bits mismatch";
+    return false;
+  }
+  if (expected.profile != actual.profile) {
+    errorDetail = label + " profile mismatch";
+    return false;
+  }
+  if (expected.displayMode != actual.displayMode) {
+    errorDetail = label + " displayMode mismatch";
+    return false;
+  }
+  if (expected.calibre != actual.calibre) {
+    errorDetail = label + " calibre mismatch";
+    return false;
+  }
+  if (expected.processing != actual.processing) {
+    errorDetail = label + " processing mismatch";
+    return false;
+  }
+  for (uint8_t i = 0; i < MAX_METER_MEASUREMENTS; ++i) {
+    const char *key = METER_MEASUREMENT_KEYS[i];
+    if (!meterMeasurementsMatch(expected.measurements[i], actual.measurements[i],
+                                label, key, errorDetail)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool virtualMultimeterConfigsMatch(
+    const VirtualMultimeterConfig &expected,
+    const VirtualMultimeterConfig &actual,
+    String &errorDetail) {
+  if (expected.channelCount != actual.channelCount) {
+    errorDetail = "virtualMultimeter channel count mismatch";
+    return false;
+  }
+  for (uint8_t i = 0; i < expected.channelCount && i < MAX_METER_CHANNELS; ++i) {
+    if (!meterChannelsMatch(expected.channels[i], actual.channels[i], i,
+                            errorDetail)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static String describeStringValue(const String &value) {
   if (value.length() == 0) {
     return String("(empty)");
@@ -4285,9 +4549,9 @@ static bool verifyConfigStored(const Config &expected,
       }
     }
     if (sections & CONFIG_SECTION_VIRTUAL) {
-      if (expected.virtualMultimeter.channelCount !=
-          reloaded.virtualMultimeter.channelCount) {
-        errorDetail = "virtualMultimeter mismatch";
+      if (!virtualMultimeterConfigsMatch(expected.virtualMultimeter,
+                                         reloaded.virtualMultimeter,
+                                         errorDetail)) {
         return false;
       }
     }
@@ -5471,8 +5735,8 @@ void registerRoutes(ServerT &server) {
     }
 
     String verifyError;
-    if (!verifyConfigStored(config, VIRTUAL_CONFIG_FILE_PATH,
-                            CONFIG_SECTION_VIRTUAL, verifyError)) {
+    if (!verifyVirtualMultimeterConfigStored(config.virtualMultimeter,
+                                             verifyError)) {
       logPrintf("Virtual multimeter verification failed: %s",
                 verifyError.c_str());
       config.virtualMultimeter = previousConfig.virtualMultimeter;
