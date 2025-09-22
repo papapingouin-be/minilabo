@@ -32,6 +32,10 @@
 #include <math.h>
 #include <vector>
 
+extern "C" {
+#include "user_interface.h"
+}
+
 #include "build_version.h"
 #include "virtual_lab/FunctionGenerator.h"
 #include "virtual_lab/MathZone.h"
@@ -42,8 +46,38 @@
 static void logPrintf(const char *fmt, ...);
 static void logMessage(const String &msg);
 
+static void initRestartGuard();
+static void serviceRestartGuard(unsigned long now);
+static void serviceScheduledRestart(unsigned long now);
+static bool scheduleRestart(const String &reason);
+static bool scheduleRestart(const __FlashStringHelper *reason);
+static bool scheduleRestart(const char *reason);
+
 static bool ensureUserDirectory();
 static String toRelativeUserPath(const String &fsPath);
+
+static constexpr uint32_t RESTART_GUARD_MAGIC = 0x52475344;  // "RGSD"
+static constexpr uint16_t RESTART_LOOP_THRESHOLD = 3;
+static constexpr unsigned long RESTART_CLEAR_UPTIME_MS = 45000UL;
+static constexpr unsigned long RESTART_SCHEDULE_DELAY_MS = 250UL;
+static constexpr uint32_t RESTART_GUARD_RTC_OFFSET = 0;
+
+struct RestartGuardData {
+  uint32_t magic = RESTART_GUARD_MAGIC;
+  uint16_t consecutiveSoftResets = 0;
+  uint16_t reserved = 0;
+};
+
+static_assert(sizeof(RestartGuardData) % 4 == 0,
+              "RestartGuardData must be a multiple of 4 bytes");
+
+static RestartGuardData restartGuardData;
+static bool restartLoopProtectionActive = false;
+static bool restartGuardClearedThisBoot = false;
+static unsigned long bootStartedMillis = 0;
+static bool restartPending = false;
+static unsigned long restartScheduledAt = 0;
+static String restartPendingReason;
 
 static bool logStorageReady = false;
 static bool littleFsFormatAttempted = false;
@@ -110,6 +144,109 @@ static bool ensureVirtualMultimeterScratch(size_t verifyCapacity =
     ok = false;
   }
   return ok;
+}
+
+static void persistRestartGuardData() {
+  ESP.rtcUserMemoryWrite(
+      RESTART_GUARD_RTC_OFFSET,
+      reinterpret_cast<uint32_t *>(&restartGuardData),
+      sizeof(restartGuardData));
+}
+
+static void initRestartGuard() {
+  RestartGuardData stored;
+  if (ESP.rtcUserMemoryRead(RESTART_GUARD_RTC_OFFSET,
+                            reinterpret_cast<uint32_t *>(&stored),
+                            sizeof(stored)) &&
+      stored.magic == RESTART_GUARD_MAGIC) {
+    restartGuardData = stored;
+  } else {
+    restartGuardData.magic = RESTART_GUARD_MAGIC;
+    restartGuardData.consecutiveSoftResets = 0;
+    restartGuardData.reserved = 0;
+    persistRestartGuardData();
+  }
+
+  const rst_info *info = system_get_rst_info();
+  if (info && info->reason == REASON_SOFT_RESTART) {
+    if (restartGuardData.consecutiveSoftResets < 0xFFFF) {
+      restartGuardData.consecutiveSoftResets++;
+    }
+  } else {
+    restartGuardData.consecutiveSoftResets = 0;
+  }
+  persistRestartGuardData();
+  restartLoopProtectionActive =
+      restartGuardData.consecutiveSoftResets >= RESTART_LOOP_THRESHOLD;
+}
+
+static bool scheduleRestart(const String &reason) {
+  if (restartLoopProtectionActive) {
+    logPrintf("Restart request blocked by loop protection (%s)",
+              reason.c_str());
+    return false;
+  }
+  if (restartPending) {
+    logPrintf("Restart already pending (%s); ignoring duplicate request '%s'",
+              restartPendingReason.c_str(), reason.c_str());
+    return true;
+  }
+  restartPending = true;
+  restartScheduledAt = millis() + RESTART_SCHEDULE_DELAY_MS;
+  restartPendingReason = reason;
+  logPrintf("Restart scheduled (%s)", restartPendingReason.c_str());
+  return true;
+}
+
+static bool scheduleRestart(const __FlashStringHelper *reason) {
+  return scheduleRestart(String(reason));
+}
+
+static bool scheduleRestart(const char *reason) {
+  return scheduleRestart(String(reason));
+}
+
+static void serviceScheduledRestart(unsigned long now) {
+  if (!restartPending) {
+    return;
+  }
+  if (restartLoopProtectionActive) {
+    logPrintf("Restart request '%s' cancelled due to loop protection",
+              restartPendingReason.c_str());
+    restartPending = false;
+    restartPendingReason = String();
+    return;
+  }
+  if (static_cast<long>(now - restartScheduledAt) < 0) {
+    return;
+  }
+  logPrintf("Executing scheduled restart (%s)",
+            restartPendingReason.length() ? restartPendingReason.c_str()
+                                         : "unspecified");
+  restartPending = false;
+  restartPendingReason = String();
+  delay(100);
+  ESP.restart();
+}
+
+static void serviceRestartGuard(unsigned long now) {
+  if (restartGuardClearedThisBoot) {
+    return;
+  }
+  if (static_cast<long>(now - bootStartedMillis - RESTART_CLEAR_UPTIME_MS) < 0) {
+    return;
+  }
+  restartGuardClearedThisBoot = true;
+  bool hadProtection = restartLoopProtectionActive;
+  bool hadCount = restartGuardData.consecutiveSoftResets > 0;
+  restartGuardData.consecutiveSoftResets = 0;
+  restartLoopProtectionActive = false;
+  persistRestartGuardData();
+  if (hadProtection) {
+    logMessage(F("Restart loop protection cleared after stable uptime"));
+  } else if (hadCount) {
+    logMessage(F("Restart loop counter reset after stable uptime"));
+  }
 }
 
 static String formatFirmwareVersion() {
@@ -4954,7 +5091,12 @@ static void handleInterfaceConfigSetRequest(ServerT *srv, const String &body) {
       return;
     }
     logConfigSummary("Applied interface");
-    logMessage("Interface configuration update saved; rebooting");
+    bool restartAccepted =
+        scheduleRestart(F("interface configuration update"));
+    logMessage(restartAccepted
+                   ? String("Interface configuration update saved; rebooting")
+                   : String("Interface configuration update saved; restart "
+                            "blocked by loop protection"));
     DynamicJsonDocument respDoc(1024);
     respDoc["status"] = "ok";
     respDoc["verified"] = true;
@@ -4969,11 +5111,13 @@ static void handleInterfaceConfigSetRequest(ServerT *srv, const String &body) {
       peer["nodeId"] = config.peers[i].nodeId;
       peer["pin"] = config.peers[i].pin;
     }
+    respDoc["restart"] = restartAccepted ? "scheduled" : "blocked";
+    if (!restartAccepted) {
+      respDoc["safeMode"] = true;
+    }
     String payload;
     serializeJson(respDoc, payload);
     srv->send(200, "application/json", payload);
-    delay(100);
-    ESP.restart();
     return;
   }
 }
@@ -5848,9 +5992,19 @@ void registerRoutes(ServerT &server) {
   server.on("/api/reboot", HTTP_POST, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
-    srv->send(200, "application/json", R"({"status":"rebooting"})");
-    delay(100);
-    ESP.restart();
+    bool restartAccepted = scheduleRestart(F("API reboot request"));
+    DynamicJsonDocument doc(192);
+    if (restartAccepted) {
+      doc["status"] = "rebooting";
+      doc["restart"] = "scheduled";
+    } else {
+      doc["status"] = "blocked";
+      doc["restart"] = "blocked";
+      doc["reason"] = "restart_protection";
+    }
+    String payload;
+    serializeJson(doc, payload);
+    srv->send(200, "application/json", payload);
   });
 
   server.on(
@@ -5879,13 +6033,22 @@ void registerRoutes(ServerT &server) {
           DynamicJsonDocument doc(128);
           doc["status"] = "ok";
           doc["size"] = static_cast<uint32_t>(otaUploadSize);
+          bool restartAccepted = scheduleRestart(F("OTA finalize"));
+          doc["restart"] = restartAccepted ? "scheduled" : "blocked";
+          if (!restartAccepted) {
+            doc["reason"] = "restart_protection";
+          }
           String payload;
           serializeJson(doc, payload);
           srv->send(200, "application/json", payload);
-          logPrintf("OTA update applied (%u bytes), rebooting",
-                    static_cast<unsigned>(otaUploadSize));
-          delay(100);
-          ESP.restart();
+          if (restartAccepted) {
+            logPrintf("OTA update applied (%u bytes), rebooting",
+                      static_cast<unsigned>(otaUploadSize));
+          } else {
+            logPrintf(
+                "OTA update applied (%u bytes) but restart blocked by loop protection",
+                static_cast<unsigned>(otaUploadSize));
+          }
         }
         otaUploadAuthorized = false;
         otaUploadInProgress = false;
@@ -6859,8 +7022,18 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   Serial.println();
+  initRestartGuard();
+  bootStartedMillis = millis();
   bool oledOk = initOled();
   initLogging();
+  if (restartLoopProtectionActive) {
+    logMessage(
+        F("Restart loop protection active; ignoring software restarts until "
+          "uptime stabilises"));
+  } else if (restartGuardData.consecutiveSoftResets > 0) {
+    logPrintf("Detected %u consecutive soft restarts before this boot",
+              static_cast<unsigned>(restartGuardData.consecutiveSoftResets));
+  }
   initFirmwareVersion();
   randomSeed(analogRead(A0) ^ micros() ^ ESP.getCycleCount());
   initialiseSecurity();
@@ -6930,6 +7103,8 @@ void loop() {
     }
   }
   primaryHttpServer.handleClient();
+  serviceRestartGuard(now);
+  serviceScheduledRestart(now);
   yield();
   // Sleep briefly to yield to background tasks
   delay(5);
