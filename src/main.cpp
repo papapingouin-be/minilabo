@@ -309,6 +309,24 @@ static size_t growConfigJsonCapacity(size_t current) {
   }
   return next;
 }
+
+static size_t shrinkConfigJsonCapacity(size_t current) {
+  if (current <= CONFIG_JSON_MIN_CAPACITY) {
+    return 0;
+  }
+  size_t reduction = current / 4;
+  if (reduction < 256) {
+    reduction = 256;
+  }
+  size_t next = current - reduction;
+  if (next < CONFIG_JSON_MIN_CAPACITY) {
+    next = CONFIG_JSON_MIN_CAPACITY;
+  }
+  if (next >= current) {
+    return 0;
+  }
+  return next;
+}
 static const uint8_t IO_SAVE_EVENT_CAPACITY = 32;
 
 struct IoSaveEvent {
@@ -5346,9 +5364,18 @@ void registerRoutes(ServerT &server) {
     while (true) {
       DynamicJsonDocument doc(docCapacity);
       if (docCapacity > 0 && doc.capacity() == 0) {
-        srv->send(500, "application/json",
-                  R"({"error":"alloc_failed"})");
-        return;
+        size_t nextCapacity = shrinkConfigJsonCapacity(docCapacity);
+        if (nextCapacity == 0) {
+          srv->send(500, "application/json",
+                    R"({"error":"alloc_failed"})");
+          return;
+        }
+        logPrintf(
+            "Virtual multimeter config JSON allocation failed at %u bytes; retrying with %u",
+            static_cast<unsigned>(docCapacity),
+            static_cast<unsigned>(nextCapacity));
+        docCapacity = nextCapacity;
+        continue;
       }
       DeserializationError parseErr = deserializeJson(doc, body);
       if (parseErr == DeserializationError::NoMemory &&
@@ -5867,8 +5894,18 @@ void registerRoutes(ServerT &server) {
     while (true) {
       DynamicJsonDocument doc(docCapacity);
       if (docCapacity > 0 && doc.capacity() == 0) {
-        srv->send(500, "application/json", R"({"error":"alloc_failed"})");
-        return;
+        size_t nextCapacity = shrinkConfigJsonCapacity(docCapacity);
+        if (nextCapacity == 0) {
+          srv->send(500, "application/json",
+                    R"({"error":"alloc_failed"})");
+          return;
+        }
+        logPrintf(
+            "File save JSON allocation failed at %u bytes; retrying with %u",
+            static_cast<unsigned>(docCapacity),
+            static_cast<unsigned>(nextCapacity));
+        docCapacity = nextCapacity;
+        continue;
       }
       DeserializationError parseErr = deserializeJson(doc, body);
       if (parseErr == DeserializationError::NoMemory) {
@@ -5924,8 +5961,18 @@ void registerRoutes(ServerT &server) {
     while (true) {
       DynamicJsonDocument doc(docCapacity);
       if (docCapacity > 0 && doc.capacity() == 0) {
-        srv->send(500, "application/json", R"({"error":"alloc_failed"})");
-        return;
+        size_t nextCapacity = shrinkConfigJsonCapacity(docCapacity);
+        if (nextCapacity == 0) {
+          srv->send(500, "application/json",
+                    R"({"error":"alloc_failed"})");
+          return;
+        }
+        logPrintf(
+            "File create JSON allocation failed at %u bytes; retrying with %u",
+            static_cast<unsigned>(docCapacity),
+            static_cast<unsigned>(nextCapacity));
+        docCapacity = nextCapacity;
+        continue;
       }
       DeserializationError parseErr = deserializeJson(doc, body);
       if (parseErr == DeserializationError::NoMemory) {
