@@ -65,7 +65,7 @@ static constexpr uint32_t RESTART_GUARD_RTC_OFFSET = 0;
 struct RestartGuardData {
   uint32_t magic = RESTART_GUARD_MAGIC;
   uint16_t consecutiveSoftResets = 0;
-  uint16_t reserved = 0;
+  uint16_t consecutiveAbnormalResets = 0;
 };
 
 static_assert(sizeof(RestartGuardData) % 4 == 0,
@@ -73,6 +73,7 @@ static_assert(sizeof(RestartGuardData) % 4 == 0,
 
 static RestartGuardData restartGuardData;
 static bool restartLoopProtectionActive = false;
+static bool restartLoopProtectionDueToCrash = false;
 static bool restartGuardClearedThisBoot = false;
 static unsigned long bootStartedMillis = 0;
 static bool restartPending = false;
@@ -153,6 +154,42 @@ static void persistRestartGuardData() {
       sizeof(restartGuardData));
 }
 
+static bool isResetReasonAbnormal(int reason) {
+  switch (reason) {
+    case REASON_DEFAULT_RST:
+    case REASON_EXT_SYS_RST:
+    case REASON_DEEP_SLEEP_AWAKE:
+      return false;
+    case REASON_SOFT_RESTART:
+      // Soft restarts are tracked separately; they are not "abnormal" but can
+      // still form loops when triggered too frequently.
+      return false;
+    default:
+      return true;
+  }
+}
+
+static const __FlashStringHelper *describeResetReason(int reason) {
+  switch (reason) {
+    case REASON_DEFAULT_RST:
+      return F("power-on reset");
+    case REASON_WDT_RST:
+      return F("hardware watchdog reset");
+    case REASON_EXCEPTION_RST:
+      return F("exception reset");
+    case REASON_SOFT_WDT_RST:
+      return F("software watchdog reset");
+    case REASON_SOFT_RESTART:
+      return F("software restart");
+    case REASON_DEEP_SLEEP_AWAKE:
+      return F("deep-sleep wake");
+    case REASON_EXT_SYS_RST:
+      return F("external system reset");
+    default:
+      return F("unknown reset");
+  }
+}
+
 static void initRestartGuard() {
   RestartGuardData stored;
   if (ESP.rtcUserMemoryRead(RESTART_GUARD_RTC_OFFSET,
@@ -163,11 +200,17 @@ static void initRestartGuard() {
   } else {
     restartGuardData.magic = RESTART_GUARD_MAGIC;
     restartGuardData.consecutiveSoftResets = 0;
-    restartGuardData.reserved = 0;
+    restartGuardData.consecutiveAbnormalResets = 0;
     persistRestartGuardData();
   }
 
   const rst_info *info = system_get_rst_info();
+  if (info) {
+    String reasonText(describeResetReason(info->reason));
+    logPrintf("Last reset reason: %s (%d)", reasonText.c_str(),
+              static_cast<int>(info->reason));
+  }
+
   if (info && info->reason == REASON_SOFT_RESTART) {
     if (restartGuardData.consecutiveSoftResets < 0xFFFF) {
       restartGuardData.consecutiveSoftResets++;
@@ -175,9 +218,21 @@ static void initRestartGuard() {
   } else {
     restartGuardData.consecutiveSoftResets = 0;
   }
+
+  if (info && isResetReasonAbnormal(info->reason)) {
+    if (restartGuardData.consecutiveAbnormalResets < 0xFFFF) {
+      restartGuardData.consecutiveAbnormalResets++;
+    }
+  } else {
+    restartGuardData.consecutiveAbnormalResets = 0;
+  }
+
   persistRestartGuardData();
   restartLoopProtectionActive =
-      restartGuardData.consecutiveSoftResets >= RESTART_LOOP_THRESHOLD;
+      restartGuardData.consecutiveSoftResets >= RESTART_LOOP_THRESHOLD ||
+      restartGuardData.consecutiveAbnormalResets >= RESTART_LOOP_THRESHOLD;
+  restartLoopProtectionDueToCrash =
+      restartGuardData.consecutiveAbnormalResets >= RESTART_LOOP_THRESHOLD;
 }
 
 static bool scheduleRestart(const String &reason) {
@@ -238,14 +293,22 @@ static void serviceRestartGuard(unsigned long now) {
   }
   restartGuardClearedThisBoot = true;
   bool hadProtection = restartLoopProtectionActive;
-  bool hadCount = restartGuardData.consecutiveSoftResets > 0;
+  bool hadCrashProtection = restartLoopProtectionDueToCrash;
+  bool hadSoftCount = restartGuardData.consecutiveSoftResets > 0;
+  bool hadCrashCount = restartGuardData.consecutiveAbnormalResets > 0;
   restartGuardData.consecutiveSoftResets = 0;
+  restartGuardData.consecutiveAbnormalResets = 0;
   restartLoopProtectionActive = false;
+  restartLoopProtectionDueToCrash = false;
   persistRestartGuardData();
   if (hadProtection) {
-    logMessage(F("Restart loop protection cleared after stable uptime"));
-  } else if (hadCount) {
-    logMessage(F("Restart loop counter reset after stable uptime"));
+    if (hadCrashProtection) {
+      logMessage(F("Crash loop protection cleared after stable uptime"));
+    } else {
+      logMessage(F("Restart loop protection cleared after stable uptime"));
+    }
+  } else if (hadSoftCount || hadCrashCount) {
+    logMessage(F("Restart loop counters reset after stable uptime"));
   }
 }
 
@@ -7071,12 +7134,24 @@ void setup() {
   bool oledOk = initOled();
   initLogging();
   if (restartLoopProtectionActive) {
-    logMessage(
-        F("Restart loop protection active; ignoring software restarts until "
-          "uptime stabilises"));
-  } else if (restartGuardData.consecutiveSoftResets > 0) {
-    logPrintf("Detected %u consecutive soft restarts before this boot",
-              static_cast<unsigned>(restartGuardData.consecutiveSoftResets));
+    if (restartLoopProtectionDueToCrash) {
+      logMessage(
+          F("Crash loop protection active; suppressing auto-restarts until "
+            "uptime stabilises"));
+    } else {
+      logMessage(
+          F("Restart loop protection active; ignoring software restarts until "
+            "uptime stabilises"));
+    }
+  } else {
+    if (restartGuardData.consecutiveAbnormalResets > 0) {
+      logPrintf("Detected %u consecutive abnormal resets before this boot",
+                static_cast<unsigned>(restartGuardData.consecutiveAbnormalResets));
+    }
+    if (restartGuardData.consecutiveSoftResets > 0) {
+      logPrintf("Detected %u consecutive soft restarts before this boot",
+                static_cast<unsigned>(restartGuardData.consecutiveSoftResets));
+    }
   }
   initFirmwareVersion();
   randomSeed(analogRead(A0) ^ micros() ^ ESP.getCycleCount());
