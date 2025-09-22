@@ -48,6 +48,12 @@ static bool logStorageReady = false;
 static bool littleFsFormatAttempted = false;
 static String firmwareVersion = "0.0.0";
 
+// Preallocate a JSON document for virtual multimeter updates to avoid
+// large heap allocations that can fail when the memory becomes fragmented.
+static constexpr size_t VIRTUAL_MULTIMETER_REQUEST_DOC_CAPACITY = 7168;
+static StaticJsonDocument<VIRTUAL_MULTIMETER_REQUEST_DOC_CAPACITY>
+    virtualMultimeterRequestDoc;
+
 static String formatFirmwareVersion() {
   String version = String(static_cast<unsigned>(BuildInfo::kFirmwareMajor));
   version += ".";
@@ -5357,85 +5363,111 @@ void registerRoutes(ServerT &server) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
     }
-    size_t docCapacity = configJsonCapacityForPayload(body.length());
-    if (docCapacity == 0) {
-      docCapacity = configJsonCapacityForPayload(0);
+    JsonDocument *docPtr = nullptr;
+    virtualMultimeterRequestDoc.clear();
+    DeserializationError staticParseErr =
+        deserializeJson(virtualMultimeterRequestDoc, body);
+    if (!staticParseErr) {
+      docPtr = &virtualMultimeterRequestDoc;
+    } else if (staticParseErr != DeserializationError::NoMemory) {
+      srv->send(400, "application/json",
+                R"({"error":"Invalid JSON"})");
+      return;
     }
-    while (true) {
-      DynamicJsonDocument doc(docCapacity);
-      if (docCapacity > 0 && doc.capacity() == 0) {
-        size_t nextCapacity = shrinkConfigJsonCapacity(docCapacity);
-        if (nextCapacity == 0) {
-          srv->send(500, "application/json",
-                    R"({"error":"alloc_failed"})");
-          return;
-        }
-        logPrintf(
-            "Virtual multimeter config JSON allocation failed at %u bytes; retrying with %u",
-            static_cast<unsigned>(docCapacity),
-            static_cast<unsigned>(nextCapacity));
-        docCapacity = nextCapacity;
-        continue;
+
+    std::unique_ptr<DynamicJsonDocument> dynamicDoc;
+    if (!docPtr) {
+      size_t docCapacity = configJsonCapacityForPayload(body.length());
+      if (docCapacity == 0) {
+        docCapacity = configJsonCapacityForPayload(0);
       }
-      DeserializationError parseErr = deserializeJson(doc, body);
-      if (parseErr == DeserializationError::NoMemory &&
-          docCapacity < CONFIG_JSON_MAX_CAPACITY) {
-        size_t nextCapacity = growConfigJsonCapacity(docCapacity);
-        if (nextCapacity == docCapacity) {
+      while (true) {
+        dynamicDoc.reset(new DynamicJsonDocument(docCapacity));
+        if (docCapacity > 0 && dynamicDoc->capacity() == 0) {
+          size_t nextCapacity = shrinkConfigJsonCapacity(docCapacity);
+          if (nextCapacity == 0) {
+            srv->send(500, "application/json",
+                      R"({"error":"alloc_failed"})");
+            return;
+          }
+          logPrintf(
+              "Virtual multimeter config JSON allocation failed at %u bytes; retrying with %u",
+              static_cast<unsigned>(docCapacity),
+              static_cast<unsigned>(nextCapacity));
+          docCapacity = nextCapacity;
+          continue;
+        }
+        DeserializationError parseErr = deserializeJson(*dynamicDoc, body);
+        if (parseErr == DeserializationError::NoMemory &&
+            docCapacity < CONFIG_JSON_MAX_CAPACITY) {
+          size_t nextCapacity = growConfigJsonCapacity(docCapacity);
+          if (nextCapacity == docCapacity) {
+            srv->send(400, "application/json",
+                      R"({"error":"Invalid JSON"})");
+            return;
+          }
+          docCapacity = nextCapacity;
+          continue;
+        }
+        if (parseErr) {
           srv->send(400, "application/json",
                     R"({"error":"Invalid JSON"})");
           return;
         }
-        docCapacity = nextCapacity;
-        continue;
+        docPtr = dynamicDoc.get();
+        break;
       }
-      if (parseErr) {
-        srv->send(400, "application/json",
-                  R"({"error":"Invalid JSON"})");
-        return;
-      }
-      JsonVariantConst channelsVariant;
-      if (doc.containsKey("channels")) {
-        channelsVariant = doc["channels"];
-      } else if (doc.containsKey("virtualMultimeter")) {
-        channelsVariant = doc["virtualMultimeter"];
-      } else {
-        channelsVariant = doc.as<JsonVariantConst>();
-      }
-      VirtualMultimeterConfig newConfig;
-      clearVirtualMultimeterConfig(newConfig);
-      bool parsedChannels = false;
-      if (!channelsVariant.isNull()) {
-        JsonArrayConst arr = channelsVariant.as<JsonArrayConst>();
-        if (!arr.isNull()) {
-          parseMeterChannelArray(arr, newConfig);
-          parsedChannels = true;
-        } else {
-          JsonObjectConst obj = channelsVariant.as<JsonObjectConst>();
-          if (!obj.isNull()) {
-            parseMeterChannelObject(obj, newConfig);
-            parsedChannels = true;
-          }
-        }
-      } else {
+    }
+
+    if (!docPtr) {
+      srv->send(500, "application/json",
+                R"({"error":"alloc_failed"})");
+      return;
+    }
+
+    JsonDocument &doc = *docPtr;
+    JsonVariantConst channelsVariant;
+    if (doc.containsKey("channels")) {
+      channelsVariant = doc["channels"];
+    } else if (doc.containsKey("virtualMultimeter")) {
+      channelsVariant = doc["virtualMultimeter"];
+    } else {
+      channelsVariant = doc.as<JsonVariantConst>();
+    }
+    VirtualMultimeterConfig newConfig;
+    clearVirtualMultimeterConfig(newConfig);
+    bool parsedChannels = false;
+    if (!channelsVariant.isNull()) {
+      JsonArrayConst arr = channelsVariant.as<JsonArrayConst>();
+      if (!arr.isNull()) {
+        parseMeterChannelArray(arr, newConfig);
         parsedChannels = true;
+      } else {
+        JsonObjectConst obj = channelsVariant.as<JsonObjectConst>();
+        if (!obj.isNull()) {
+          parseMeterChannelObject(obj, newConfig);
+          parsedChannels = true;
+        }
       }
-      if (!parsedChannels) {
-        srv->send(400, "application/json",
-                  R"({"error":"invalid_channels"})");
-        return;
-      }
-      Config previousConfig = config;
-      config.virtualMultimeter = newConfig;
-      if (!saveVirtualConfig()) {
-        config.virtualMultimeter = previousConfig.virtualMultimeter;
-        srv->send(500, "application/json",
-                  R"({"error":"save_failed"})");
-        return;
-      }
-      String verifyError;
-      if (!verifyConfigStored(config, VIRTUAL_CONFIG_FILE_PATH,
-                              CONFIG_SECTION_VIRTUAL, verifyError)) {
+    } else {
+      parsedChannels = true;
+    }
+    if (!parsedChannels) {
+      srv->send(400, "application/json",
+                R"({"error":"invalid_channels"})");
+      return;
+    }
+    Config previousConfig = config;
+    config.virtualMultimeter = newConfig;
+    if (!saveVirtualConfig()) {
+      config.virtualMultimeter = previousConfig.virtualMultimeter;
+      srv->send(500, "application/json",
+                R"({"error":"save_failed"})");
+      return;
+    }
+    String verifyError;
+    if (!verifyConfigStored(config, VIRTUAL_CONFIG_FILE_PATH,
+                            CONFIG_SECTION_VIRTUAL, verifyError)) {
         logPrintf("Virtual multimeter verification failed: %s",
                   verifyError.c_str());
         config.virtualMultimeter = previousConfig.virtualMultimeter;
