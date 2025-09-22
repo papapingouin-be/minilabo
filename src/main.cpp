@@ -43,6 +43,12 @@ extern "C" {
 #include "virtual_lab/Oscilloscope.h"
 #include "virtual_lab/VirtualWorkspace.h"
 
+enum class SafeModeReason : uint8_t {
+  None = 0,
+  CrashLoop,
+  RestartLoop,
+};
+
 static void logPrintf(const char *fmt, ...);
 static void logMessage(const String &msg);
 
@@ -52,6 +58,10 @@ static void serviceScheduledRestart(unsigned long now);
 static bool scheduleRestart(const String &reason);
 static bool scheduleRestart(const __FlashStringHelper *reason);
 static bool scheduleRestart(const char *reason);
+
+static void updateSafeModeStateFromGuard();
+static const char *safeModeReasonKey(SafeModeReason reason);
+static const char *safeModeReasonDescription(SafeModeReason reason);
 
 static bool ensureUserDirectory();
 static String toRelativeUserPath(const String &fsPath);
@@ -79,6 +89,8 @@ static unsigned long bootStartedMillis = 0;
 static bool restartPending = false;
 static unsigned long restartScheduledAt = 0;
 static String restartPendingReason;
+static bool safeModeActive = false;
+static SafeModeReason safeModeReason = SafeModeReason::None;
 
 static bool logStorageReady = false;
 static bool littleFsFormatAttempted = false;
@@ -190,6 +202,45 @@ static const __FlashStringHelper *describeResetReason(int reason) {
   }
 }
 
+static const char *safeModeReasonKey(SafeModeReason reason) {
+  switch (reason) {
+    case SafeModeReason::CrashLoop:
+      return "crash_loop";
+    case SafeModeReason::RestartLoop:
+      return "restart_loop";
+    default:
+      return "none";
+  }
+}
+
+static const char *safeModeReasonDescription(SafeModeReason reason) {
+  switch (reason) {
+    case SafeModeReason::CrashLoop:
+      return "crash loop";
+    case SafeModeReason::RestartLoop:
+      return "restart loop";
+    default:
+      return "unspecified";
+  }
+}
+
+static void updateSafeModeStateFromGuard() {
+  bool crashLoop =
+      restartGuardData.consecutiveAbnormalResets >= RESTART_LOOP_THRESHOLD;
+  bool restartLoop =
+      restartGuardData.consecutiveSoftResets >= RESTART_LOOP_THRESHOLD;
+  if (crashLoop) {
+    safeModeActive = true;
+    safeModeReason = SafeModeReason::CrashLoop;
+  } else if (restartLoop) {
+    safeModeActive = true;
+    safeModeReason = SafeModeReason::RestartLoop;
+  } else {
+    safeModeActive = false;
+    safeModeReason = SafeModeReason::None;
+  }
+}
+
 static void initRestartGuard() {
   RestartGuardData stored;
   if (ESP.rtcUserMemoryRead(RESTART_GUARD_RTC_OFFSET,
@@ -233,6 +284,7 @@ static void initRestartGuard() {
       restartGuardData.consecutiveAbnormalResets >= RESTART_LOOP_THRESHOLD;
   restartLoopProtectionDueToCrash =
       restartGuardData.consecutiveAbnormalResets >= RESTART_LOOP_THRESHOLD;
+  updateSafeModeStateFromGuard();
 }
 
 static bool scheduleRestart(const String &reason) {
@@ -292,6 +344,7 @@ static void serviceRestartGuard(unsigned long now) {
     return;
   }
   restartGuardClearedThisBoot = true;
+  bool wasSafeModeActive = safeModeActive;
   bool hadProtection = restartLoopProtectionActive;
   bool hadCrashProtection = restartLoopProtectionDueToCrash;
   bool hadSoftCount = restartGuardData.consecutiveSoftResets > 0;
@@ -301,6 +354,13 @@ static void serviceRestartGuard(unsigned long now) {
   restartLoopProtectionActive = false;
   restartLoopProtectionDueToCrash = false;
   persistRestartGuardData();
+  updateSafeModeStateFromGuard();
+  if (wasSafeModeActive && !safeModeActive) {
+    logMessage(F("Safe mode cleared after stable uptime; reinitialising hardware"));
+    setupSensors();
+    updateOutputs();
+    updateInputs();
+  }
   if (hadProtection) {
     if (hadCrashProtection) {
       logMessage(F("Crash loop protection cleared after stable uptime"));
@@ -3317,6 +3377,19 @@ static void populateConfigJson(JsonDocument &doc,
       o["pin"] = config.peers[i].pin;
     }
   }
+  if (includeRuntimeFields) {
+    JsonObject guard = doc.createNestedObject("restartGuard");
+    guard["safeMode"] = safeModeActive;
+    guard["reason"] = safeModeReasonKey(safeModeReason);
+    guard["restartProtection"] = restartLoopProtectionActive;
+    guard["crashLoop"] = restartLoopProtectionDueToCrash;
+    guard["softResets"] =
+        static_cast<uint32_t>(restartGuardData.consecutiveSoftResets);
+    guard["abnormalResets"] =
+        static_cast<uint32_t>(restartGuardData.consecutiveAbnormalResets);
+    guard["clearWindowMs"] = static_cast<uint32_t>(RESTART_CLEAR_UPTIME_MS);
+    guard["clearedThisBoot"] = restartGuardClearedThisBoot;
+  }
 }
 
 static bool buildConfigJsonPayload(String &payload,
@@ -4327,6 +4400,14 @@ static void disableOutputHardware(const OutputConfig &oc,
 }
 
 static void applyIoRuntimeChanges(const Config &previousConfig) {
+  if (safeModeActive) {
+    static bool logged = false;
+    if (!logged) {
+      logMessage(F("Safe mode active: deferring IO runtime changes"));
+      logged = true;
+    }
+    return;
+  }
   for (uint8_t i = 0; i < previousConfig.outputCount && i < MAX_OUTPUTS; ++i) {
     const OutputConfig &prevOutput = previousConfig.outputs[i];
     const OutputConfig *current = findOutputByName(config, prevOutput.name);
@@ -5208,6 +5289,8 @@ static void handleInterfaceConfigSetRequest(ServerT *srv, const String &body) {
     respDoc["restart"] = restartAccepted ? "scheduled" : "blocked";
     if (!restartAccepted) {
       respDoc["safeMode"] = true;
+      respDoc["safeModeReason"] = safeModeReasonKey(safeModeReason);
+      respDoc["restartProtection"] = restartLoopProtectionActive;
     }
     String payload;
     serializeJson(respDoc, payload);
@@ -5472,6 +5555,14 @@ void setupWiFi() {
 // modules explicitly enabled via config will be initialised.  PWM
 // frequency is set globally according to the first active output.
 void setupSensors() {
+  if (safeModeActive) {
+    static bool logged = false;
+    if (!logged) {
+      logMessage(F("Safe mode active: skipping sensor initialisation"));
+      logged = true;
+    }
+    return;
+  }
   if (config.modules.ads1115) {
     ads.begin();
     ads.setGain(GAIN_ONE); // ±4.096 V range
@@ -5517,11 +5608,18 @@ void setupSensors() {
 // depending on the input type.  Values are stored in the InputConfig
 // structure for later retrieval and broadcast.
 void updateInputs() {
+  bool hardwareSuppressed = safeModeActive;
+  bool skippedHardware = false;
   // Collect a timestamp for this update if needed in the future
   for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
     InputConfig &ic = config.inputs[i];
     if (!ic.active || ic.type == INPUT_DISABLED) {
       ic.value = NAN;
+      continue;
+    }
+    if (hardwareSuppressed && ic.type != INPUT_REMOTE) {
+      ic.value = NAN;
+      skippedHardware = true;
       continue;
     }
     switch (ic.type) {
@@ -5593,12 +5691,27 @@ void updateInputs() {
         break;
     }
   }
+  if (hardwareSuppressed && skippedHardware) {
+    static bool logged = false;
+    if (!logged) {
+      logMessage(F("Safe mode active: hardware input sampling suspended"));
+      logged = true;
+    }
+  }
 }
 
 // Update outputs.  Called when an output value changes.  Maps a
 // physical value into a PWM duty cycle or digital level.  The actual
 // value is stored in the OutputConfig for status reporting.
 void updateOutputs() {
+  if (safeModeActive) {
+    static bool logged = false;
+    if (!logged) {
+      logMessage(F("Safe mode active: output updates deferred"));
+      logged = true;
+    }
+    return;
+  }
   for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
     OutputConfig &oc = config.outputs[i];
     if (!oc.active || oc.type == OUTPUT_DISABLED) continue;
@@ -5844,6 +5957,11 @@ void registerRoutes(ServerT &server) {
     DynamicJsonDocument doc(256);
     doc["status"] = "ok";
     doc["expiresIn"] = static_cast<uint32_t>(remaining);
+    doc["safeMode"] = safeModeActive;
+    doc["restartProtection"] = restartLoopProtectionActive;
+    if (safeModeActive) {
+      doc["safeModeReason"] = safeModeReasonKey(safeModeReason);
+    }
     String payload;
     serializeJson(doc, payload);
     srv->send(200, "application/json", payload);
@@ -6288,13 +6406,28 @@ void registerRoutes(ServerT &server) {
     }
     updateOutputs();
     saveIoConfig();
-    srv->send(200, "application/json", R"({"status":"ok"})");
+    DynamicJsonDocument resp(192);
+    resp["status"] = "ok";
+    if (safeModeActive) {
+      resp["applied"] = "deferred";
+      resp["reason"] = "safe_mode";
+      resp["safeModeReason"] = safeModeReasonKey(safeModeReason);
+    } else {
+      resp["applied"] = "immediate";
+    }
+    String payload;
+    serializeJson(resp, payload);
+    srv->send(200, "application/json", payload);
   });
 
   server.on("/api/inputs", HTTP_GET, [&server]() {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
     DynamicJsonDocument doc(2048);
+    doc["safeMode"] = safeModeActive;
+    if (safeModeActive) {
+      doc["safeModeReason"] = safeModeReasonKey(safeModeReason);
+    }
     JsonArray arr = doc.createNestedArray("inputs");
     for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
       const InputConfig &ic = config.inputs[i];
@@ -6313,6 +6446,10 @@ void registerRoutes(ServerT &server) {
     auto *srv = &server;
     if (!requireAuth(srv)) return;
     DynamicJsonDocument doc(1024);
+    doc["safeMode"] = safeModeActive;
+    if (safeModeActive) {
+      doc["safeModeReason"] = safeModeReasonKey(safeModeReason);
+    }
     JsonArray arr = doc.createNestedArray("outputs");
     for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
       const OutputConfig &oc = config.outputs[i];
@@ -7120,6 +7257,12 @@ static void diagnosticHttp() {
   IPAddress ip = (WiFi.getMode() == WIFI_STA) ? WiFi.localIP() : WiFi.softAPIP();
   logPrintf("Local IP: %s", ip.toString().c_str());
   logPrintf("WiFi mode: %d", static_cast<int>(WiFi.getMode()));
+  logPrintf("Restart guard soft=%u abnormal=%u active=%s",
+            static_cast<unsigned>(restartGuardData.consecutiveSoftResets),
+            static_cast<unsigned>(restartGuardData.consecutiveAbnormalResets),
+            restartLoopProtectionActive ? "yes" : "no");
+  logPrintf("Safe mode: %s",
+            safeModeActive ? safeModeReasonKey(safeModeReason) : "inactive");
 }
 // Arduino setup entry point.  Serial is initialised for debug output.
 // Configuration is loaded or initialised.  Wi-Fi, sensors and the
@@ -7152,6 +7295,11 @@ void setup() {
       logPrintf("Detected %u consecutive soft restarts before this boot",
                 static_cast<unsigned>(restartGuardData.consecutiveSoftResets));
     }
+  }
+  if (safeModeActive) {
+    logMessage(String(F("Safe mode active (")) +
+               safeModeReasonDescription(safeModeReason) +
+               F("); hardware initialisation deferred until uptime stabilises"));
   }
   initFirmwareVersion();
   randomSeed(analogRead(A0) ^ micros() ^ ESP.getCycleCount());
