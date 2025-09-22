@@ -3337,7 +3337,13 @@ static bool loadConfigFromPath(const char *path,
     return false;
   }
   size_t size = f.size();
-  std::unique_ptr<uint8_t[]> raw(new uint8_t[size > 0 ? size : 1]);
+  size_t rawSize = size > 0 ? size : 1;
+  std::unique_ptr<uint8_t[]> raw(new (std::nothrow) uint8_t[rawSize]);
+  if (!raw) {
+    logPrintf("Failed to allocate %s config buffer (%u bytes)", label,
+              static_cast<unsigned>(rawSize));
+    return false;
+  }
   size_t read = f.read(raw.get(), size);
   f.close();
   if (read > size) {
@@ -3377,7 +3383,13 @@ static bool loadConfigFromPath(const char *path,
         static_cast<unsigned>(meta.checksum));
   }
 
-  std::unique_ptr<char[]> buf(new char[jsonLength + 1]);
+  size_t bufLength = jsonLength + 1;
+  std::unique_ptr<char[]> buf(new (std::nothrow) char[bufLength]);
+  if (!buf) {
+    logPrintf("Failed to allocate %s config JSON buffer (%u bytes)", label,
+              static_cast<unsigned>(bufLength));
+    return false;
+  }
   if (jsonLength > 0) {
     memcpy(buf.get(), jsonPtr, jsonLength);
   }
@@ -4641,7 +4653,14 @@ static bool verifyConfigStored(const Config &expected,
     return false;
   }
   size_t size = f.size();
-  std::unique_ptr<uint8_t[]> raw(new uint8_t[size > 0 ? size : 1]);
+  size_t rawSize = size > 0 ? size : 1;
+  std::unique_ptr<uint8_t[]> raw(new (std::nothrow) uint8_t[rawSize]);
+  if (!raw) {
+    errorDetail = "alloc_failed";
+    logPrintf("Failed to allocate verification buffer for %s (%u bytes)", path,
+              static_cast<unsigned>(rawSize));
+    return false;
+  }
   size_t read = f.read(raw.get(), size);
   f.close();
   ConfigRecordMetadata meta;
@@ -4676,7 +4695,14 @@ static bool verifyConfigStored(const Config &expected,
     }
   }
 
-  std::unique_ptr<char[]> buf(new char[jsonLength + 1]);
+  size_t bufLength = jsonLength + 1;
+  std::unique_ptr<char[]> buf(new (std::nothrow) char[bufLength]);
+  if (!buf) {
+    errorDetail = "alloc_failed";
+    logPrintf("Failed to allocate verification JSON buffer for %s (%u bytes)",
+              path, static_cast<unsigned>(bufLength));
+    return false;
+  }
   if (jsonLength > 0) {
     memcpy(buf.get(), jsonPtr, jsonLength);
   }
@@ -4809,7 +4835,12 @@ static void handleIoConfigSaveRequest(ServerT *srv,
   recordIoSaveStart(&progress, "parse_json", "Analyse du JSON reçu");
   std::unique_ptr<DynamicJsonDocument> docPtr;
   while (true) {
-    docPtr.reset(new DynamicJsonDocument(docCapacity));
+    docPtr.reset(new (std::nothrow) DynamicJsonDocument(docCapacity));
+    if (!docPtr) {
+      logPrintf("IO configuration JSON allocation failed (%u bytes)",
+                static_cast<unsigned>(docCapacity));
+      break;
+    }
     if (docCapacity > 0 && docPtr->capacity() == 0) {
       break;
     }
@@ -5608,7 +5639,17 @@ void processUdp() {
   int packetSize = udp.parsePacket();
   while (packetSize > 0) {
     if (packetSize > 0 && packetSize < 1024) {
-      std::unique_ptr<char[]> buf(new char[packetSize + 1]);
+      size_t bufSize = static_cast<size_t>(packetSize) + 1;
+      std::unique_ptr<char[]> buf(new (std::nothrow) char[bufSize]);
+      if (!buf) {
+        logPrintf("Failed to allocate UDP receive buffer (%u bytes)",
+                  static_cast<unsigned>(bufSize));
+        int discard = packetSize;
+        while (discard-- > 0 && udp.available()) {
+          udp.read();
+        }
+        break;
+      }
       int len = udp.read(buf.get(), packetSize);
       if (len > 0) {
         buf[len] = '\0';
@@ -5869,8 +5910,11 @@ void registerRoutes(ServerT &server) {
         docCapacity = configJsonCapacityForPayload(0);
       }
       while (true) {
-        dynamicDoc.reset(new DynamicJsonDocument(docCapacity));
-        if (docCapacity > 0 && dynamicDoc->capacity() == 0) {
+        dynamicDoc.reset(
+            new (std::nothrow) DynamicJsonDocument(docCapacity));
+        bool insufficientMemory =
+            !dynamicDoc || (docCapacity > 0 && dynamicDoc->capacity() == 0);
+        if (insufficientMemory) {
           size_t nextCapacity = shrinkConfigJsonCapacity(docCapacity);
           if (nextCapacity == 0) {
             srv->send(500, "application/json",
