@@ -3709,6 +3709,34 @@ static bool saveIoConfigDirect(IoSaveProgress *progress, String &errorCode) {
                      existing ? "Ancien fichier détecté"
                               : "Aucun fichier existant");
 
+  bool hadPrimary = existing;
+  bool backupCreated = false;
+  recordIoSaveStart(progress, "prepare_backup",
+                    hadPrimary ? "Sauvegarde de la configuration actuelle"
+                               : "Aucune configuration précédente à sauvegarder");
+  bool backupReady = true;
+  String backupMessage;
+  if (hadPrimary) {
+    if (LittleFS.exists(IO_CONFIG_BACKUP_FILE_PATH) &&
+        !LittleFS.remove(IO_CONFIG_BACKUP_FILE_PATH)) {
+      backupReady = false;
+      backupMessage = "Impossible de supprimer l'ancienne sauvegarde";
+    } else if (!LittleFS.rename(IO_CONFIG_FILE_PATH, IO_CONFIG_BACKUP_FILE_PATH)) {
+      backupReady = false;
+      backupMessage = "Impossible de sauvegarder la configuration précédente";
+    } else {
+      backupCreated = true;
+      backupMessage = "Configuration précédente sauvegardée";
+    }
+  } else {
+    backupMessage = "Aucune configuration précédente";
+  }
+  recordIoSaveFinish(progress, "prepare_backup", backupReady, backupMessage);
+  if (!backupReady) {
+    errorCode = "backup_rotate_failed";
+    return false;
+  }
+
   recordIoSaveStart(progress, "open_file",
                     "Ouverture directe du fichier de configuration");
   File file = LittleFS.open(IO_CONFIG_FILE_PATH, "w");
@@ -3716,6 +3744,18 @@ static bool saveIoConfigDirect(IoSaveProgress *progress, String &errorCode) {
     errorCode = "direct_open_failed";
     recordIoSaveFinish(progress, "open_file", false,
                        "Impossible d'ouvrir io_config.json");
+    if (backupCreated) {
+      recordIoSaveStart(progress, "restore_backup",
+                        "Restauration de la configuration précédente");
+      bool restored =
+          LittleFS.rename(IO_CONFIG_BACKUP_FILE_PATH, IO_CONFIG_FILE_PATH);
+      recordIoSaveFinish(progress, "restore_backup", restored,
+                         restored ? "Configuration précédente restaurée"
+                                  : "Impossible de restaurer la configuration précédente");
+      if (!restored) {
+        errorCode = "restore_failed";
+      }
+    }
     return false;
   }
   recordIoSaveFinish(progress, "open_file", true,
@@ -3738,6 +3778,19 @@ static bool saveIoConfigDirect(IoSaveProgress *progress, String &errorCode) {
   if (!writeOk) {
     file.close();
     LittleFS.remove(IO_CONFIG_FILE_PATH);
+    if (backupCreated) {
+      recordIoSaveStart(progress, "restore_backup",
+                        "Restauration de la configuration précédente");
+      bool restored =
+          LittleFS.rename(IO_CONFIG_BACKUP_FILE_PATH, IO_CONFIG_FILE_PATH);
+      recordIoSaveFinish(progress, "restore_backup", restored,
+                         restored ? "Configuration précédente restaurée"
+                                  : "Impossible de restaurer la configuration précédente");
+      if (!restored) {
+        errorCode = "restore_failed";
+        return false;
+      }
+    }
     errorCode = "direct_write_failed";
     return false;
   }
@@ -3754,8 +3807,15 @@ static bool saveIoConfigDirect(IoSaveProgress *progress, String &errorCode) {
 
   recordIoSaveStart(progress, "verify_file",
                     "Vérification (méthode directe)");
-  recordIoSaveFinish(progress, "verify_file", true,
-                     "Vérification non effectuée (méthode directe)");
+  String verifyMessage = "Vérification non effectuée (méthode directe)";
+  if (!hadPrimary) {
+    verifyMessage =
+        "Vérification non effectuée (aucune configuration précédente)";
+  }
+  if (backupCreated) {
+    verifyMessage = "Sauvegarde précédente disponible (io_config.bak)";
+  }
+  recordIoSaveFinish(progress, "verify_file", true, verifyMessage);
   return true;
 }
 
