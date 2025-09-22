@@ -1558,6 +1558,10 @@ static String describePinValue(int pin);
 static String describeOptionalInt(int value);
 static uint8_t parseI2cAddress(const String &s);
 static String formatI2cAddress(uint8_t address);
+static bool virtualMultimeterConfigsMatch(
+    const VirtualMultimeterConfig &expected,
+    const VirtualMultimeterConfig &actual,
+    String &errorDetail);
 
 // ---------------------------------------------------------------------------
 // Helper utilities for robust IO configuration parsing.
@@ -3653,8 +3657,9 @@ bool saveVirtualConfig() {
   JsonObject meterObj =
       virtualMultimeterStorageDoc.createNestedObject("virtualMultimeter");
   populateVirtualMultimeterJson(meterObj, config.virtualMultimeter);
-  if (virtualMultimeterSaveBuffer.capacity() < VIRTUAL_MULTIMETER_MAX_PAYLOAD) {
-    virtualMultimeterSaveBuffer.reserve(VIRTUAL_MULTIMETER_MAX_PAYLOAD);
+  if (!virtualMultimeterSaveBuffer.reserve(VIRTUAL_MULTIMETER_MAX_PAYLOAD)) {
+    logMessage(String(label) + " buffer allocation failed");
+    return false;
   }
   virtualMultimeterSaveBuffer = "";
   if (serializeJson(virtualMultimeterStorageDoc, virtualMultimeterSaveBuffer) ==
