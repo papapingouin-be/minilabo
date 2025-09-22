@@ -98,6 +98,7 @@ static unsigned long restartScheduledAt = 0;
 static String restartPendingReason;
 static bool safeModeActive = false;
 static SafeModeReason safeModeReason = SafeModeReason::None;
+static bool debugModeActive = false;
 
 static bool logStorageReady = false;
 static bool littleFsFormatAttempted = false;
@@ -239,12 +240,15 @@ static void updateSafeModeStateFromGuard() {
   if (crashLoop) {
     safeModeActive = true;
     safeModeReason = SafeModeReason::CrashLoop;
+    debugModeActive = false;
   } else if (restartLoop) {
     safeModeActive = true;
     safeModeReason = SafeModeReason::RestartLoop;
+    debugModeActive = true;
   } else {
     safeModeActive = false;
     safeModeReason = SafeModeReason::None;
+    debugModeActive = false;
   }
 }
 
@@ -352,6 +356,7 @@ static void serviceRestartGuard(unsigned long now) {
   }
   restartGuardClearedThisBoot = true;
   bool wasSafeModeActive = safeModeActive;
+  bool wasDebugModeActive = debugModeActive;
   bool hadProtection = restartLoopProtectionActive;
   bool hadCrashProtection = restartLoopProtectionDueToCrash;
   bool hadSoftCount = restartGuardData.consecutiveSoftResets > 0;
@@ -362,6 +367,9 @@ static void serviceRestartGuard(unsigned long now) {
   restartLoopProtectionDueToCrash = false;
   persistRestartGuardData();
   updateSafeModeStateFromGuard();
+  if (wasDebugModeActive && !debugModeActive) {
+    logMessage(F("Debug mode cleared after stable uptime"));
+  }
   if (wasSafeModeActive && !safeModeActive) {
     logMessage(F("Safe mode cleared after stable uptime; reinitialising hardware"));
     setupSensors();
@@ -3388,6 +3396,7 @@ static void populateConfigJson(JsonDocument &doc,
     JsonObject guard = doc.createNestedObject("restartGuard");
     guard["safeMode"] = safeModeActive;
     guard["reason"] = safeModeReasonKey(safeModeReason);
+    guard["debugMode"] = debugModeActive;
     guard["restartProtection"] = restartLoopProtectionActive;
     guard["crashLoop"] = restartLoopProtectionDueToCrash;
     guard["softResets"] =
@@ -3620,6 +3629,14 @@ void loadConfig() {
   }
   if (!ensureUserDirectory()) {
     logMessage("Failed to ensure private directory for config");
+    setDefaultConfig();
+    applyVirtualMultimeterConfigToWorkspace(config.virtualMultimeter);
+    return;
+  }
+
+  if (debugModeActive) {
+    logMessage(
+        F("Debug mode active: skipping stored configuration files and using defaults"));
     setDefaultConfig();
     applyVirtualMultimeterConfigToWorkspace(config.virtualMultimeter);
     return;
@@ -4415,7 +4432,11 @@ static void applyIoRuntimeChanges(const Config &previousConfig) {
   if (safeModeActive) {
     static bool logged = false;
     if (!logged) {
-      logMessage(F("Safe mode active: deferring IO runtime changes"));
+      if (debugModeActive) {
+        logMessage(F("Debug mode active: IO runtime changes deferred"));
+      } else {
+        logMessage(F("Safe mode active: deferring IO runtime changes"));
+      }
       logged = true;
     }
     return;
@@ -5303,6 +5324,10 @@ static void handleInterfaceConfigSetRequest(ServerT *srv, const String &body) {
       respDoc["safeMode"] = true;
       respDoc["safeModeReason"] = safeModeReasonKey(safeModeReason);
       respDoc["restartProtection"] = restartLoopProtectionActive;
+      respDoc["debugMode"] = debugModeActive;
+      if (debugModeActive) {
+        respDoc["debugModeReason"] = safeModeReasonKey(safeModeReason);
+      }
     }
     String payload;
     serializeJson(respDoc, payload);
@@ -5570,7 +5595,11 @@ void setupSensors() {
   if (safeModeActive) {
     static bool logged = false;
     if (!logged) {
-      logMessage(F("Safe mode active: skipping sensor initialisation"));
+      if (debugModeActive) {
+        logMessage(F("Debug mode active: sensor initialisation suppressed"));
+      } else {
+        logMessage(F("Safe mode active: skipping sensor initialisation"));
+      }
       logged = true;
     }
     return;
@@ -5706,7 +5735,11 @@ void updateInputs() {
   if (hardwareSuppressed && skippedHardware) {
     static bool logged = false;
     if (!logged) {
-      logMessage(F("Safe mode active: hardware input sampling suspended"));
+      if (debugModeActive) {
+        logMessage(F("Debug mode active: hardware input sampling suspended"));
+      } else {
+        logMessage(F("Safe mode active: hardware input sampling suspended"));
+      }
       logged = true;
     }
   }
@@ -5719,7 +5752,11 @@ void updateOutputs() {
   if (safeModeActive) {
     static bool logged = false;
     if (!logged) {
-      logMessage(F("Safe mode active: output updates deferred"));
+      if (debugModeActive) {
+        logMessage(F("Debug mode active: output updates deferred"));
+      } else {
+        logMessage(F("Safe mode active: output updates deferred"));
+      }
       logged = true;
     }
     return;
@@ -5971,8 +6008,12 @@ void registerRoutes(ServerT &server) {
     doc["expiresIn"] = static_cast<uint32_t>(remaining);
     doc["safeMode"] = safeModeActive;
     doc["restartProtection"] = restartLoopProtectionActive;
+    doc["debugMode"] = debugModeActive;
     if (safeModeActive) {
       doc["safeModeReason"] = safeModeReasonKey(safeModeReason);
+    }
+    if (debugModeActive) {
+      doc["debugModeReason"] = safeModeReasonKey(safeModeReason);
     }
     String payload;
     serializeJson(doc, payload);
@@ -6420,6 +6461,10 @@ void registerRoutes(ServerT &server) {
     saveIoConfig();
     DynamicJsonDocument resp(192);
     resp["status"] = "ok";
+    resp["debugMode"] = debugModeActive;
+    if (debugModeActive) {
+      resp["debugModeReason"] = safeModeReasonKey(safeModeReason);
+    }
     if (safeModeActive) {
       resp["applied"] = "deferred";
       resp["reason"] = "safe_mode";
@@ -6437,8 +6482,12 @@ void registerRoutes(ServerT &server) {
     if (!requireAuth(srv)) return;
     DynamicJsonDocument doc(2048);
     doc["safeMode"] = safeModeActive;
+    doc["debugMode"] = debugModeActive;
     if (safeModeActive) {
       doc["safeModeReason"] = safeModeReasonKey(safeModeReason);
+    }
+    if (debugModeActive) {
+      doc["debugModeReason"] = safeModeReasonKey(safeModeReason);
     }
     JsonArray arr = doc.createNestedArray("inputs");
     for (uint8_t i = 0; i < config.inputCount && i < MAX_INPUTS; i++) {
@@ -6459,8 +6508,12 @@ void registerRoutes(ServerT &server) {
     if (!requireAuth(srv)) return;
     DynamicJsonDocument doc(1024);
     doc["safeMode"] = safeModeActive;
+    doc["debugMode"] = debugModeActive;
     if (safeModeActive) {
       doc["safeModeReason"] = safeModeReasonKey(safeModeReason);
+    }
+    if (debugModeActive) {
+      doc["debugModeReason"] = safeModeReasonKey(safeModeReason);
     }
     JsonArray arr = doc.createNestedArray("outputs");
     for (uint8_t i = 0; i < config.outputCount && i < MAX_OUTPUTS; i++) {
@@ -7275,6 +7328,7 @@ static void diagnosticHttp() {
             restartLoopProtectionActive ? "yes" : "no");
   logPrintf("Safe mode: %s",
             safeModeActive ? safeModeReasonKey(safeModeReason) : "inactive");
+  logPrintf("Debug mode: %s", debugModeActive ? "yes" : "no");
 }
 // Arduino setup entry point.  Serial is initialised for debug output.
 // Configuration is loaded or initialised.  Wi-Fi, sensors and the
@@ -7312,6 +7366,10 @@ void setup() {
     logMessage(String(F("Safe mode active (")) +
                safeModeReasonDescription(safeModeReason) +
                F("); hardware initialisation deferred until uptime stabilises"));
+  }
+  if (debugModeActive) {
+    logMessage(
+        F("Debug mode active: stored configuration ignored until files are repaired"));
   }
   initFirmwareVersion();
   randomSeed(analogRead(A0) ^ micros() ^ ESP.getCycleCount());
