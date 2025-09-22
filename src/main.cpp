@@ -5363,6 +5363,7 @@ void registerRoutes(ServerT &server) {
       srv->send(400, "application/json", R"({"error":"No body"})");
       return;
     }
+
     JsonDocument *docPtr = nullptr;
     virtualMultimeterRequestDoc.clear();
     DeserializationError staticParseErr =
@@ -5434,6 +5435,7 @@ void registerRoutes(ServerT &server) {
     } else {
       channelsVariant = doc.as<JsonVariantConst>();
     }
+
     VirtualMultimeterConfig newConfig;
     clearVirtualMultimeterConfig(newConfig);
     bool parsedChannels = false;
@@ -5452,11 +5454,13 @@ void registerRoutes(ServerT &server) {
     } else {
       parsedChannels = true;
     }
+
     if (!parsedChannels) {
       srv->send(400, "application/json",
                 R"({"error":"invalid_channels"})");
       return;
     }
+
     Config previousConfig = config;
     config.virtualMultimeter = newConfig;
     if (!saveVirtualConfig()) {
@@ -5465,38 +5469,38 @@ void registerRoutes(ServerT &server) {
                 R"({"error":"save_failed"})");
       return;
     }
+
     String verifyError;
     if (!verifyConfigStored(config, VIRTUAL_CONFIG_FILE_PATH,
                             CONFIG_SECTION_VIRTUAL, verifyError)) {
-        logPrintf("Virtual multimeter verification failed: %s",
-                  verifyError.c_str());
-        config.virtualMultimeter = previousConfig.virtualMultimeter;
-        if (!saveVirtualConfig()) {
-          logMessage(
-              "Failed to restore virtual configuration after verification failure");
-        }
-        DynamicJsonDocument errDoc(256);
-        errDoc["error"] = "verify_failed";
-        if (verifyError.length() > 0) {
-          errDoc["detail"] = verifyError;
-        }
-        String errPayload;
-        serializeJson(errDoc, errPayload);
-        srv->send(500, "application/json", errPayload);
-        return;
+      logPrintf("Virtual multimeter verification failed: %s",
+                verifyError.c_str());
+      config.virtualMultimeter = previousConfig.virtualMultimeter;
+      if (!saveVirtualConfig()) {
+        logMessage(
+            "Failed to restore virtual configuration after verification failure");
       }
-      logPrintf("Virtual multimeter configuration updated (%u channels)",
-                static_cast<unsigned>(config.virtualMultimeter.channelCount));
-      applyVirtualMultimeterConfigToWorkspace(config.virtualMultimeter);
-      DynamicJsonDocument resp(1024);
-      resp["status"] = "ok";
-      JsonObject applied = resp.createNestedObject("applied");
-      populateVirtualMultimeterJson(applied, config.virtualMultimeter);
-      String payload;
-      serializeJson(resp, payload);
-      srv->send(200, "application/json", payload);
+      DynamicJsonDocument errDoc(256);
+      errDoc["error"] = "verify_failed";
+      if (verifyError.length() > 0) {
+        errDoc["detail"] = verifyError;
+      }
+      String errPayload;
+      serializeJson(errDoc, errPayload);
+      srv->send(500, "application/json", errPayload);
       return;
     }
+
+    logPrintf("Virtual multimeter configuration updated (%u channels)",
+              static_cast<unsigned>(config.virtualMultimeter.channelCount));
+    applyVirtualMultimeterConfigToWorkspace(config.virtualMultimeter);
+    DynamicJsonDocument resp(1024);
+    resp["status"] = "ok";
+    JsonObject applied = resp.createNestedObject("applied");
+    populateVirtualMultimeterJson(applied, config.virtualMultimeter);
+    String payload;
+    serializeJson(resp, payload);
+    srv->send(200, "application/json", payload);
   });
 
   server.on("/api/reboot", HTTP_POST, [&server]() {
