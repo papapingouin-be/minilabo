@@ -26,6 +26,7 @@
 #include <U8g2lib.h>
 #include <Updater.h>
 #include <memory>
+#include <new>
 #include <cstdlib>
 #include <cstring>
 #include <math.h>
@@ -52,13 +53,64 @@ static String firmwareVersion = "0.0.0";
 // avoid repeated heap allocations that fragment memory on the ESP8266.
 static constexpr size_t VIRTUAL_MULTIMETER_JSON_DOC_CAPACITY = 7168;
 static constexpr size_t VIRTUAL_MULTIMETER_MAX_PAYLOAD = 8192;
-static StaticJsonDocument<VIRTUAL_MULTIMETER_JSON_DOC_CAPACITY>
-    virtualMultimeterRequestDoc;
-static StaticJsonDocument<VIRTUAL_MULTIMETER_JSON_DOC_CAPACITY>
-    virtualMultimeterStorageDoc;
+static std::unique_ptr<DynamicJsonDocument> virtualMultimeterRequestDoc;
+static std::unique_ptr<DynamicJsonDocument> virtualMultimeterStorageDoc;
 static String virtualMultimeterSaveBuffer;
-static char
-    virtualMultimeterVerifyBuffer[VIRTUAL_MULTIMETER_MAX_PAYLOAD + 1];
+static std::unique_ptr<char[]> virtualMultimeterVerifyBuffer;
+static size_t virtualMultimeterVerifyBufferCapacity = 0;
+
+static bool ensureJsonDocument(std::unique_ptr<DynamicJsonDocument> &doc,
+                               size_t capacity,
+                               const char *label) {
+  if (doc && doc->capacity() >= capacity) {
+    return true;
+  }
+  std::unique_ptr<DynamicJsonDocument> fresh(
+      new (std::nothrow) DynamicJsonDocument(capacity));
+  if (!fresh || fresh->capacity() < capacity) {
+    logPrintf("Failed to allocate %s JSON document (%u bytes)", label,
+              static_cast<unsigned>(capacity));
+    return false;
+  }
+  doc = std::move(fresh);
+  return true;
+}
+
+static bool ensureVerifyBuffer(size_t requiredCapacity) {
+  if (virtualMultimeterVerifyBuffer &&
+      virtualMultimeterVerifyBufferCapacity >= requiredCapacity) {
+    return true;
+  }
+  std::unique_ptr<char[]> buffer(new (std::nothrow) char[requiredCapacity]);
+  if (!buffer) {
+    logPrintf("Failed to allocate virtual multimeter verify buffer (%u bytes)",
+              static_cast<unsigned>(requiredCapacity));
+    return false;
+  }
+  virtualMultimeterVerifyBuffer = std::move(buffer);
+  virtualMultimeterVerifyBufferCapacity = requiredCapacity;
+  return true;
+}
+
+static bool ensureVirtualMultimeterScratch(size_t verifyCapacity =
+                                               VIRTUAL_MULTIMETER_MAX_PAYLOAD +
+                                               1) {
+  bool ok = true;
+  if (!ensureJsonDocument(virtualMultimeterRequestDoc,
+                          VIRTUAL_MULTIMETER_JSON_DOC_CAPACITY,
+                          "virtual multimeter request")) {
+    ok = false;
+  }
+  if (!ensureJsonDocument(virtualMultimeterStorageDoc,
+                          VIRTUAL_MULTIMETER_JSON_DOC_CAPACITY,
+                          "virtual multimeter storage")) {
+    ok = false;
+  }
+  if (!ensureVerifyBuffer(verifyCapacity)) {
+    ok = false;
+  }
+  return ok;
+}
 
 static String formatFirmwareVersion() {
   String version = String(static_cast<unsigned>(BuildInfo::kFirmwareMajor));
@@ -3571,10 +3623,17 @@ static bool verifyVirtualMultimeterConfigStored(
     f.close();
     return false;
   }
+  size_t scratchCapacity = payloadLength + 1;
+  if (!ensureVirtualMultimeterScratch(scratchCapacity)) {
+    errorDetail = "alloc_failed";
+    f.close();
+    return false;
+  }
+  char *verifyBuffer = virtualMultimeterVerifyBuffer.get();
+  DynamicJsonDocument &storageDoc = *virtualMultimeterStorageDoc;
   if (payloadLength > 0) {
     size_t readLength =
-        f.read(reinterpret_cast<uint8_t *>(virtualMultimeterVerifyBuffer),
-               payloadLength);
+        f.read(reinterpret_cast<uint8_t *>(verifyBuffer), payloadLength);
     if (readLength != payloadLength) {
       errorDetail = "payload_short_read";
       f.close();
@@ -3582,24 +3641,24 @@ static bool verifyVirtualMultimeterConfigStored(
     }
   }
   f.close();
-  virtualMultimeterVerifyBuffer[payloadLength] = '\0';
-  uint32_t actualChecksum = crc32ForBuffer(
-      reinterpret_cast<const uint8_t *>(virtualMultimeterVerifyBuffer),
-      payloadLength);
+  verifyBuffer[payloadLength] = '\0';
+  uint32_t actualChecksum =
+      crc32ForBuffer(reinterpret_cast<const uint8_t *>(verifyBuffer),
+                     payloadLength);
   if (actualChecksum != storedChecksum) {
     errorDetail = "checksum_mismatch";
     return false;
   }
-  virtualMultimeterStorageDoc.clear();
-  DeserializationError err = deserializeJson(
-      virtualMultimeterStorageDoc, virtualMultimeterVerifyBuffer, payloadLength);
+  storageDoc.clear();
+  DeserializationError err =
+      deserializeJson(storageDoc, verifyBuffer, payloadLength);
   if (err) {
     errorDetail = String("json parse failed: ") + err.c_str();
     return false;
   }
   VirtualMultimeterConfig reloaded;
   clearVirtualMultimeterConfig(reloaded);
-  JsonVariantConst meterVar = virtualMultimeterStorageDoc["virtualMultimeter"];
+  JsonVariantConst meterVar = storageDoc["virtualMultimeter"];
   if (!meterVar.isNull()) {
     parseVirtualMultimeterVariant(meterVar, reloaded);
   }
@@ -3653,17 +3712,23 @@ bool saveVirtualConfig() {
   if (!ensureConfigDirectory(request)) {
     return false;
   }
-  virtualMultimeterStorageDoc.clear();
+  if (!ensureJsonDocument(virtualMultimeterStorageDoc,
+                          VIRTUAL_MULTIMETER_JSON_DOC_CAPACITY,
+                          "virtual multimeter storage")) {
+    logMessage(String(label) + " document allocation failed");
+    return false;
+  }
+  DynamicJsonDocument &storageDoc = *virtualMultimeterStorageDoc;
+  storageDoc.clear();
   JsonObject meterObj =
-      virtualMultimeterStorageDoc.createNestedObject("virtualMultimeter");
+      storageDoc.createNestedObject("virtualMultimeter");
   populateVirtualMultimeterJson(meterObj, config.virtualMultimeter);
   if (!virtualMultimeterSaveBuffer.reserve(VIRTUAL_MULTIMETER_MAX_PAYLOAD)) {
     logMessage(String(label) + " buffer allocation failed");
     return false;
   }
   virtualMultimeterSaveBuffer = "";
-  if (serializeJson(virtualMultimeterStorageDoc, virtualMultimeterSaveBuffer) ==
-      0) {
+  if (serializeJson(storageDoc, virtualMultimeterSaveBuffer) == 0) {
     logMessage(String(label) + " config JSON encode failed");
     return false;
   }
@@ -5633,12 +5698,20 @@ void registerRoutes(ServerT &server) {
       return;
     }
 
+    if (!ensureJsonDocument(virtualMultimeterRequestDoc,
+                            VIRTUAL_MULTIMETER_JSON_DOC_CAPACITY,
+                            "virtual multimeter request")) {
+      srv->send(500, "application/json",
+                R"({"error":"alloc_failed"})");
+      return;
+    }
+
+    DynamicJsonDocument &requestDoc = *virtualMultimeterRequestDoc;
     JsonDocument *docPtr = nullptr;
-    virtualMultimeterRequestDoc.clear();
-    DeserializationError staticParseErr =
-        deserializeJson(virtualMultimeterRequestDoc, body);
+    requestDoc.clear();
+    DeserializationError staticParseErr = deserializeJson(requestDoc, body);
     if (!staticParseErr) {
-      docPtr = &virtualMultimeterRequestDoc;
+      docPtr = &requestDoc;
     } else if (staticParseErr != DeserializationError::NoMemory) {
       srv->send(400, "application/json",
                 R"({"error":"Invalid JSON"})");
@@ -6801,6 +6874,9 @@ void setup() {
     logMessage("OLED not detected (check wiring on GPIO12/GPIO14)");
   }
   loadConfig();
+  if (!ensureVirtualMultimeterScratch()) {
+    logMessage("Virtual multimeter scratch allocation failed");
+  }
   setupWiFi();
   // Start UDP listener
   udp.begin(BROADCAST_PORT);
